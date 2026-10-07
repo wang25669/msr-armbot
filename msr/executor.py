@@ -5,6 +5,8 @@ import secrets
 import time
 import uuid
 
+from msr.browser import navigate
+
 
 def run_api_phase(name, phase, token, pr, profile_path, config, api):
     rg = {'country': pr['country'], 'language': pr['language']}
@@ -70,6 +72,56 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api):
     return '未知API阶段'
 
 
+def browser_cfg(config):
+    """浏览器可配置项(全部有默认值, 环境变量/配置文件可覆盖)。"""
+    from msr import config as C
+    cfg = C.load_json(C.HOME + '/browser.json', {}) or {}
+    import os
+    return {
+        'binary': cfg.get('binary') or os.environ.get('MSR_CHROMIUM', 'chromium'),
+        'version': cfg.get('version') or os.environ.get('MSR_EDGE_VERSION', '141'),
+        'search_budget_min': int(cfg.get('search_budget_minutes', 60)),
+        'cards_budget_min': int(cfg.get('cards_budget_minutes', 25)),
+        'headless': cfg.get('headless', True),
+    }
+
+
 def run_browser_phase(name, phase, token, pr, profile_path, config):
-    """浏览器阶段: 搜索/每日活动卡/视觉 —— Task 4-5 迁移, 先占位。"""
-    raise NotImplementedError('浏览器阶段 %s 待 Task 4-5 迁移' % phase)
+    """浏览器阶段: 起 headless chromium -> 注入 cookie -> 执行 -> 停。"""
+    from msr import browser
+    from msr import tasks_browser as tb
+
+    bc = browser_cfg(config)
+    chrome_dir = profile_path + '/chrome'
+    ch = browser.Chromium(binary=bc['binary'], user_data_dir=chrome_dir,
+                          version=bc['version'], log=config.log)
+    tabs = ch.start()
+    tab = ch.new_tab('about:blank')
+    try:
+        cdp = ch.attach(tab)
+        # cookie: profile 里 cookie.json (B1 登录方案)
+        cookies = config.load_json(config.pfile(name, 'cookie.json'))
+        if cookies:
+            browser.inject_cookies(cdp, cookies, log=config.log)
+
+        if phase == 'search':
+            return tb.phase_search(name, cdp, pr,
+                                   budget_seconds=bc['search_budget_min'] * 60,
+                                   log=config.log)
+        if phase == 'quick':
+            navigate(cdp, 'https://rewards.bing.com/')
+            return tb.phase_quick(name, cdp, pr,
+                                  budget_seconds=bc['cards_budget_min'] * 60,
+                                  log=config.log)
+        if phase == 'earn':
+            navigate(cdp, 'https://rewards.bing.com/')
+            return tb.phase_earn(name, cdp, pr,
+                                 budget_seconds=bc['cards_budget_min'] * 60,
+                                 log=config.log)
+        return '未知浏览器阶段 %s' % phase
+    finally:
+        try:
+            ch.close_tab(tab.get('id'))
+        except Exception:
+            pass
+        ch.stop()
