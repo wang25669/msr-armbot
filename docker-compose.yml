@@ -2,10 +2,10 @@ version: '3.8'
 
 services:
   msr-bot:
+    image: ghcr.io/wang25669/msr-armbot:latest
     build:
       context: .
       dockerfile: Dockerfile
-    image: msr-armbot:latest
     container_name: msr-armbot
     restart: unless-stopped
     ports:

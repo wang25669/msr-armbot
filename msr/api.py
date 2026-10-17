@@ -109,34 +109,35 @@ def device_code_login(name, proxy=None):
     return d
 
 
+def poll_device_code_once(name, device_code, proxy=None):
+    """单次尝试获取 device code 授权结果。若仍在等待授权返回 None，成功返回 token dict，失败抛出 AuthError。"""
+    try:
+        d = _token_post(name, {'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
+                               'client_id': CLIENT_ID, 'device_code': device_code}, proxy=proxy)
+        if d.get('refresh_token') or d.get('access_token'):
+            return d
+        if d.get('error') in ('authorization_pending', 'slow_down'):
+            return None
+        raise AuthError('device code 错误: %s' % d.get('error'))
+    except urllib.error.HTTPError as ex:
+        body = ex.read().decode()
+        try:
+            d = json.loads(body)
+        except Exception:
+            raise AuthError('token 端点异常: %s %s' % (ex.code, body[:120]))
+        if d.get('error') in ('authorization_pending', 'slow_down'):
+            return None
+        raise AuthError('授权失败: %s (%s)' % (d.get('error'), d.get('error_description', '')[:100]))
+
+
 def poll_device_code(name, device_code, interval=5, timeout=300, proxy=None):
     """轮询 token 端点直到用户完成授权。返回 token dict。"""
     t0 = time.time()
-    while time.time() < deadline if 'deadline' in locals() else (time.time() - t0 < timeout):
+    while time.time() - t0 < timeout:
         time.sleep(interval)
-        try:
-            d = _token_post(name, {'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
-                                   'client_id': CLIENT_ID, 'device_code': device_code}, proxy=proxy)
-            if d.get('refresh_token') or d.get('access_token'):
-                return d
-            if d.get('error') == 'authorization_pending':
-                continue
-            if d.get('error') == 'slow_down':
-                interval += 5
-                continue
-            raise AuthError('device code 错误: %s' % d.get('error'))
-        except urllib.error.HTTPError as ex:
-            body = ex.read().decode()
-            try:
-                d = json.loads(body)
-            except Exception:
-                raise AuthError('token 端点异常: %s %s' % (ex.code, body[:120]))
-            if d.get('error') == 'authorization_pending':
-                continue
-            if d.get('error') == 'slow_down':
-                interval += 5
-                continue
-            raise AuthError('授权失败: %s (%s)' % (d.get('error'), d.get('error_description', '')[:100]))
+        res = poll_device_code_once(name, device_code, proxy=proxy)
+        if res:
+            return res
     raise AuthError('等待授权超时(%ds)' % timeout)
 
 

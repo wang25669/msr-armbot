@@ -53,14 +53,57 @@ refresh_token 90 天滚动续期(每次成功刷新就续), 正常不需要反�
 ## 运行
 
 ```bash
+python3 -m msr web --port 8080           # 启动内置 Web 管理控制台 (浏览器打开 http://ip:8080)
 python3 -m msr run --all                 # 全部账号串行(账号间随机等 15-40 分钟)
 python3 -m msr run sg                    # 只跑一个账号(含后台 edge30m 与前台单会话浏览器并行编排)
 python3 -m msr run sg --dry-run          # 只打印执行计划, 不执行
 python3 -m msr run sg --only=dailyset    # 单跑某阶段: appcheckin/appread/edge30m/dailyset/quests/moreactivities/search/visual
+python3 -m msr run sg --fast             # 极速调试模式(所有等待压缩至 3-6 秒)
+python3 -m msr settings                  # 查看当前全局集中参数
+python3 -m msr settings --set search.dwell_min_seconds=120  # 修改参数
+python3 -m msr notify-test               # 测试 Server酱 / Webhook 推送
 python3 -m msr account sg --proxy http://127.0.0.1:7890  # 设置单个账号独立出口代理
 python3 -m msr status                    # 全部账号状态(含独立代理配置)
 python3 -m msr report                    # 当日报告
 ```
+
+## Docker 容器化一键部署 (支持 ARM64 / x86_64)
+
+无需在宿主机配置 Python 或 Chromium 环境，任意机器上仅需一个 `docker-compose.yml` 即可一键启动：
+
+```yaml
+version: '3.8'
+
+services:
+  msr-bot:
+    image: ghcr.io/wang25669/msr-armbot:latest
+    container_name: msr-armbot
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - WEB_PORT=8080
+      - CRON_SCHEDULE=30 1 * * *
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data:/data
+    shm_size: '1gb'
+    security_opt:
+      - seccomp:unconfined
+```
+
+```bash
+docker compose up -d
+```
+
+启动后在浏览器打开 `http://<服务器IP>:8080` 进入 Web 控制中心：
+1. **添加账号与独立代理**：直接在网页填写名称、设置该账号专属出口代理 (HTTP/SOCKS5)；
+2. **账号在线授权**：
+   - 方式 A (推荐设备码)：一键生成 Device Code，打开微软网址输入代码即可完成授权；
+   - 方式 B (Cookie 导入)：粘贴 Cookie-Editor 导出的 JSON 或 Raw Header，在线自动清洗校验；
+3. **集中风控参数调节**：可视化修改搜索停留秒数、卡片延迟、Server酱 SendKey 等；
+4. **任务调度与实时日志**：一键“立即运行”、“排期预览”，实时查看任务滚屏日志。
+
 
 ## 全部可配置项
 

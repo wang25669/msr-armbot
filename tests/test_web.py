@@ -1,0 +1,110 @@
+"""web 控制台 RESTful API 完整单测。"""
+import json
+import os
+import shutil
+import socket
+import sys
+import tempfile
+import threading
+import time
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from msr import config, web
+
+TMP = tempfile.mkdtemp()
+config.init(TMP)
+
+# 寻找空闲端口
+s = socket.socket()
+s.bind(('127.0.0.1', 0))
+port = s.getsockname()[1]
+s.close()
+
+# 启动 Web Server 线程
+server = web.HTTPServer(('127.0.0.1', port), web.WebHandler)
+t = threading.Thread(target=server.serve_forever)
+t.daemon = True
+t.start()
+time.sleep(0.5)
+
+base_url = f'http://127.0.0.1:{port}'
+
+try:
+    # 1. 测试 HTML 根路由
+    req = urllib.request.Request(f'{base_url}/')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        html = resp.read().decode()
+        assert 'MSR-ArmBot' in html
+    print('[OK] Web 首页渲染正常')
+
+    # 2. 测试 GET /api/status
+    req = urllib.request.Request(f'{base_url}/api/status')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode())
+        assert 'accounts' in data
+    print('[OK] /api/status 正常')
+
+    # 3. 测试 POST /api/accounts 添加账号
+    req = urllib.request.Request(f'{base_url}/api/accounts',
+                                 data=json.dumps({'name': 'web_test_acc', 'proxy': 'http://127.0.0.1:1080', 'enabled': True}).encode(),
+                                 headers={'Content-Type': 'application/json'}, method='POST')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        d = json.loads(resp.read().decode())
+        assert d.get('status') == 'ok'
+
+    accs = config.accounts()
+    assert any(a['name'] == 'web_test_acc' for a in accs)
+    print('[OK] /api/accounts 添加账号正常')
+
+    # 4. 测试 POST /api/auth/cookies 导入 Cookie
+    cookie_payload = json.dumps({
+        'name': 'web_test_acc',
+        'cookies_raw': '[{"name": "_U", "value": "val123"}, {"name": "MUID", "value": "muid456"}]'
+    }).encode()
+    req = urllib.request.Request(f'{base_url}/api/auth/cookies', data=cookie_payload,
+                                 headers={'Content-Type': 'application/json'}, method='POST')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        d = json.loads(resp.read().decode())
+        assert d['status'] == 'ok'
+        assert d['has_u'] is True
+        assert d['count'] == 2
+    print('[OK] /api/auth/cookies 导入与校验正常')
+
+    # 5. 测试 POST /api/settings 配置修改
+    req = urllib.request.Request(f'{base_url}/api/settings',
+                                 data=json.dumps({'search': {'dwell_min_seconds': 135}}).encode(),
+                                 headers={'Content-Type': 'application/json'}, method='POST')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+    from msr import settings
+    val = settings.get('search.dwell_min_seconds', home=TMP)
+    assert val == 135
+    print('[OK] /api/settings 更新全局参数正常')
+
+    # 6. 测试 GET /api/logs
+    req = urllib.request.Request(f'{base_url}/api/logs')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        text = resp.read().decode()
+        assert len(text) > 0
+    print('[OK] /api/logs 正常')
+
+    # 7. 测试 DELETE /api/accounts 删除账号
+    req = urllib.request.Request(f'{base_url}/api/accounts?name=web_test_acc', method='DELETE')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+    accs_after = config.accounts()
+    assert not any(a['name'] == 'web_test_acc' for a in accs_after)
+    print('[OK] /api/accounts 删除账号正常')
+
+finally:
+    server.shutdown()
+    shutil.rmtree(TMP)
+
+print('ALL_OK')
