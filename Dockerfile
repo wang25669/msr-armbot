@@ -1,0 +1,38 @@
+# MSR-ArmBot 跨平台多架构容器镜像 (支持 ARM64 与 x86_64)
+FROM python:3.11-slim-bookworm
+
+LABEL maintainer="wang25669"
+LABEL description="Microsoft Rewards automation container with web console"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    MSR_HOME=/data \
+    WEB_PORT=8080 \
+    CRON_SCHEDULE="30 1 * * *"
+
+# 安装 Chromium、中文字体、cron 定时器及基础依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    fonts-wqy-zenhei \
+    fonts-wqy-microhei \
+    cron \
+    ca-certificates \
+    curl \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+# 设置时区为亚洲/上海
+RUN ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && dpkg-reconfigure -f noninteractive tzdata
+
+WORKDIR /app
+
+# 复制代码
+COPY . /app
+
+RUN chmod +x /app/docker-entrypoint.sh
+
+EXPOSE 8080
+
+VOLUME ["/data"]
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

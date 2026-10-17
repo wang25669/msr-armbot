@@ -96,54 +96,132 @@ def search_counters_dom(cdp):
         return None
 
 
-def phase_search(name, cdp, pr, ch=None, budget_seconds=3600, target=None, log=print):
-    """必应 PC 搜索打卡。"""
+def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=print):
+    """必应 PC 搜索打卡 (按账户等级读动态上限，自适应冷板停留与防卡死熔断)。"""
+    from msr import settings
+    st = settings.load_settings()
+    s_cfg = st.get('search', {})
+    sch_cfg = st.get('schedule', {})
+    fast = sch_cfg.get('fast_mode', False)
+
+    dwell_min = 3 if fast else int(s_cfg.get('dwell_min_seconds', 180))
+    dwell_max = 6 if fast else int(s_cfg.get('dwell_max_seconds', 300))
+    stall_max = int(s_cfg.get('stall_max_retries', 12))
+    hard_cap = int(s_cfg.get('hard_cap_attempts', 60))
+    click_prob = float(s_cfg.get('click_result_probability', 0.85))
+    if not budget_seconds:
+        budget_seconds = int(s_cfg.get('budget_minutes', 120)) * 60
+
     domain = bing_domain(pr)
-    
+
     # 优先检查是否已满额
     c_api = search_counters_api(pr)
     if c_api and c_api.get('complete'):
-        log('PC搜索已完成: %d/%d (根据促销属性)' % (c_api['progress'], c_api['max']))
+        log('PC搜索已满额: %d/%d (根据促销属性)' % (c_api['progress'], c_api['max']))
         return '%d/%d' % (c_api['progress'], c_api['max'])
 
     # 检查 dashboard streaks
+    target_max = (c_api or {}).get('max', 60)
+    current_prog = (c_api or {}).get('progress', 0)
     try:
         navigate(cdp, 'https://rewards.bing.com/dashboard')
         time.sleep(2)
         c_dom = search_counters_dom(cdp)
-        if c_dom and c_dom.get('complete') and c_api and c_api.get('progress', 0) >= c_api.get('max', 1):
-            log('PC搜索已完成: %d/%d (根据仪表板)' % (c_dom['progress'], c_dom['max']))
-            return '%d/%d' % (c_dom['progress'], c_dom['max'])
+        if c_dom:
+            target_max = c_dom.get('max') or target_max
+            current_prog = c_dom.get('progress') or current_prog
+            if c_dom.get('complete') or current_prog >= target_max:
+                log('PC搜索已满额: %d/%d (根据仪表板)' % (current_prog, target_max))
+                return '%d/%d' % (current_prog, target_max)
     except Exception:
         pass
 
-    queries = [
-        'weather forecast', 'world news', 'python tutorial', 'best coffee machine',
-        'local events today', 'sports live scores', 'healthy dinner recipes', 'travel destinations 2026',
-        'top movies this month', 'pop music hits', 'technology news', 'health and fitness tips',
-        'home decor ideas', 'indoor gardening', 'finance and investment', 'best books 2026',
-        'scientific discoveries', 'art museums', 'electric vehicles', 'nature photography tips'
+    log('PC搜索启动: 当前进度 %d/%d (单次停留 %.1f-%.1f 分钟/词)' % (
+        current_prog, target_max, dwell_min / 60, dwell_max / 60))
+
+    queries_en = [
+        'weather forecast', 'world news today', 'python tutorial for beginners',
+        'best coffee machine review', 'local events this weekend', 'sports live scores',
+        'healthy dinner recipes', 'travel destinations 2026', 'top movies on netflix',
+        'pop music billboard', 'artificial intelligence tech news', 'indoor gardening tips',
+        'finance and investment strategies', 'best sci-fi books 2026', 'electric vehicles range',
+        'space telescope images', 'nutrition facts tips', 'smart home automation',
+        'architecture design trends', 'wildlife photography techniques'
     ]
+    queries_zh = [
+        '今日头条新闻', '天气预报查询', '最新电影票房榜', '健康养生小常识',
+        '热门旅游景点推荐', '科技创新最新进展', '家常菜谱大全做法', '新能源汽车续航排名',
+        '故宫博物院展览', '中国空间站最新动态', '世界名画高清赏析', '羽毛球世锦赛赛程',
+        '流行音乐新歌榜', '居家收纳整理技巧', '秋季润燥养生汤', '人工智能最新技术'
+    ]
+    is_cn = (pr.get('country') or '').lower() == 'cn'
+    queries = queries_zh + queries_en if is_cn else queries_en + queries_zh
     random.shuffle(queries)
-    
+
     t0 = time.time()
     searches_done = 0
-    max_searches = 30
-    
-    while time.time() - t0 < budget_seconds and searches_done < max_searches:
+    stall_count = 0
+    last_prog = current_prog
+
+    while (time.time() - t0 < budget_seconds) and (searches_done < hard_cap):
+        if current_prog >= target_max:
+            log('PC搜索达成上限: %d/%d (尝试%d次)' % (current_prog, target_max, searches_done))
+            break
+
         q = queries[searches_done % len(queries)] + ('' if searches_done < len(queries) else f' {searches_done}')
         searches_done += 1
+
         try:
             href = typed_search(cdp, q, domain)
             scroll_human(cdp)
             log('搜索[%d] %s -> %s' % (searches_done, q, str(href)[:60]))
+
+            # 模拟真人点击任意搜索结果并停留浏览
+            if random.random() < click_prob:
+                try:
+                    result_links = ev(cdp, """(() => {
+                        const anchors = [...document.querySelectorAll('#b_results .b_algo h2 a')];
+                        return anchors.filter(a => a.href && a.offsetParent).slice(0, 8).map(a => a.href);
+                    })()""") or []
+                    if result_links:
+                        pick = random.choice(result_links)
+                        navigate(cdp, pick)
+                        scroll_human(cdp)
+                except Exception:
+                    pass
         except Exception as ex:
             log('搜索[%d] 异常: %s' % (searches_done, str(ex)[:60]))
-        
-        # 搜索间随机等待 15-30s
-        time.sleep(random.uniform(15, 30))
-        
-    return '完成%d次搜索' % searches_done
+
+        # 核心节奏等待: 3-5 分钟 (等待微软冷却计数器刷新)
+        dwell = random.uniform(dwell_min, dwell_max)
+        log('搜索[%d] 模拟真人阅读停留 %.1f 分钟...' % (searches_done, dwell / 60))
+        time.sleep(dwell)
+
+        # 回读积分进度
+        new_c = None
+        try:
+            navigate(cdp, 'https://rewards.bing.com/dashboard')
+            time.sleep(2)
+            new_c = search_counters_dom(cdp)
+        except Exception:
+            pass
+
+        if new_c:
+            current_prog = new_c.get('progress', current_prog)
+            target_max = new_c.get('max', target_max)
+            log('进度回读: %d/%d' % (current_prog, target_max))
+
+            if current_prog > last_prog:
+                stall_count = 0
+                last_prog = current_prog
+            else:
+                stall_count += 1
+                log('搜索计数未推进(%d/%d)，连续 %d/%d 次' % (current_prog, target_max, stall_count, stall_max))
+                if stall_count >= stall_max:
+                    log('搜索计数连续 %d 次停滞，提前收尾(避免死磕风控)' % stall_max)
+                    break
+
+    return '%d/%d (尝试%d次)' % (current_prog, target_max, searches_done)
 
 
 # ---------- 每日活动卡 (Daily Set) ----------
@@ -453,11 +531,16 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
 
         selector = f'document.querySelectorAll("#moreactivities a[href]")[{idx}]'
         new_tabs = human_click(cdp, selector, label=text[:15], close_new=False)
+        from msr import settings
+        st = settings.load_settings()
+        fast = st.get('schedule', {}).get('fast_mode', False)
+        wmin = 3 if fast else int(st.get('cards', {}).get('attribution_wait_min', 60))
+        wmax = 6 if fast else int(st.get('cards', {}).get('attribution_wait_max', 120))
         if new_tabs and ch:
-            time.sleep(random.uniform(60, 120))
+            time.sleep(random.uniform(wmin, wmax))
             ch.close_tab(new_tabs[0])
         else:
-            time.sleep(random.uniform(10, 20))
+            time.sleep(random.uniform(min(wmin, 10), min(wmax, 20)))
         done_count += 1
 
     return '处理%d张' % done_count
