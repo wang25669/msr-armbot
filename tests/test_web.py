@@ -164,6 +164,43 @@ try:
         assert 'webgl_renderer' in new_fp
     print('[OK] /api/accounts/fingerprint 端点正常')
 
+    # 4.5 测试 POST /api/accounts/proxy-test 与 POST /api/accounts/fingerprint/align-proxy
+    from msr import geo
+    orig_probe = geo.probe_proxy_geo
+    geo.probe_proxy_geo = lambda proxy=None, timeout=7: {
+        'status': 'ok',
+        'ip': '123.45.67.89',
+        'country': 'CN',
+        'country_name': '中国',
+        'region': 'Shanghai',
+        'city': 'Shanghai',
+        'timezone': 'Asia/Shanghai',
+        'latency_ms': 42
+    }
+    try:
+        req = urllib.request.Request(f'{base_url}/api/accounts/proxy-test',
+                                     data=json.dumps({'proxy': 'http://127.0.0.1:1080', 'name': 'web_test_acc'}).encode(),
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            pt_data = json.loads(resp.read().decode())
+            assert pt_data['status'] == 'ok'
+            assert pt_data['data']['country'] == 'CN'
+            assert pt_data['data']['timezone'] == 'Asia/Shanghai'
+
+        req = urllib.request.Request(f'{base_url}/api/accounts/fingerprint/align-proxy',
+                                     data=json.dumps({'name': 'web_test_acc'}).encode(),
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            ap_data = json.loads(resp.read().decode())
+            assert ap_data['status'] == 'ok'
+            assert ap_data['timezone'] == 'Asia/Shanghai'
+            assert 'zh-CN' in ap_data['data']['locale']
+        print('[OK] /api/accounts/proxy-test 与 align-proxy 正常')
+    finally:
+        geo.probe_proxy_geo = orig_probe
+
     # 5. 测试 POST /api/settings 配置修改
     req = urllib.request.Request(f'{base_url}/api/settings',
                                  data=json.dumps({'search': {'dwell_min_seconds': 135}}).encode(),

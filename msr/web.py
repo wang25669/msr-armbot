@@ -148,14 +148,17 @@ HTML_CONTENT = """<!DOCTYPE html>
     <div id="tab-accounts" class="tab-content">
       <div class="card">
         <div class="card-title">添加 / 编辑微软账号</div>
-        <div class="grid" style="grid-template-columns: 1fr 1.5fr 1fr auto; align-items: flex-end;">
+        <div class="grid" style="grid-template-columns: 1fr 1.6fr 1fr auto; align-items: flex-end;">
           <div class="form-group">
             <label>账号名称 (唯一标识)</label>
             <input type="text" id="acc-name-input" placeholder="例如: sg_user, cn_main">
           </div>
           <div class="form-group">
             <label>独立出口代理 (支持 HTTP / SOCKS5，留空直连)</label>
-            <input type="text" id="acc-proxy-input" placeholder="http://user:pass@127.0.0.1:7890">
+            <div style="display:flex; gap:6px;">
+              <input type="text" id="acc-proxy-input" placeholder="http://user:pass@127.0.0.1:7890">
+              <button class="btn btn-secondary btn-sm" style="white-space:nowrap;" onclick="testProxyInForm()">⚡ 测试</button>
+            </div>
           </div>
           <div class="form-group">
             <label>调度偏移 (分钟)</label>
@@ -165,6 +168,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             <button class="btn" onclick="saveNewAccount()">保存账号</button>
           </div>
         </div>
+        <div id="proxy-test-box" style="display:none; margin-top:10px; padding:8px 12px; border-radius:6px; font-size:12px;"></div>
       </div>
 
       <div class="card">
@@ -660,22 +664,27 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
         <div class="form-group">
-          <label>伪装时区 (与出口代理对齐)</label>
+          <label>伪装时区 (可自由输入，如 Asia/Shanghai, Asia/Singapore)</label>
           <input type="text" id="fp-tz" placeholder="例如: Asia/Singapore">
         </div>
         <div class="form-group">
-          <label>语言设置 (Accept-Language)</label>
+          <label>语言设置 (可自由输入，如 zh-CN,zh;q=0.9,en;q=0.8)</label>
           <input type="text" id="fp-locale" placeholder="例如: zh-CN,zh;q=0.9,en;q=0.8">
         </div>
       </div>
 
+      <div style="margin: 10px 0 14px; padding: 10px 14px; background: rgba(56,189,248,0.06); border: 1px solid rgba(56,189,248,0.2); border-radius: 8px; font-size: 12px; display: flex; justify-content: space-between; align-items: center;">
+        <span style="color: var(--text-sub);">💡 时区与语言均可随意手动修改；也可一键自动探测绑定代理出口并同步：</span>
+        <button class="btn btn-secondary btn-sm" onclick="alignFingerprintWithProxy()" style="white-space:nowrap;">🌐 一键匹配绑定代理地区与时区</button>
+      </div>
+
       <div class="form-group">
-        <label>User-Agent 伪装标识</label>
+        <label>User-Agent 伪装标识 (根据当前特征自动拼装)</label>
         <input type="text" id="fp-ua" readonly style="font-size:11px; color:var(--primary); background:rgba(0,0,0,0.4);">
       </div>
 
       <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center;">
-        <button class="btn btn-secondary btn-sm" onclick="randomizeFingerprint()">🎲 重新随机派生指纹</button>
+        <button class="btn btn-secondary btn-sm" onclick="randomizeFingerprint()">🎲 重新随机派生硬件特征</button>
         <button class="btn btn-sm" onclick="saveFingerprintConfig()">保存专属指纹</button>
       </div>
     </div>
@@ -810,6 +819,18 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         const todayGained = (h7.days && h7.days.length) ? (h7.days[h7.days.length - 1].gained || 0) : 0;
 
+        const diag = a.roaming_diagnosis || { code: 'unknown', text: '⚪ 待探测', desc: '' };
+        let diagBadgeClass = 'badge-disabled';
+        if (diag.code === 'matched') diagBadgeClass = 'badge-success';
+        else if (diag.code === 'roaming') diagBadgeClass = 'badge-danger';
+        else if (diag.code === 'error') diagBadgeClass = 'badge-danger';
+        else if (diag.code === 'direct') diagBadgeClass = 'badge-info';
+
+        const pGeo = a.proxy_geo || {};
+        const proxyGeoStr = (pGeo.status === 'ok')
+          ? `${pGeo.country_name || pGeo.country} · ${pGeo.city || pGeo.region} (${pGeo.ip})`
+          : (a.proxy ? '代理待测' : '本机直连');
+
         box.innerHTML = `
           <div>
             <div class="acc-header">
@@ -820,9 +841,22 @@ HTML_CONTENT = """<!DOCTYPE html>
               </div>
             </div>
             <div class="acc-meta">
-              <div>🌍 区域: <strong>${a.country || '待探测'}</strong> (${a.language || '-'})</div>
               <div>💰 当前积分: <strong style="color:var(--primary); font-size:16px;">${a.balance || 0}</strong> <span style="font-size:12px; color:var(--success); margin-left:6px;">(今日: +${todayGained}分)</span></div>
-              <div>🌐 出口代理: <code>${a.proxy || '直连'}</code></div>
+
+              <!-- 微软三区架构与代理一致性诊断 -->
+              <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.07); border-radius:6px; padding:8px 10px; margin:7px 0;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+                  <span style="font-weight:700; color:#94a3b8; font-size:11px;">🌍 微软业务区域架构与漫游诊断</span>
+                  <span class="badge ${diagBadgeClass}" style="font-size:10.5px;">${diag.text}</span>
+                </div>
+                <div style="display:grid; grid-template-columns: 1fr 1fr 1.3fr; gap:6px; font-size:11px;">
+                  <div><span style="color:#64748b;">👤 账户档案:</span> <b>${a.account_country || '待探测'}</b></div>
+                  <div><span style="color:#64748b;">🎁 Rewards市场:</span> <b>${a.rewards_market || a.country || '待探测'}</b></div>
+                  <div><span style="color:#64748b;">🌐 代理出口:</span> <b>${proxyGeoStr}</b></div>
+                </div>
+                ${diag.desc ? `<div style="font-size:10.5px; color:#94a3b8; margin-top:4px;">💡 ${diag.desc}</div>` : ''}
+              </div>
+
               <div>⏱️ 上次运行: ${a.last_run || '从未'}</div>
               <div>🔑 凭据就绪: <span style="color:#cbd5e1">${auth.summary || '待检测'}</span></div>
               <div>🖥️ 专属指纹: <code style="font-size:11px; color:#a7f3d0;">${a.fingerprint_summary || '加载中...'}</code></div>
@@ -855,6 +889,16 @@ HTML_CONTENT = """<!DOCTYPE html>
           ? `<span class="badge badge-success" style="font-size:11px;">🟢 登录有效</span>`
           : `<span class="badge badge-disabled" style="font-size:11px;">🔴 凭据失效</span>`;
 
+        const diag = a.roaming_diagnosis || { code: 'unknown', text: '⚪ 待探测', desc: '' };
+        let diagBadgeClass = 'badge-disabled';
+        if (diag.code === 'matched') diagBadgeClass = 'badge-success';
+        else if (diag.code === 'roaming') diagBadgeClass = 'badge-danger';
+        else if (diag.code === 'error') diagBadgeClass = 'badge-danger';
+        else if (diag.code === 'direct') diagBadgeClass = 'badge-info';
+
+        const pGeo = a.proxy_geo || {};
+        const pGeoShort = (pGeo.status === 'ok') ? `${pGeo.country_name || pGeo.country} (${pGeo.ip})` : (a.proxy ? '待测' : '直连');
+
         let authBtns = '';
         if (isAuthValid) {
           authBtns = `
@@ -874,13 +918,18 @@ HTML_CONTENT = """<!DOCTYPE html>
             <div style="display:flex; align-items:center; gap:8px;">
               <strong style="font-size:16px; color:#fff;">${a.name}</strong>
               ${authBadge}
+              <span class="badge ${diagBadgeClass}" style="font-size:11px;">${diag.text}</span>
               <span class="badge badge-info" style="font-size:11px;">近7天 +${a.history_7d?.total_gained || 0}分</span>
             </div>
             <div style="color:var(--text-sub); font-size:13px; margin-top:4px;">
-              代理: <code>${a.proxy || '直连'}</code> | 偏移: ${a.offset_minutes || 0}分钟 | 指纹: <code style="color:#a7f3d0; font-size:11px;">${a.fingerprint_summary || '默认'}</code>
+              代理: <code>${a.proxy || '直连'}</code> | 👤 资料: <b>${a.account_country || '-'}</b> | 🎁 市场: <b>${a.rewards_market || a.country || '-'}</b> | 🌐 出口: <b>${pGeoShort}</b>
+            </div>
+            <div style="color:#64748b; font-size:12px; margin-top:2px;">
+              指纹: <code style="color:#a7f3d0; font-size:11px;">${a.fingerprint_summary || '默认'}</code>
             </div>
           </div>
           <div class="flex-row">
+            ${a.proxy ? `<button class="btn btn-secondary btn-sm" onclick="testAccountProxy('${a.name}', '${a.proxy}')">⚡ 测代理</button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="openFingerprintModal('${a.name}')">专属指纹</button>
             ${authBtns}
             <button class="btn btn-secondary btn-sm" onclick="toggleAcc('${a.name}', ${!a.enabled})">${a.enabled ? '停用' : '启用'}</button>
@@ -1062,6 +1111,92 @@ HTML_CONTENT = """<!DOCTYPE html>
       });
       toast('专属指纹已保存');
       closeFingerprintModal();
+    }
+
+    async function alignFingerprintWithProxy() {
+      if (!activeAccountName) return;
+      toast('正在探测绑定代理出口并同步时区与语言...');
+      try {
+        const res = await fetch('/api/accounts/fingerprint/align-proxy', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: activeAccountName})
+        });
+        const d = await res.json();
+        if (d.status === 'ok') {
+          currentFpData = d.data;
+          _populateFpForm(currentFpData);
+          toast(`✅ 已自动匹配代理地区 [${d.proxy_country}]，时区同步为: ${d.timezone}`);
+        } else {
+          toast('同步失败: ' + (d.message || '未知错误'));
+        }
+      } catch(e) {
+        toast('请求失败: ' + e);
+      }
+    }
+
+    async function testProxyInForm() {
+      const proxy = document.getElementById('acc-proxy-input').value.trim();
+      const box = document.getElementById('proxy-test-box');
+      if (!proxy) {
+        box.style.display = 'block';
+        box.style.background = 'rgba(239,68,68,0.1)';
+        box.style.border = '1px solid rgba(239,68,68,0.3)';
+        box.style.color = '#ef4444';
+        box.innerText = '请先输入代理地址 (如 http://user:pass@127.0.0.1:7890)';
+        return;
+      }
+      box.style.display = 'block';
+      box.style.background = 'rgba(56,189,248,0.1)';
+      box.style.border = '1px solid rgba(56,189,248,0.3)';
+      box.style.color = '#38bdf8';
+      box.innerText = '⏳ 正在通过该代理探测出口 IP 与地理位置...';
+      try {
+        const res = await fetch('/api/accounts/proxy-test', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({proxy})
+        });
+        const d = await res.json();
+        if (d.status === 'ok') {
+          const g = d.data;
+          box.style.background = 'rgba(16,185,129,0.1)';
+          box.style.border = '1px solid rgba(16,185,129,0.3)';
+          box.style.color = '#10b981';
+          box.innerHTML = `🟢 <b>代理连通成功!</b> 出口 IP: <code>${g.ip}</code> | 地区: <b>${g.country_name || g.country} · ${g.city || ''}</b> | 时区: <b>${g.timezone}</b> | 延迟: <b>${g.latency_ms}ms</b>`;
+        } else {
+          box.style.background = 'rgba(239,68,68,0.1)';
+          box.style.border = '1px solid rgba(239,68,68,0.3)';
+          box.style.color = '#ef4444';
+          box.innerHTML = `🔴 <b>代理连接失败:</b> ${d.message}`;
+        }
+      } catch(e) {
+        box.style.background = 'rgba(239,68,68,0.1)';
+        box.style.border = '1px solid rgba(239,68,68,0.3)';
+        box.style.color = '#ef4444';
+        box.innerText = '请求失败: ' + e;
+      }
+    }
+
+    async function testAccountProxy(name, proxy) {
+      toast(`正在测试账号 [${name}] 的代理...`);
+      try {
+        const res = await fetch('/api/accounts/proxy-test', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({proxy, name})
+        });
+        const d = await res.json();
+        if (d.status === 'ok') {
+          const g = d.data;
+          toast(`🟢 [${name}] 代理正常! ${g.country_name || g.country} (${g.ip}), 延迟 ${g.latency_ms}ms`);
+          fetchStatus();
+        } else {
+          toast(`🔴 [${name}] 代理失败: ${d.message}`);
+        }
+      } catch(e) {
+        toast(`🔴 测试失败: ${e}`);
+      }
     }
 
     /* 全量参数配置装载与保存 */
@@ -1508,6 +1643,45 @@ class WebHandler(BaseHTTPRequestHandler):
             self._handle_cookies_import(payload)
             return
 
+        if path == '/api/accounts/proxy-test':
+            from msr import geo
+            proxy = payload.get('proxy')
+            name = payload.get('name')
+            p_geo = geo.probe_proxy_geo(proxy)
+            if name and p_geo.get('status') == 'ok':
+                from msr import config
+                config.save_json(config.pfile(name, 'proxy_geo.json'), {
+                    'proxy': proxy,
+                    'probed_time': time.time(),
+                    'geo': p_geo
+                })
+            if p_geo.get('status') == 'ok':
+                self._json_resp({'status': 'ok', 'data': p_geo})
+            else:
+                self._json_resp({'status': 'error', 'message': p_geo.get('message', '连接失败')})
+            return
+
+        if path == '/api/accounts/fingerprint/align-proxy':
+            from msr import fingerprint, config
+            name = payload.get('name')
+            if not name:
+                self._json_resp({'status': 'error', 'message': '缺少账号参数 name'}, code=400)
+                return
+            acc_cfg = config.get_account(name) or {}
+            try:
+                new_fp, p_geo = fingerprint.align_with_proxy(name, acc_cfg.get('proxy'))
+                append_live_log(f'[{name}] 已将专属指纹时区与语言自动对齐至代理出口: {p_geo.get("country_name")} ({p_geo.get("timezone")})')
+                self._json_resp({
+                    'status': 'ok',
+                    'data': new_fp,
+                    'geo': p_geo,
+                    'proxy_country': p_geo.get('country_name') or p_geo.get('country'),
+                    'timezone': new_fp.get('timezone')
+                })
+            except Exception as ex:
+                self._json_resp({'status': 'error', 'message': str(ex)}, code=500)
+            return
+
         if path == '/api/run':
             self._handle_run(payload, u)
             return
@@ -1529,7 +1703,7 @@ class WebHandler(BaseHTTPRequestHandler):
         self.send_error(404, 'Not Found')
 
     def _handle_status(self):
-        from msr import config, auth, history, fingerprint
+        from msr import config, auth, history, fingerprint, geo
         accs = config.accounts()
         detailed = []
         for a in accs:
@@ -1539,15 +1713,56 @@ class WebHandler(BaseHTTPRequestHandler):
             bal = st.get('balance', rg.get('balance', 0))
             auth_info = auth.get_auth_status(name)
             h7 = history.get_7day_history(name, current_balance=bal)
-            fp = fingerprint.load_or_create(name, country=rg.get('country'))
+            fp = fingerprint.load_or_create(name, country=rg.get('country'), proxy=a.get('proxy'))
             gpu_short = fp.get('webgl_renderer', '').split('Direct3D')[0].replace('ANGLE (', '').split(',')[0].strip()
             fp_summary = f"{fp.get('os_name', 'Win11')} | {gpu_short} | {fp.get('hardware_concurrency', 8)}核{fp.get('device_memory', 16)}G | {fp.get('screen_width', 1920)}x{fp.get('screen_height', 1080)}"
+
+            # 三区信息提炼
+            account_country = (rg.get('account_country') or rg.get('country') or '未知').upper()
+            rewards_market = (rg.get('rewards_market') or rg.get('country') or '未知').upper()
+            proxy_geo = geo.get_cached_proxy_geo(name, a.get('proxy'))
+
+            # 漫游风控诊断
+            diag_code = 'unknown'
+            diag_text = '⚪ 待探测'
+            diag_desc = '尚未获取出口 IP 地理信息'
+            if proxy_geo and proxy_geo.get('status') == 'ok':
+                p_c = (proxy_geo.get('country') or '').upper()
+                if rewards_market != '未知' and p_c == rewards_market:
+                    diag_code = 'matched'
+                    diag_text = '🟢 专线一致'
+                    diag_desc = f'代理出口({p_c})与Rewards市场({rewards_market})一致，无异地漫游风险'
+                elif rewards_market != '未知':
+                    diag_code = 'roaming'
+                    diag_text = '⚠️ 异地漫游'
+                    diag_desc = f'代理出口({p_c})与Rewards市场({rewards_market})不同，可能触发“正在路上”漫游锁分'
+                else:
+                    diag_code = 'matched'
+                    diag_text = '🟢 代理在线'
+                    diag_desc = f'出口地区: {proxy_geo.get("country_name", p_c)}'
+            elif proxy_geo and proxy_geo.get('status') == 'error':
+                diag_code = 'error'
+                diag_text = '🔴 代理失效'
+                diag_desc = proxy_geo.get('message', '连接失败')
+            elif not a.get('proxy'):
+                diag_code = 'direct'
+                diag_text = '🌐 本机直连'
+                diag_desc = '未配置代理，使用本机网络出口'
+
             detailed.append({
                 'name': name,
                 'enabled': a.get('enabled', True),
                 'proxy': a.get('proxy'),
                 'offset_minutes': a.get('offset_minutes', 0),
                 'country': rg.get('country'),
+                'account_country': account_country,
+                'rewards_market': rewards_market,
+                'proxy_geo': proxy_geo,
+                'roaming_diagnosis': {
+                    'code': diag_code,
+                    'text': diag_text,
+                    'desc': diag_desc
+                },
                 'language': rg.get('language'),
                 'balance': bal,
                 'last_run': st.get('last_run'),

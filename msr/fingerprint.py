@@ -125,20 +125,56 @@ def get_fingerprint_file(name):
     return config.pfile(name, 'fingerprint.json')
 
 
-def load_or_create(name, country=None):
-    """读取账号的专属指纹文件；若不存在则自动生成并持久化。"""
-    from msr import config
+def load_or_create(name, country=None, proxy=None):
+    """读取账号的专属指纹文件；若不存在则自动生成并持久化。
+    优先根据代理出口真实的物理地理位置派生匹配的时区与语言；若无代理则根据账号所属区域匹配。
+    """
+    from msr import config, geo
     f = get_fingerprint_file(name)
     if os.path.isfile(f):
         data = config.load_json(f)
         if data and data.get('webgl_renderer') and data.get('hardware_concurrency'):
             return data
 
+    acc_cfg = config.get_account(name) or {}
+    px = proxy if proxy is not None else acc_cfg.get('proxy')
+
+    detected_country = None
+    detected_tz = None
+    if px:
+        try:
+            p_geo = geo.get_cached_proxy_geo(name, px)
+            if p_geo.get('status') == 'ok' and p_geo.get('country'):
+                detected_country = p_geo.get('country')
+                detected_tz = p_geo.get('timezone')
+        except Exception:
+            pass
+
     rg = config.load_json(config.pfile(name, 'region.json'), {}) or {}
-    c = country or rg.get('country') or 'SG'
+    c = detected_country or country or rg.get('country') or 'SG'
     fp = generate_fingerprint(name, country=c, randomize=False)
+    if detected_tz:
+        fp['timezone'] = detected_tz
     save_fingerprint(name, fp)
     return fp
+
+
+def align_with_proxy(name, proxy=None):
+    """强制根据代理出口重新对齐账号指纹的时区、语言与国家，返回更新后的指纹。"""
+    from msr import geo
+    p_geo = geo.probe_proxy_geo(proxy)
+    if p_geo.get('status') != 'ok':
+        raise RuntimeError(p_geo.get('message', '代理不可达'))
+
+    c = p_geo.get('country', 'CN')
+    tz = p_geo.get('timezone', 'Asia/Shanghai')
+    fp = load_or_create(name, country=c)
+    fp['country'] = c
+    fp['timezone'] = tz
+    if c in TIMEZONE_MAP:
+        fp['locale'] = TIMEZONE_MAP[c][1]
+    save_fingerprint(name, fp)
+    return fp, p_geo
 
 
 def save_fingerprint(name, fp):

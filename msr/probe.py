@@ -16,19 +16,23 @@ def probe_account(name, token, proxy=None):
     neutral = {'country': 'US', 'language': 'en'}
     resp = api.get_me(name, token, neutral, proxy=proxy)
     attrs = ((resp.get('profile') or {}).get('attributes') or {})
-    country = (attrs.get('country') or 'US').upper()
+    account_country = (attrs.get('country') or 'US').upper()
     language = attrs.get('language') or 'en'
-    rg = {'country': country, 'language': language}
+    rg = {'country': account_country, 'language': language}
 
     resp = api.get_me(name, token, rg, proxy=proxy)
 
+    user_info = api.find_promo(resp, 'user_info') or {}
+    rewards_market = (user_info.get('primary_country') or user_info.get('request_country') or account_country).upper()
 
     # 不按 complete 过滤: planner 需要的是"账号拥有哪些任务类型",
     # 今日是否已完成由执行器运行时判断(每天会重置)
     names = [p.get('name', '') for p in resp.get('promotions', [])]
 
     return {
-        'country': country,
+        'country': rewards_market,
+        'rewards_market': rewards_market,
+        'account_country': account_country,
         'language': language,
         'levelInfo': resp.get('levelInfo') or {},
         'balance': (resp.get('balance') or ''),
