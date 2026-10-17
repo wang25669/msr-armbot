@@ -90,6 +90,9 @@ def phase_search(name, cdp, pr, budget_seconds=3600, target=None, log=print):
         c = search_counters(cdp)
         last_c = c or last_c
         pc = c.get('pcSearch') if c else None
+        if pc and (pc[1] is None or int(pc[1]) <= 0):
+            log('今日无搜索任务(计数器 max=%s), 跳过' % (pc[1],))
+            return '0/0 无任务'
         if pc and target is None:
             target = pc[1]
         if pc and pc[0] >= pc[1]:
@@ -230,6 +233,8 @@ def phase_cards(name, cdp, pr, source, budget_seconds=1500, log=print,
                 log('%s 异常: %s' % (n, str(ex)[:80]))
                 for tid in new_tabs:
                     close_tab(cdp, tid)
+    if not tried:
+        return '今日无%s任务(跳过)' % ('每日活动' if source == 'dailySetPromotions' else '日常任务')
     return '处理%d张' % len(done)
 
 

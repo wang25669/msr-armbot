@@ -146,6 +146,10 @@ def run_browser_phase(name, phase, token, pr, profile_path, config):
             return tb.phase_earn(name, cdp, pr,
                                  budget_seconds=bc['cards_budget_min'] * 60,
                                  log=config.log)
+        if phase == 'visual':
+            from msr import tasks_visual
+            return tasks_visual.run(name, cdp, pr, log=config.log,
+                                    used_path=config.pfile(name, 'visual_used.json'))
         return '未知浏览器阶段 %s' % phase
     finally:
         try:
