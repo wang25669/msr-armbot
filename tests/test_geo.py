@@ -14,9 +14,9 @@ TMP = tempfile.mkdtemp()
 config.init(TMP)
 
 try:
-    # 1. 模拟 ip-api.com 成功返回
+    # 1. 模拟 ip.sb 成功返回
     mock_resp = MagicMock()
-    mock_resp.read.return_value = b'{"status":"success","country":"China","countryCode":"CN","regionName":"Shanghai","city":"Shanghai","timezone":"Asia/Shanghai","query":"123.45.67.89"}'
+    mock_resp.read.return_value = b'{"ip":"123.45.67.89","country":"China","country_code":"CN","region":"Shanghai","city":"Shanghai","timezone":"Asia/Shanghai"}'
     mock_resp.__enter__.return_value = mock_resp
 
     with patch('urllib.request.build_opener') as mock_opener:

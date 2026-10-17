@@ -33,12 +33,84 @@ def _build_opener(proxy=None):
     return urllib.request.build_opener(*handlers)
 
 
-def probe_proxy_geo(proxy=None, timeout=6):
-    """通过指定代理(若 None 则直连)探测公网出口 IP 及其地理归属信息。"""
+def probe_proxy_geo(proxy=None, timeout=5):
+    """通过指定代理(若 None 则直连)探测公网出口 IP 及其地理归属信息。
+    采用多层高可用国内/海外双冗余通道 (HTTPS 优先，防中国境内 HTTP 阻断与路由异常)。
+    """
     opener = _build_opener(proxy)
     t0 = time.time()
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
-    # 1. 首选 ip-api.com
+    # 1. 首选 api.ip.sb (全球 Anycast CDN, 极速 HTTPS, 国内移动/电信/联通及海外均直达)
+    try:
+        url = 'https://api.ip.sb/geoip'
+        req = urllib.request.Request(url, headers=headers)
+        with opener.open(req, timeout=timeout) as r:
+            d = json.load(r)
+            c_code = (d.get('country_code') or 'CN').upper()
+            latency = round((time.time() - t0) * 1000, 1)
+            return {
+                'status': 'ok',
+                'provider': 'ip.sb',
+                'ip': d.get('ip'),
+                'country': c_code,
+                'country_name': COUNTRY_NAMES.get(c_code, d.get('country') or c_code),
+                'region': d.get('region', ''),
+                'city': d.get('city', ''),
+                'timezone': d.get('timezone', 'Asia/Shanghai'),
+                'latency_ms': latency
+            }
+    except Exception:
+        pass
+
+    # 2. 备选 ipwho.is (高精度 HTTPS, 完美兼容中国大陆与海外节点)
+    try:
+        url = 'https://ipwho.is/'
+        req = urllib.request.Request(url, headers=headers)
+        with opener.open(req, timeout=timeout) as r:
+            d = json.load(r)
+            if d.get('success'):
+                c_code = (d.get('country_code') or 'CN').upper()
+                tz = d.get('timezone', {}).get('id') if isinstance(d.get('timezone'), dict) else 'Asia/Shanghai'
+                latency = round((time.time() - t0) * 1000, 1)
+                return {
+                    'status': 'ok',
+                    'provider': 'ipwho.is',
+                    'ip': d.get('ip'),
+                    'country': c_code,
+                    'country_name': COUNTRY_NAMES.get(c_code, d.get('country') or c_code),
+                    'region': d.get('region', ''),
+                    'city': d.get('city', ''),
+                    'timezone': tz or 'Asia/Shanghai',
+                    'latency_ms': latency
+                }
+    except Exception:
+        pass
+
+    # 3. 备选 myip.la (HTTPS，国内及海外均支持，中文省市名称)
+    try:
+        url = 'https://api.myip.la/cn?json'
+        req = urllib.request.Request(url, headers=headers)
+        with opener.open(req, timeout=timeout) as r:
+            d = json.load(r)
+            loc = d.get('location', {})
+            c_code = (loc.get('country_code') or 'CN').upper()
+            latency = round((time.time() - t0) * 1000, 1)
+            return {
+                'status': 'ok',
+                'provider': 'myip.la',
+                'ip': d.get('ip'),
+                'country': c_code,
+                'country_name': loc.get('country_name') or COUNTRY_NAMES.get(c_code, c_code),
+                'region': loc.get('province', ''),
+                'city': loc.get('city', ''),
+                'timezone': 'Asia/Shanghai' if c_code == 'CN' else 'Asia/Singapore',
+                'latency_ms': latency
+            }
+    except Exception:
+        pass
+
+    # 4. 备选 ip-api.com (HTTP 端口备选)
     try:
         url = 'http://ip-api.com/json/?fields=status,country,countryCode,regionName,city,timezone,query'
         req = urllib.request.Request(url, headers={'User-Agent': 'curl/7.88.1'})
@@ -49,6 +121,7 @@ def probe_proxy_geo(proxy=None, timeout=6):
                 c_code = (d.get('countryCode') or 'US').upper()
                 return {
                     'status': 'ok',
+                    'provider': 'ip-api.com',
                     'ip': d.get('query'),
                     'country': c_code,
                     'country_name': COUNTRY_NAMES.get(c_code, d.get('country') or c_code),
@@ -59,32 +132,6 @@ def probe_proxy_geo(proxy=None, timeout=6):
                 }
     except Exception:
         pass
-
-    # 2. 备选 ipwho.is
-    try:
-        url = 'https://ipwho.is/'
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with opener.open(req, timeout=timeout) as r:
-            d = json.load(r)
-            if d.get('success'):
-                latency = round((time.time() - t0) * 1000, 1)
-                c_code = (d.get('country_code') or 'US').upper()
-                tz = d.get('timezone', {}).get('id') if isinstance(d.get('timezone'), dict) else 'Asia/Shanghai'
-                return {
-                    'status': 'ok',
-                    'ip': d.get('ip'),
-                    'country': c_code,
-                    'country_name': COUNTRY_NAMES.get(c_code, d.get('country') or c_code),
-                    'region': d.get('region', ''),
-                    'city': d.get('city', ''),
-                    'timezone': tz or 'Asia/Shanghai',
-                    'latency_ms': latency
-                }
-    except Exception as ex:
-        return {
-            'status': 'error',
-            'message': f'代理连接失败: {str(ex)[:100]}'
-        }
 
     return {
         'status': 'error',
