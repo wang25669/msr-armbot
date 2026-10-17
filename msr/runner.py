@@ -1,4 +1,4 @@
-"""执行编排: 账号串行, 账号间随机等待。"""
+"""执行编排: 账号串行, 账号间随机等待, 支持多账号独立代理与区域自适配。"""
 import random
 import time
 
@@ -38,10 +38,14 @@ def run_one(name, args, config, planner, probe, api, executor):
     if not tok.get('refresh_token'):
         raise RuntimeError('无 token, 先 msr login %s' % name)
 
-    config.log(name, '=== 运行开始 ===')
-    token = api.refresh_access(name, p, rg)
+    acc_cfg = config.get_account(name) or {}
+    proxy = acc_cfg.get('proxy')
+    cdp_port = acc_cfg.get('cdp_port')
 
-    pr = probe.probe_account(name, token)
+    config.log(name, '=== 运行开始 (proxy=%s cdp_port=%s) ===' % (proxy or '直连', cdp_port or '内置'))
+    token = api.refresh_access(name, p, rg, proxy=proxy)
+
+    pr = probe.probe_account(name, token, proxy=proxy)
     pr['probed_at'] = time.strftime('%F %T')
     config.save_json(config.pfile(name, 'region.json'), pr)
     config.log(name, 'region=%s balance=%s' % (pr['country'], pr.get('balance')))
@@ -57,18 +61,15 @@ def run_one(name, args, config, planner, probe, api, executor):
         phase, needs = w['phase'], w['needs']
         try:
             if needs == 'api':
-                r = executor.run_api_phase(name, phase, token, pr, p, config, api)
+                r = executor.run_api_phase(name, phase, token, pr, p, config, api, proxy=proxy)
             else:
-                r = executor.run_browser_phase(name, phase, token, pr, p, config)
+                r = executor.run_browser_phase(name, phase, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
             results.append('%s:%s' % (phase, r))
         except Exception as ex:
             results.append('%s:失败(%s)' % (phase, str(ex)[:60]))
             config.log(name, '!!! %s 异常(其余阶段不受影响): %s' % (phase, str(ex)[:120]))
 
-    # 2026-10-15 新增: 自动核查 + 自动修复。
-    # 每轮跑完检查结果: 阶段抛异常、或返回值含"未complete/失败"的, 等 4 分钟
-    # (让微软瞬时故障 503/超时恢复)后只重跑这些阶段一次。与现网 repair 阶段同目的:
-    # 不依赖用户发现, 也不对成功项做重复劳动。
+    # 自动核查 + 自动修复
     bad = []
     for r in results:
         ph, _, val = r.partition(':')
@@ -82,9 +83,9 @@ def run_one(name, args, config, planner, probe, api, executor):
                           if t['phase'] == ph), 'api')
             try:
                 if needs == 'api':
-                    r = executor.run_api_phase(name, ph, token, pr, p, config, api)
+                    r = executor.run_api_phase(name, ph, token, pr, p, config, api, proxy=proxy)
                 else:
-                    r = executor.run_browser_phase(name, ph, token, pr, p, config)
+                    r = executor.run_browser_phase(name, ph, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
                 results.append('%s:修复(%s)' % (ph, r))
                 config.log(name, '自动修复 %s: %s' % (ph, r))
             except Exception as ex:

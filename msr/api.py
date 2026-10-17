@@ -30,14 +30,23 @@ def _log(name, msg):
     config.log(name, msg)
 
 
-def api(name, method, path, token, headers, body=None, retries=3):
-    """单次 API 调用, 指数退避重试(5/10/20s)。401/403 不重试。"""
+def _build_opener(proxy=None):
+    handlers = []
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({'http': proxy, 'https': proxy}))
+    handlers.append(urllib.request.HTTPSHandler())
+    return urllib.request.build_opener(*handlers)
+
+
+def api(name, method, path, token, headers, body=None, retries=3, proxy=None):
+    """单次 API 调用, 指数退避重试(5/10/20s)。支持可选代理 proxy。401/403 不重试。"""
     data = json.dumps(body).encode() if body is not None else None
     last = None
+    opener = _build_opener(proxy)
     for i in range(retries):
         req = urllib.request.Request(API + path, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with opener.open(req, timeout=30) as r:
                 return json.load(r)
         except urllib.error.HTTPError as ex:
             if ex.code in (401, 403):
@@ -51,6 +60,7 @@ def api(name, method, path, token, headers, body=None, retries=3):
                 method, path.split('?')[0], i + 1, str(last)[:60], wait))
             time.sleep(wait)
     raise last
+
 
 
 def edge_headers(token, rg):
@@ -70,9 +80,9 @@ def app_headers(token, rg):
             'content-type': 'application/json; charset=utf-8'}
 
 
-def get_me(name, token, rg):
+def get_me(name, token, rg, proxy=None):
     return api(name, 'GET', '/me?channel=edge&options=Profile,Promotions',
-               token, edge_headers(token, rg))['response']
+               token, edge_headers(token, rg), proxy=proxy)['response']
 
 
 def find_promo(promos, name):
@@ -84,28 +94,29 @@ def find_promo(promos, name):
 
 # ---------- token 生命周期 ----------
 
-def _token_post(name, body):
+def _token_post(name, body, proxy=None):
     req = urllib.request.Request(TOKEN_URL, data=urllib.parse.urlencode(body).encode(),
                                  headers={'Content-Type': 'application/x-www-form-urlencoded'})
-    with urllib.request.urlopen(req, timeout=30) as r:
+    opener = _build_opener(proxy)
+    with opener.open(req, timeout=30) as r:
         return json.load(r)
 
 
-def device_code_login(name):
+def device_code_login(name, proxy=None):
     """device-code 流程: 返回 {device_code, user_code, verification_uri}。
     用户在任意浏览器完成授权后, 用 poll_device_code() 换 token。"""
-    d = _token_post(name, {'client_id': CLIENT_ID, 'scope': SCOPE})
+    d = _token_post(name, {'client_id': CLIENT_ID, 'scope': SCOPE}, proxy=proxy)
     return d
 
 
-def poll_device_code(name, device_code, interval=5, timeout=300):
+def poll_device_code(name, device_code, interval=5, timeout=300, proxy=None):
     """轮询 token 端点直到用户完成授权。返回 token dict。"""
     t0 = time.time()
-    while time.time() - t0 < timeout:
+    while time.time() < deadline if 'deadline' in locals() else (time.time() - t0 < timeout):
         time.sleep(interval)
         try:
             d = _token_post(name, {'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
-                                   'client_id': CLIENT_ID, 'device_code': device_code})
+                                   'client_id': CLIENT_ID, 'device_code': device_code}, proxy=proxy)
             if d.get('refresh_token') or d.get('access_token'):
                 return d
             if d.get('error') == 'authorization_pending':
@@ -150,8 +161,8 @@ def os_chmod_quiet(path, mode):
         pass
 
 
-def refresh_access(name, profile_path, rg=None, retries=3):
-    """refresh_token 换新 token。3 次重试 + 旧 access_token 降级(教训见 2026-10-07)。"""
+def refresh_access(name, profile_path, rg=None, retries=3, proxy=None):
+    """refresh_token 换新 token。3 次重试 + 旧 access_token 降级(教训见 2026-10-07)。支持代理。"""
     from msr import config
     path = profile_path + '/token.json'
     t = config.load_json(path)
@@ -162,7 +173,7 @@ def refresh_access(name, profile_path, rg=None, retries=3):
     last = None
     for i in range(retries):
         try:
-            d = _token_post(name, body)
+            d = _token_post(name, body, proxy=proxy)
             if not d.get('access_token'):
                 raise AuthError('refresh 响应无 access_token')
             return save_token(name, d, profile_path)['access_token']
@@ -177,9 +188,10 @@ def refresh_access(name, profile_path, rg=None, retries=3):
             time.sleep(20 * (i + 1))
     if rg and t.get('access_token'):
         try:
-            get_me(name, t['access_token'], rg)
+            get_me(name, t['access_token'], rg, proxy=proxy)
             _log(name, 'refresh 3次全败, 旧 access_token 仍有效, 降级续跑')
             return t['access_token']
         except Exception:
             pass
     raise AuthError('refresh 失败(已重试%d次): %s' % (retries, str(last)[:120]))
+

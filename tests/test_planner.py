@@ -13,15 +13,16 @@ CN_PROMOS = ['edge_browsing_streak_eligible', 'edge_browsing_streak_flight',
 sg_plan = planner.plan({'task_names': SG_PROMOS})
 phases = [w['phase'] for w in sg_plan]
 print('sg 计划:', phases)
-assert phases == ['app', 'edge_api', 'search', 'quick', 'earn', 'visual'], phases
+assert phases == ['app', 'edge_api', 'search', 'quick', 'quests', 'earn', 'visual'], phases
 assert all(w['needs'] == 'browser' for w in sg_plan[2:])
 print('  [OK] API侧在前, 浏览器侧在后, 含视觉(执行时按面板判断有无)')
 
 cn_plan = planner.plan({'task_names': CN_PROMOS})
 phases_cn = [w['phase'] for w in cn_plan]
 print('cn 计划:', phases_cn)
-assert phases_cn == ['app', 'edge_api', 'search', 'quick', 'earn', 'visual'], phases_cn
+assert phases_cn == ['app', 'edge_api', 'search', 'quick', 'quests', 'earn', 'visual'], phases_cn
 print('  [OK] cn 与 sg 同构(浏览器内自适配, 无需区域硬编码)')
+
 
 # force_phases: 调试用直通
 f = planner.plan({'task_names': []}, force_phases='app,read')

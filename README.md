@@ -56,8 +56,9 @@ refresh_token 90 天滚动续期(每次成功刷新就续), 正常不需要反�
 python3 -m msr run --all          # 全部账号串行(账号间随机等 15-40 分钟)
 python3 -m msr run sg             # 只跑一个账号
 python3 -m msr run sg --dry-run   # 只打印执行计划, 不执行
-python3 -m msr run sg --only=app  # 只跑某阶段: app/read/edge_api/search/quick/earn
-python3 -m msr status             # 全部账号状态
+python3 -m msr run sg --only=app  # 只跑某阶段: app/read/edge_api/search/quick/quests/earn/visual
+python3 -m msr account sg --proxy http://127.0.0.1:7890  # 设置单个账号独立代理
+python3 -m msr status             # 全部账号状态(含独立代理配置)
 python3 -m msr report             # 当日报告
 ```
 
@@ -89,14 +90,18 @@ python3 -m msr report             # 当日报告
 
 install.sh 自动填 binary 和 version, 之后可手改。
 
-### 3. 账号 `~/.msr/accounts.json` (login 自动生成, 可手改)
+### 3. 账号 `~/.msr/accounts.json` (login 自动生成, 支持独立代理与外接端口)
 
 ```json
 [
-  {"name": "sg", "enabled": true, "offset_minutes": 0},
-  {"name": "cn", "enabled": true, "offset_minutes": 45}
+  {"name": "sg", "enabled": true, "proxy": null, "cdp_port": 9222, "offset_minutes": 0},
+  {"name": "cn", "enabled": true, "proxy": "http://127.0.0.1:7890", "cdp_port": null, "offset_minutes": 45}
 ]
 ```
+
+- `proxy`: 可选独立出口代理 (`http://`, `https://`, `socks5://` 或 `null` 直连)
+- `cdp_port`: 可选外接 Chrome 远程调试端口 (如本机外挂的 9222；若为 `null` 则按需启动内置 headless chromium)
+
 
 ### 4. 通知 `~/.msr/notify.json` (可选, 默认 stdout+日志)
 
@@ -195,7 +200,9 @@ install.sh           Armbian 一键安装
 | Edge 浏览打卡 | **已对齐** | 每次上报只 POST；上报后 180s 回读仅记日志；两次上报间隔补足 `report_per_minutes*60+5`；最后一次后等 600s 拿最终结果；响应缺 `activity` 时 30s 重发（最多 3 次） |
 | 必应搜索 | 已一致 | 按计数器补满上限 |
 | 每日活动 / 日常任务卡 | **已对齐** | 归因在"点击卡片"动作上，**直接导航 destinationUrl 不计分** → 回 dashboard 按 `dest` 参数匹配真实锚点，用真人鼠标点击（新增 `human_click`）；点击后停留 180-300s（原实现仅 8-15s，归因来不及落库） |
+| 打卡任务 (Quests/Punchcards) | **已全面支持（2026-10-17）** | 注入 `MSRewards/Desktop` 与专属请求头解锁桌面任务；自动识别 `/earn/quest/`，支持多步骤循环推进、无 `q` 搜索补全、`ms-search://` 协议兼容与多天冷却去重 |
 | 视觉搜索 | **已移植（2026-10-17）** | `msr/tasks_visual.py`：面板判据 → Bing 壁纸取图 → 镜头真人点击 → 真实键入+Enter（合成 paste 降级）→ 落页停留 15s → 面板回读裁决 |
+| 多账号独立代理出口 | **已全面支持（2026-10-17）** | 支持针对每个账号配置独立 `proxy`（HTTP/SOCKS5）与外接 `cdp_port`，API 流量与 Chromium 浏览器流量完全隔离走各自出口 |
 | 自动核查 + 自动修复 | **已新增** | 阶段抛异常或返回"未complete/未出现"时，等 4 分钟只重跑失败项一次 |
 
 现网另有 `repair` 阶段（读奖励面板五项逐项补做）。本项目由 **planner 每次幂等重跑 + runner 失败重试** 达成同等效果，不重复实现面板抓取。

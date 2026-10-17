@@ -6,6 +6,7 @@ from msr import api
 TASK_TABLE = {
     'pcSearch':                 {'phase': 'search',   'needs': 'browser'},
     'dailySetPromotions':       {'phase': 'quick',    'needs': 'browser'},
+    'quests':                   {'phase': 'quests',   'needs': 'browser'},
     'morePromotions':           {'phase': 'earn',     'needs': 'browser'},
     'visualSearch':             {'phase': 'visual',   'needs': 'browser', 'optional': True},
     'edge_browsing_streak_flight':   {'phase': 'edge_api',  'needs': 'api'},
@@ -21,6 +22,8 @@ def classify(promo_name):
         return 'pcSearch'
     if 'DailySet' in promo_name:
         return 'dailySetPromotions'
+    if 'punchcard' in promo_name.lower() or 'quest' in promo_name.lower():
+        return 'quests'
     if 'morePromotions' in promo_name or promo_name.startswith('WW_Rewards'):
         return 'morePromotions'
     if 'visual' in promo_name.lower():
@@ -53,13 +56,10 @@ def plan(probe_result, force_phases=None):
         if c:
             have.add(c)
 
-    # 浏览器侧: promotions 不含 dailySet/morePromotions/visual(它们在 rewards
-    # dashboard 页面下发, 不在 /dapi/me)。这些阶段默认尝试, 由 executor 在浏览器里
-    # 按当天实际卡片执行 —— 卡片不存在自然跳过, 天然区域自适应(cn 账号没有视觉卡
-    # 就不会执行视觉逻辑, 无需硬编码区域差异)。
-    # 2026-10-17: 视觉搜索已按用户要求移植(msr/tasks_visual.py), 执行时先读面板
-    # 判断是否有该任务, 没有则跳过。
-    BROWSER_ALWAYS = ['search', 'quick', 'earn', 'visual']
+    # 浏览器侧: promotions 不含 dailySet/morePromotions/visual/quests(它们在 rewards
+    # dashboard/earn 页面下发, 不在 /dapi/me)。这些阶段默认尝试, 由 executor 在浏览器里
+    # 按当天实际卡片执行 —— 卡片不存在自然跳过, 天然区域自适应。
+    BROWSER_ALWAYS = ['search', 'quick', 'quests', 'earn', 'visual']
 
     want_phases = [{'phase': 'app', 'needs': 'api'}]          # type103 总是有效
     if 'edge_browsing_streak_flight' in have or 'edge_browsing_streak_eligible' in have:
@@ -69,3 +69,4 @@ def plan(probe_result, force_phases=None):
     for ph in BROWSER_ALWAYS:
         want_phases.append({'phase': ph, 'needs': 'browser'})
     return want_phases
+

@@ -198,14 +198,16 @@ def navigate(cdp, url):
 # ---------- Edge 伪装(可配置版本号, 默认随 chromium 版本走) ----------
 
 def edge_fingerprint(version='141'):
-    brands = [{'brand': 'Chromium', 'version': version},
+    brands = [{'brand': 'Microsoft Edge WebView2', 'version': version},
               {'brand': 'Microsoft Edge', 'version': version},
-              {'brand': 'Not/A)Brand', 'version': '99'}]
-    fullver = [{'brand': 'Chromium', 'version': f'{version}.0.0.0'},
-               {'brand': 'Microsoft Edge', 'version': f'{version}.0.0.0'},
-               {'brand': 'Not/A)Brand', 'version': '99.0.0.0'}]
+              {'brand': 'Chromium', 'version': version},
+              {'brand': 'Not(A:Brand', 'version': '24'}]
+    fullver = [{'brand': 'Microsoft Edge WebView2', 'version': f'{version}.0.4283.60'},
+               {'brand': 'Microsoft Edge', 'version': f'{version}.0.4283.60'},
+               {'brand': 'Chromium', 'version': f'{version}.0.8059.80'},
+               {'brand': 'Not(A:Brand', 'version': '24.0.0.0'}]
     ua = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
-          f'Chrome/{version}.0.0.0 Safari/537.36 Edg/{version}.0.0.0')
+          f'Chrome/{version}.0.0.0 Safari/537.36 Edg/{version}.0.0.0 MSRewards/Desktop/1.9.0')
     return ua, brands, fullver
 
 
@@ -220,8 +222,8 @@ def disguise_edge(cdp, version='141', log=print):
     try:
         cdp.call('Emulation.setUserAgentOverride', {
             'userAgent': ua,
-            'userAgentMetadata': {'brands': brands, 'fullVersion': f'{version}.0.0.0',
-                                  'platform': 'Windows', 'platformVersion': '15.0.0',
+            'userAgentMetadata': {'brands': brands, 'fullVersion': f'{version}.0.4283.60',
+                                  'platform': 'Windows', 'platformVersion': '19.0.0',
                                   'architecture': 'x86', 'model': '', 'mobile': False}})
     except Exception as ex:
         log(f'Edge伪装UA容忍: {ex}')
@@ -229,6 +231,14 @@ def disguise_edge(cdp, version='141', log=print):
         cdp.call('Page.addScriptToEvaluateOnNewDocument', {'source': he_patch})
     except Exception as ex:
         log(f'Edge伪装高熵容忍: {ex}')
+    try:
+        cdp.call('Network.enable')
+        cdp.call('Network.setExtraHTTPHeaders', {'headers': {
+            'x-rewards-source': 'msrewards-desktop',
+            'x-msrewards-app': '1'
+        }})
+    except Exception as ex:
+        log(f'Rewards专属头注入容忍: {ex}')
 
 
 def verify_disguise(cdp):
@@ -307,14 +317,17 @@ def human_click(cdp, find_js, label='', close_new=False):
 
 
 class Chromium:
-    """headless chromium 实例管理(每账号一个, 用完即停)。"""
+    """headless chromium 实例管理(每账号一个, 用完即停; 支持代理与外部已运行端口连接)。"""
 
     def __init__(self, binary='chromium', port=None, user_data_dir=None,
-                 extra_args=None, version='141', log=print):
+                 extra_args=None, version='141', proxy=None, cdp_port=None, log=print):
         self.binary = binary
-        self.port = port or self._free_port()
+        self.cdp_port = cdp_port
+        self.port = port or cdp_port or self._free_port()
+        self.is_external = bool(cdp_port)
         self.user_data_dir = user_data_dir
         self.version = version
+        self.proxy = proxy
         self.extra_args = extra_args or []
         self.log = log
         self.proc = None
@@ -328,6 +341,18 @@ class Chromium:
         return p
 
     def start(self):
+        if self.is_external:
+            try:
+                tabs = _http_json(f'http://127.0.0.1:{self.port}/json/list', timeout=3)
+                if tabs:
+                    self.log(f'成功连接外部 Chrome CDP 端口: {self.port}')
+                    return tabs
+            except Exception:
+                pass
+            self.log(f'外部端口 {self.port} 未响应, 自动启动内置 headless chromium')
+            self.is_external = False
+            self.port = self._free_port()
+
         args = [self.binary,
                 '--headless=new',
                 f'--remote-debugging-port={self.port}',
@@ -335,7 +360,12 @@ class Chromium:
                 '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
                 '--no-first-run', '--no-default-browser-check',
                 '--disable-background-networking', '--disable-sync',
-                '--window-size=1280,900'] + self.extra_args
+                '--window-size=1280,900']
+        if self.proxy:
+            args.append(f'--proxy-server={self.proxy}')
+            self.log(f'Chromium 挂载代理出口: {self.proxy}')
+        args.extend(self.extra_args)
+
         self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL)
         deadline = time.time() + 20
@@ -368,6 +398,19 @@ class Chromium:
         return cdp
 
     def stop(self):
+        if self.is_external:
+            return
+        if self.proc:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=10)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            self.proc = None
+
         if self.proc:
             try:
                 self.proc.terminate()

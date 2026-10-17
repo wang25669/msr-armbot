@@ -15,6 +15,9 @@ def init(home=None):
     os.makedirs(HOME, exist_ok=True)
 
 
+init()
+
+
 def accounts():
     """读账号注册表 [{name, enabled, offset_minutes}]。"""
     if not os.path.exists(ACCOUNTS_FILE):
@@ -70,6 +73,14 @@ def log(name, msg):
         pass
 
 
+def get_account(name):
+    """根据名字获取单个账号配置字典。"""
+    for a in accounts():
+        if a.get('name') == name:
+            return a
+    return None
+
+
 def cmd_status():
     accs = accounts()
     if not accs:
@@ -79,6 +90,8 @@ def cmd_status():
         name = a['name']
         st = load_json(pfile(name, 'state.json'), {}) or {}
         rg = load_json(pfile(name, 'region.json'), {}) or {}
-        print('%-12s region=%-6s level=%-10s 上次=%s 余额=%s' % (
-            name, rg.get('country', '?'), (rg.get('levelInfo') or {}).get('activeLevel', '?'),
+        proxy = a.get('proxy') or '直连'
+        print('%-12s region=%-4s proxy=%-16s level=%-10s 上次=%s 余额=%s' % (
+            name, rg.get('country', '?'), proxy[:16], (rg.get('levelInfo') or {}).get('activeLevel', '?'),
             st.get('last_run', '从未'), st.get('balance', '?')))
+
