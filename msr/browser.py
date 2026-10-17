@@ -379,7 +379,8 @@ class Chromium:
     """headless chromium 实例管理(每账号一个, 用完即停; 支持代理与外部已运行端口连接)。"""
 
     def __init__(self, binary='chromium', port=None, user_data_dir=None,
-                 extra_args=None, version='141', proxy=None, cdp_port=None, log=print):
+                 extra_args=None, version='141', proxy=None, cdp_port=None, log=print,
+                 fingerprint=None):
         if not shutil.which(binary):
             for cand in ('google-chrome', 'chromium', 'chromium-browser', 'edge', 'msedge'):
                 if shutil.which(cand):
@@ -392,6 +393,7 @@ class Chromium:
         self.user_data_dir = user_data_dir
         self.version = version
         self.proxy = proxy
+        self.fingerprint = fingerprint or {}
         self.extra_args = extra_args or []
         self.log = log
         self.proc = None
@@ -417,23 +419,50 @@ class Chromium:
             self.is_external = False
             self.port = self._free_port()
 
-        args = [self.binary,
-                '--headless=new',
-                f'--remote-debugging-port={self.port}',
-                f'--user-data-dir={self.user_data_dir}',
-                '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-                '--no-first-run', '--no-default-browser-check',
-                '--disable-background-networking', '--disable-sync',
-                '--disable-blink-features=AutomationControlled',
-                '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
-                '--window-size=1280,900']
+        # 启动前清理当前账号 Profile 目录下残留的 Singleton 锁文件，防止因上次异常退出导致启动挂死
+        if self.user_data_dir and os.path.isdir(self.user_data_dir):
+            for lock_name in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
+                f = os.path.join(self.user_data_dir, lock_name)
+                if os.path.exists(f) or os.path.islink(f):
+                    try:
+                        os.unlink(f)
+                    except Exception:
+                        pass
+
+        w = self.fingerprint.get('screen_width', 1280)
+        h = self.fingerprint.get('screen_height', 900)
+
+        # 针对 ARM 低功耗/低内存环境全盘调优的 Chromium 启动参数
+        args = [
+            self.binary,
+            '--headless=new',
+            f'--remote-debugging-port={self.port}',
+            f'--user-data-dir={self.user_data_dir}',
+            '--no-sandbox',
+            '--disable-gpu',
+            '--disable-dev-shm-usage',             # 避免 Docker/ARM /dev/shm 64MB 崩溃
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-background-networking',
+            '--disable-sync',
+            '--disable-blink-features=AutomationControlled',
+            '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+            '--disable-extensions',
+            '--disable-component-update',
+            '--disk-cache-size=33554432',          # 限制磁盘缓存为 32MB，保护 ARM 存储介质
+            '--media-cache-size=16777216',         # 限制媒体缓存为 16MB
+            '--js-flags=--max-old-space-size=256', # 限制 V8 堆内存为 256MB，防止 ARM OOM 崩溃
+            f'--window-size={w},{h}'
+        ]
         if self.proxy:
             args.append(f'--proxy-server={self.proxy}')
             self.log(f'Chromium 挂载代理出口: {self.proxy}')
         args.extend(self.extra_args)
 
+        # Linux 上开启独立的 Process Group，确保子进程(renderer, GPU)在账号完成时能一并彻底杀除
+        preexec = os.setsid if hasattr(os, 'setsid') else None
         self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL)
+                                     stderr=subprocess.DEVNULL, preexec_fn=preexec)
         deadline = time.time() + 20
         while time.time() < deadline:
             try:
@@ -455,38 +484,91 @@ class Chromium:
         except Exception:
             pass
 
+    def cleanup_extra_tabs(self, keep_tab_id=None):
+        """关闭所有未使用的标签页，确保 ARM 设备仅保留当前活跃的单一工作标签以节约内存。"""
+        try:
+            tabs = _http_json(f'http://127.0.0.1:{self.port}/json/list', timeout=3)
+            for t in tabs:
+                tid = t.get('id')
+                if tid and (keep_tab_id is None or tid != keep_tab_id):
+                    self.close_tab(tid)
+        except Exception:
+            pass
+
     def attach(self, tab):
         cdp = CDP(tab['webSocketDebuggerUrl'])
         cdp.connect()
         cdp.call('Page.enable')
         cdp.call('Runtime.enable')
-        disguise_edge(cdp, self.version, self.log)
+        if self.fingerprint:
+            from msr import fingerprint
+            fingerprint.apply_to_cdp(cdp, self.fingerprint, self.log)
+        else:
+            disguise_edge(cdp, self.version, self.log)
         return cdp
 
     def stop(self):
+        """彻底关闭浏览器会话，终止整个子进程树并清理锁文件。"""
         if self.is_external:
             return
+
+        # 1. 先尝试关闭所有打开的标签页
+        try:
+            tabs = _http_json(f'http://127.0.0.1:{self.port}/json/list', timeout=2)
+            for t in tabs:
+                self.close_tab(t.get('id'))
+        except Exception:
+            pass
+
+        # 2. 杀除进程组 (包含所有 renderer 和 GPU 子进程)
         if self.proc:
+            import signal
+            pid = self.proc.pid
             try:
-                self.proc.terminate()
-                self.proc.wait(timeout=10)
+                if hasattr(os, 'getpgid') and hasattr(os, 'killpg'):
+                    pgid = os.getpgid(pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    self.proc.terminate()
             except Exception:
                 try:
-                    self.proc.kill()
+                    self.proc.terminate()
+                except Exception:
+                    pass
+
+            t0 = time.time()
+            while time.time() - t0 < 3:
+                if self.proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+
+            if self.proc.poll() is None:
+                try:
+                    if hasattr(os, 'getpgid') and hasattr(os, 'killpg'):
+                        pgid = os.getpgid(pid)
+                        os.killpg(pgid, signal.SIGKILL)
+                    else:
+                        self.proc.kill()
+                except Exception:
+                    try:
+                        self.proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    self.proc.wait(timeout=2)
                 except Exception:
                     pass
             self.proc = None
 
-        if self.proc:
-            try:
-                self.proc.terminate()
-                self.proc.wait(timeout=10)
-            except Exception:
-                try:
-                    self.proc.kill()
-                except Exception:
-                    pass
-            self.proc = None
+        # 3. 清理当前账号 user-data-dir 下可能遗留的 Singleton 锁文件
+        if self.user_data_dir and os.path.isdir(self.user_data_dir):
+            for lock_name in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
+                f = os.path.join(self.user_data_dir, lock_name)
+                if os.path.exists(f) or os.path.islink(f):
+                    try:
+                        os.unlink(f)
+                    except Exception:
+                        pass
 
 
 # ---------- cookie 注入(B1 登录方案) ----------

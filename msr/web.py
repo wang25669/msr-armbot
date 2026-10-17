@@ -6,20 +6,24 @@
    - 自动检测并展示登录凭据有效性 (🟢 登录有效 / 🔴 凭据失效)
    - 实时积分余额、区域、今日得分增量、出口代理
    - 最近 7 天每日得分概况柱状图与 7 天累计收益
+   - 账号级反检测硬件指纹概况展示与专属配置入口
    - 有效凭据一键导出 Cookie (适配 Cookie-Editor 标准 JSON)
 2. 独立任务执行流程说明:
    - 单独展示 9 大标准任务执行阶段与生命周期 (API 极速 -> 后台 Edge 心跳 -> 浏览器流转 -> 智能防冷板搜索 -> 自动核查容错)
 3. 网页授权与重登录中心:
    - 方式 A: 微软官方设备码免密授权 (Device Code 流，手机/电脑扫码授权，后台自动轮询落盘)
    - 方式 B: Cookie 快速导入 (JSON 数组或 Raw 请求头，实时校验 _U 凭据)
-4. 全量集中风控与节奏参数配置:
+4. 账号级专属硬件指纹管理:
+   - 每个账号独立绑定显卡 (WebGL)、CPU 核心、内存、分辨率、时区与语言
+   - 跨会话持久锁定，支持一键重新随机派生与自定义修改
+5. 全量集中风控与节奏参数配置:
    - 必应搜索节奏 (防冷却冷板停留、连续不涨分熔断、超时预算、随机点击率、语言)
    - 卡片与打卡任务停留 (活动归因等待、答题卡间隔、总预算)
    - 移动端与 Edge 浏览 API (资讯阅读篇数与间隔、Edge 30分钟打卡心跳频次与间隔)
    - 多账号编排调度 (极速测试模式、账号间等待、阶段间过渡、随机启动抖动、失败重试等待)
    - 浏览器指纹伪装 (无头模式、Edge 版本、平台伪装、核心数、内存、防 WebRTC 代理泄漏、窗口尺寸)
    - 多渠道通知推送 (Server酱微信、Telegram、自定义 Webhook、触发时机配置与一键测试)
-5. 任务在线调度与日志:
+6. 任务在线调度与日志:
    - 单账号立即运行 / 一键批量运行全部
    - 实时日志滚屏捕获与自动轮询刷新
 """
@@ -317,7 +321,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           <!-- 5. 浏览器与反检测指纹伪装 -->
           <div class="acc-card">
             <h4 style="color:var(--primary); margin-bottom:12px; display:flex; align-items:center; gap:6px;">
-              🛡️ 浏览器与反检测指纹伪装 (Browser & Fingerprints)
+              🛡️ 全局浏览器底层参数 (Global Browser)
             </h4>
             <div class="form-group">
               <label>无头模式 (Headless)</label>
@@ -327,45 +331,18 @@ HTML_CONTENT = """<!DOCTYPE html>
               </select>
             </div>
             <div class="form-group">
-              <label>伪装 Edge 主版本号 (version)</label>
-              <input type="text" id="b-version" placeholder="141">
-            </div>
-            <div class="form-group">
-              <label>伪装操作系统平台 (navigator.platform)</label>
-              <select id="b-platform">
-                <option value="Win32">Win32 (Windows 10/11，消除 Linux/ARM 虚拟化特征)</option>
-                <option value="MacIntel">MacIntel (macOS)</option>
-                <option value="Linux x86_64">Linux x86_64</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>伪装 CPU 核心数 (hardwareConcurrency)</label>
-              <input type="number" id="b-cpu" value="8">
-            </div>
-            <div class="form-group">
-              <label>伪装内存容量 (deviceMemory, GB)</label>
-              <input type="number" id="b-memory" value="8">
-            </div>
-            <div class="form-group">
               <label>WebRTC UDP 防代理泄漏策略 (disable_non_proxied_udp)</label>
               <select id="b-webrtc">
                 <option value="true">开启 (屏蔽直连 UDP，防代理泄漏真实出口 IP)</option>
                 <option value="false">关闭</option>
               </select>
             </div>
-            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
-              <div class="form-group">
-                <label>窗口宽度 (px)</label>
-                <input type="number" id="b-width" value="1280">
-              </div>
-              <div class="form-group">
-                <label>窗口高度 (px)</label>
-                <input type="number" id="b-height" value="900">
-              </div>
-            </div>
             <div class="form-group">
               <label>自定义 Chromium/Chrome 执行路径 (留空为自动探测)</label>
               <input type="text" id="b-binary" placeholder="例如: /usr/bin/chromium 或留空">
+            </div>
+            <div style="font-size:12px; color:var(--text-sub); line-height:1.6; margin-top:8px;">
+              💡 提示: 每个账号已默认启用<strong>专属独立的硬件显卡、核心数、分辨率、时区与 Profile 隔离</strong>，可在“仪表盘”或“账号管理”中点击【专属指纹】单独调节。
             </div>
           </div>
 
@@ -500,7 +477,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         <span class="pipeline-badge" style="background:#10b981;">阶段 4 · 浏览器卡片</span>
         <div>
           <strong style="color:#fff;">每日活动 3 卡片 (dailyset)</strong>
-          <div style="font-size:12px; color:var(--text-sub); margin-top:3px;">启动单浏览器真人会话，按活动归因停留 60-120 秒，答题卡自动完成选择。</div>
+          <div style="font-size:12px; color:var(--text-sub); margin-top:3px;">启动单浏览器真人会话，按活动归因停留 60-120 秒，答题卡自动完成选择，步骤完即关标签。</div>
         </div>
       </div>
 
@@ -508,7 +485,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         <span class="pipeline-badge" style="background:#10b981;">阶段 5 · 探险打卡</span>
         <div>
           <strong style="color:#fff;">专属打卡任务 (quests)</strong>
-          <div style="font-size:12px; color:var(--text-sub); margin-top:3px;">智能识别当前生效的 Punchcard (探险/节日打卡)，自适应点击与状态追踪。</div>
+          <div style="font-size:12px; color:var(--text-sub); margin-top:3px;">智能识别当前生效的 Punchcard (探险/节日打卡)，自适应点击与状态追踪，及时释放标签。</div>
         </div>
       </div>
 
@@ -610,12 +587,95 @@ HTML_CONTENT = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- 独立弹窗 4: 账号专属反检测硬件指纹配置 -->
+  <div id="fingerprint-modal" class="modal-overlay">
+    <div class="modal">
+      <div class="card-title">
+        <span id="fp-modal-title">账号反检测专属硬件指纹</span>
+        <button class="btn btn-secondary btn-sm" onclick="closeFingerprintModal()">关闭</button>
+      </div>
+      <p style="font-size:13px; color:var(--text-sub); margin-bottom:14px; line-height:1.6;">
+        每个账号配置独立的硬件显卡、核心数、分辨率、时区与系统平台，避免多账号特征关联，并在多次运行间持久固化。
+      </p>
+
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+        <div class="form-group">
+          <label>操作系统平台</label>
+          <select id="fp-os">
+            <option value="Windows 11">Windows 11 (Win32, 15.0.0)</option>
+            <option value="Windows 10">Windows 10 (Win32, 10.0.0)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Edge 主版本号</label>
+          <input type="text" id="fp-edge-ver" value="141">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>WebGL 显卡渲染器 (防 SwiftShader 虚拟化特征)</label>
+        <select id="fp-gpu">
+          <option value="ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0)">NVIDIA GeForce RTX 3060</option>
+          <option value="ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0)">NVIDIA GeForce RTX 4060</option>
+          <option value="ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0)">NVIDIA GeForce GTX 1660 SUPER</option>
+          <option value="ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0)">Intel Iris Xe Graphics</option>
+          <option value="ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0)">Intel UHD Graphics 630</option>
+          <option value="ANGLE (AMD, AMD Radeon RX 6600 Direct3D11 vs_5_0 ps_5_0)">AMD Radeon RX 6600</option>
+          <option value="ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0)">AMD Radeon Graphics</option>
+        </select>
+      </div>
+
+      <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px;">
+        <div class="form-group">
+          <label>CPU 核心数</label>
+          <input type="number" id="fp-cpu" value="8">
+        </div>
+        <div class="form-group">
+          <label>内存容量 (GB)</label>
+          <input type="number" id="fp-mem" value="16">
+        </div>
+        <div class="form-group">
+          <label>屏幕分辨率</label>
+          <select id="fp-res">
+            <option value="1920,1080">1920 x 1080 (1080P)</option>
+            <option value="1600,900">1600 x 900</option>
+            <option value="1536,864">1536 x 864</option>
+            <option value="1440,900">1440 x 900</option>
+            <option value="1366,768">1366 x 768</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+        <div class="form-group">
+          <label>伪装时区 (与出口代理对齐)</label>
+          <input type="text" id="fp-tz" placeholder="例如: Asia/Singapore">
+        </div>
+        <div class="form-group">
+          <label>语言设置 (Accept-Language)</label>
+          <input type="text" id="fp-locale" placeholder="例如: zh-CN,zh;q=0.9,en;q=0.8">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>User-Agent 伪装标识</label>
+        <input type="text" id="fp-ua" readonly style="font-size:11px; color:var(--primary); background:rgba(0,0,0,0.4);">
+      </div>
+
+      <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center;">
+        <button class="btn btn-secondary btn-sm" onclick="randomizeFingerprint()">🎲 重新随机派生指纹</button>
+        <button class="btn btn-sm" onclick="saveFingerprintConfig()">保存专属指纹</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast"></div>
 
   <script>
     let activeAccountName = '';
     let dcPollTimer = null;
     let logPollTimer = null;
+    let currentFpData = null;
 
     function toast(msg) {
       const t = document.getElementById('toast');
@@ -714,6 +774,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         // 按钮组: 移除了单一无用的排期预览，依据有效性提供导出或重登
         let actionButtons = `
           <button class="btn btn-sm" onclick="runSingle('${a.name}')">立即运行</button>
+          <button class="btn btn-secondary btn-sm" onclick="openFingerprintModal('${a.name}')">专属指纹</button>
         `;
         if (isAuthValid) {
           actionButtons += `
@@ -743,6 +804,7 @@ HTML_CONTENT = """<!DOCTYPE html>
               <div>🌐 出口代理: <code>${a.proxy || '直连'}</code></div>
               <div>⏱️ 上次运行: ${a.last_run || '从未'}</div>
               <div>🔑 凭据就绪: <span style="color:#cbd5e1">${auth.summary || '待检测'}</span></div>
+              <div>🖥️ 专属指纹: <code style="font-size:11px; color:#a7f3d0;">${a.fingerprint_summary || '加载中...'}</code></div>
               <div style="margin-top:4px; font-size:12px; color:var(--text-sub);">
                 近期结果: <span style="color:#cbd5e1">${resStr}</span>
               </div>
@@ -794,10 +856,11 @@ HTML_CONTENT = """<!DOCTYPE html>
               <span class="badge badge-info" style="font-size:11px;">近7天 +${a.history_7d?.total_gained || 0}分</span>
             </div>
             <div style="color:var(--text-sub); font-size:13px; margin-top:4px;">
-              代理: <code>${a.proxy || '直连'}</code> | 偏移: ${a.offset_minutes || 0}分钟 | 当前积分: <strong style="color:var(--primary);">${a.balance || 0}</strong>
+              代理: <code>${a.proxy || '直连'}</code> | 偏移: ${a.offset_minutes || 0}分钟 | 指纹: <code style="color:#a7f3d0; font-size:11px;">${a.fingerprint_summary || '默认'}</code>
             </div>
           </div>
           <div class="flex-row">
+            <button class="btn btn-secondary btn-sm" onclick="openFingerprintModal('${a.name}')">专属指纹</button>
             ${authBtns}
             <button class="btn btn-secondary btn-sm" onclick="toggleAcc('${a.name}', ${!a.enabled})">${a.enabled ? '停用' : '启用'}</button>
             <button class="btn btn-danger btn-sm" onclick="deleteAcc('${a.name}')">删除</button>
@@ -898,6 +961,88 @@ HTML_CONTENT = """<!DOCTYPE html>
       }
     }
 
+    /* 账号专属硬件指纹弹窗 */
+    async function openFingerprintModal(name) {
+      activeAccountName = name;
+      document.getElementById('fp-modal-title').innerText = `账号反检测专属硬件指纹: [${name}]`;
+      try {
+        const res = await fetch(`/api/accounts/fingerprint?name=${encodeURIComponent(name)}`);
+        const d = await res.json();
+        if (d.status !== 'ok') throw new Error(d.message || '获取失败');
+        currentFpData = d.data || {};
+        _populateFpForm(currentFpData);
+        document.getElementById('fingerprint-modal').style.display = 'flex';
+      } catch(e) {
+        toast('读取指纹失败: ' + e);
+      }
+    }
+
+    function _populateFpForm(fp) {
+      document.getElementById('fp-os').value = fp.os_name || 'Windows 11';
+      document.getElementById('fp-edge-ver').value = fp.edge_version || '141';
+      document.getElementById('fp-gpu').value = fp.webgl_renderer || 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0)';
+      document.getElementById('fp-cpu').value = fp.hardware_concurrency || 8;
+      document.getElementById('fp-mem').value = fp.device_memory || 16;
+      document.getElementById('fp-res').value = `${fp.screen_width || 1920},${fp.screen_height || 1080}`;
+      document.getElementById('fp-tz').value = fp.timezone || 'Asia/Singapore';
+      document.getElementById('fp-locale').value = fp.locale || 'zh-CN,zh;q=0.9,en;q=0.8';
+      document.getElementById('fp-ua').value = fp.user_agent || '';
+    }
+
+    function closeFingerprintModal() {
+      document.getElementById('fingerprint-modal').style.display = 'none';
+      fetchStatus();
+    }
+
+    async function randomizeFingerprint() {
+      if (!confirm(`确定为账号 ${activeAccountName} 重新随机派生一套全新的硬件指纹吗？`)) return;
+      try {
+        const res = await fetch('/api/accounts/fingerprint/generate', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: activeAccountName})
+        });
+        const d = await res.json();
+        if (d.status === 'ok') {
+          currentFpData = d.data;
+          _populateFpForm(currentFpData);
+          toast('已重新随机生成专属硬件指纹！');
+        }
+      } catch(e) {
+        toast('生成失败: ' + e);
+      }
+    }
+
+    async function saveFingerprintConfig() {
+      const resVal = document.getElementById('fp-res').value.split(',');
+      const osVal = document.getElementById('fp-os').value;
+      const body = {
+        name: activeAccountName,
+        os_name: osVal,
+        platform: 'Win32',
+        platform_version: osVal === 'Windows 11' ? '15.0.0' : '10.0.0',
+        edge_version: document.getElementById('fp-edge-ver').value.trim() || '141',
+        full_version: currentFpData?.full_version || '141.0.3200.50',
+        webgl_renderer: document.getElementById('fp-gpu').value,
+        webgl_vendor: document.getElementById('fp-gpu').value.includes('Intel') ? 'Google Inc. (Intel)' : (document.getElementById('fp-gpu').value.includes('AMD') ? 'Google Inc. (AMD)' : 'Google Inc. (NVIDIA)'),
+        hardware_concurrency: parseInt(document.getElementById('fp-cpu').value) || 8,
+        device_memory: parseInt(document.getElementById('fp-mem').value) || 16,
+        screen_width: parseInt(resVal[0]) || 1920,
+        screen_height: parseInt(resVal[1]) || 1080,
+        timezone: document.getElementById('fp-tz').value.trim() || 'Asia/Singapore',
+        locale: document.getElementById('fp-locale').value.trim() || 'zh-CN,zh;q=0.9,en;q=0.8',
+        user_agent: document.getElementById('fp-ua').value.trim()
+      };
+
+      await fetch('/api/accounts/fingerprint', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)
+      });
+      toast('专属指纹已保存');
+      closeFingerprintModal();
+    }
+
     /* 全量参数配置装载与保存 */
     async function loadSettingsForm() {
       try {
@@ -938,13 +1083,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         // 5. browser
         document.getElementById('b-headless').value = String(s.browser?.headless !== false);
-        document.getElementById('b-version').value = s.browser?.version || '141';
-        document.getElementById('b-platform').value = s.browser?.spoof_platform || 'Win32';
-        document.getElementById('b-cpu').value = s.browser?.hardware_concurrency ?? 8;
-        document.getElementById('b-memory').value = s.browser?.device_memory ?? 8;
         document.getElementById('b-webrtc').value = String(s.browser?.disable_webrtc_leak !== false);
-        document.getElementById('b-width').value = s.browser?.window_width ?? 1280;
-        document.getElementById('b-height').value = s.browser?.window_height ?? 900;
         document.getElementById('b-binary').value = s.browser?.binary || '';
 
         // 6. notify
@@ -1016,13 +1155,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         },
         browser: {
           headless: document.getElementById('b-headless').value === 'true',
-          version: document.getElementById('b-version').value.trim() || '141',
-          spoof_platform: document.getElementById('b-platform').value || 'Win32',
-          hardware_concurrency: parseInt(document.getElementById('b-cpu').value) || 8,
-          device_memory: parseInt(document.getElementById('b-memory').value) || 8,
           disable_webrtc_leak: document.getElementById('b-webrtc').value === 'true',
-          window_width: parseInt(document.getElementById('b-width').value) || 1280,
-          window_height: parseInt(document.getElementById('b-height').value) || 900,
           binary: document.getElementById('b-binary').value.trim() || null
         },
         notify: {
@@ -1237,6 +1370,17 @@ class WebHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if path == '/api/accounts/fingerprint':
+            params = urllib.parse.parse_qs(u.query)
+            name = params.get('name', [None])[0]
+            if not name:
+                self._json_resp({'status': 'error', 'message': '缺少账号参数 name'}, code=400)
+                return
+            from msr import fingerprint
+            fp = fingerprint.load_or_create(name)
+            self._json_resp({'status': 'ok', 'data': fp})
+            return
+
         self.send_error(404, 'Not Found')
 
     def do_POST(self):
@@ -1280,6 +1424,31 @@ class WebHandler(BaseHTTPRequestHandler):
             config.save_accounts(accs)
             append_live_log(f'保存账号配置: {name}')
             self._json_resp({'status': 'ok'})
+            return
+
+        if path == '/api/accounts/fingerprint':
+            from msr import fingerprint
+            name = payload.get('name')
+            if not name:
+                self._json_resp({'status': 'error', 'message': '缺少账号参数 name'}, code=400)
+                return
+            fingerprint.save_fingerprint(name, payload)
+            append_live_log(f'更新账号 [{name}] 的专属反检测硬件指纹配置')
+            self._json_resp({'status': 'ok'})
+            return
+
+        if path == '/api/accounts/fingerprint/generate':
+            from msr import fingerprint, config
+            name = payload.get('name')
+            if not name:
+                self._json_resp({'status': 'error', 'message': '缺少账号参数 name'}, code=400)
+                return
+            rg = config.load_json(config.pfile(name, 'region.json'), {}) or {}
+            c = rg.get('country') or 'SG'
+            new_fp = fingerprint.generate_fingerprint(name, country=c, randomize=True)
+            fingerprint.save_fingerprint(name, new_fp)
+            append_live_log(f'重新随机生成了账号 [{name}] 的专属反检测硬件指纹')
+            self._json_resp({'status': 'ok', 'data': new_fp})
             return
 
         if path == '/api/accounts/toggle':
@@ -1335,7 +1504,7 @@ class WebHandler(BaseHTTPRequestHandler):
         self.send_error(404, 'Not Found')
 
     def _handle_status(self):
-        from msr import config, auth, history
+        from msr import config, auth, history, fingerprint
         accs = config.accounts()
         detailed = []
         for a in accs:
@@ -1345,6 +1514,9 @@ class WebHandler(BaseHTTPRequestHandler):
             bal = st.get('balance', rg.get('balance', 0))
             auth_info = auth.get_auth_status(name)
             h7 = history.get_7day_history(name, current_balance=bal)
+            fp = fingerprint.load_or_create(name, country=rg.get('country'))
+            gpu_short = fp.get('webgl_renderer', '').split('Direct3D')[0].replace('ANGLE (', '').split(',')[0].strip()
+            fp_summary = f"{fp.get('os_name', 'Win11')} | {gpu_short} | {fp.get('hardware_concurrency', 8)}核{fp.get('device_memory', 16)}G | {fp.get('screen_width', 1920)}x{fp.get('screen_height', 1080)}"
             detailed.append({
                 'name': name,
                 'enabled': a.get('enabled', True),
@@ -1356,7 +1528,9 @@ class WebHandler(BaseHTTPRequestHandler):
                 'last_run': st.get('last_run'),
                 'last_results': st.get('last_results', []),
                 'auth': auth_info,
-                'history_7d': h7
+                'history_7d': h7,
+                'fingerprint': fp,
+                'fingerprint_summary': fp_summary
             })
         self._json_resp({'accounts': detailed, 'time': time.strftime('%F %T')})
 
@@ -1487,4 +1661,3 @@ def run_web(host='0.0.0.0', port=8080):
 
 
 start_server = run_web
-

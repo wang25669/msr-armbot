@@ -144,22 +144,35 @@ def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger):
 
 
 def run_browser_session(name, phases, token, pr, profile_path, config, proxy=None, cdp_port=None):
-    """单浏览器会话: 起 headless chromium -> 注入 cookie -> 连续执行所有浏览器阶段 -> 停。
+    """单浏览器会话: 起独立 profile headless chromium -> 注入账号专属指纹与 cookie -> 连续执行所有浏览器阶段 -> 彻底终结。
 
     返回 dict: {phase: result}。
     """
-    from msr import browser
+    from msr import browser, fingerprint
     bc = browser_cfg(config)
     chrome_dir = profile_path + '/chrome'
     logger = lambda msg: config.log(name, msg)
+
+    # 1. 账号级反检测指纹加载/生成 (不同账号独立显卡/核心/内存/分辨率/时区)
+    fp = fingerprint.load_or_create(name, country=pr.get('country'))
+    logger('应用账号专属硬件指纹: %s (%s, %s, %s核%dG, %dx%d, %s)' % (
+        name, fp.get('os_name'), fp.get('webgl_renderer', '').split('Direct3D')[0].strip(),
+        fp.get('hardware_concurrency'), fp.get('device_memory'),
+        fp.get('screen_width'), fp.get('screen_height'), fp.get('timezone')
+    ))
+
     ch = browser.Chromium(binary=bc['binary'], user_data_dir=chrome_dir,
-                          version=bc['version'], log=logger,
-                          proxy=proxy, cdp_port=cdp_port)
+                          version=fp.get('edge_version', bc['version']), log=logger,
+                          proxy=proxy, cdp_port=cdp_port, fingerprint=fp)
     tabs = ch.start()
-    tab = ch.new_tab('about:blank')
+    # 优先复用 start 创建好的首个标签，避免多余空白标签占用 ARM 内存
+    tab = tabs[0] if tabs else ch.new_tab('about:blank')
     results = {}
     try:
         cdp = ch.attach(tab)
+        # 清除其余多余标签，保证仅当前 1 个工作标签在运行
+        ch.cleanup_extra_tabs(keep_tab_id=tab.get('id'))
+
         cookies = config.load_json(config.pfile(name, 'cookie.json'))
         if cookies:
             browser.inject_cookies(cdp, cookies, log=logger)
@@ -173,13 +186,19 @@ def run_browser_session(name, phases, token, pr, profile_path, config, proxy=Non
             except Exception as ex:
                 results[phase] = '失败(%s)' % str(ex)[:60]
                 logger('!!! 浏览器阶段 %s 异常: %s' % (phase, str(ex)[:120]))
+            finally:
+                # 每个阶段完成后，立即关闭所有可能产生的子标签，及时释放 ARM 内存
+                ch.cleanup_extra_tabs(keep_tab_id=tab.get('id'))
+
         return results
     finally:
         try:
             ch.close_tab(tab.get('id'))
         except Exception:
             pass
+        # 彻底终结 Chromium 整个进程树并释放 profile 锁与系统内存
         ch.stop()
+        logger('已完全关闭浏览器并释放当前账号 Profile 与系统内存')
 
 
 def run_browser_phase(name, phase, token, pr, profile_path, config, proxy=None, cdp_port=None):

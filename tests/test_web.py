@@ -96,7 +96,32 @@ try:
         assert target['auth']['valid'] is True
         assert 'history_7d' in target
         assert len(target['history_7d']['days']) == 7
+        assert 'fingerprint' in target
+        assert 'webgl_renderer' in target['fingerprint']
     print('[OK] /api/status 返回自动凭据检测与 7 天得分概况正常')
+
+    # 4.3 测试 GET /api/accounts/fingerprint
+    req = urllib.request.Request(f'{base_url}/api/accounts/fingerprint?name=web_test_acc')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        fp_resp = json.loads(resp.read().decode())
+        assert fp_resp['status'] == 'ok'
+        fp_data = fp_resp['data']
+        assert fp_data['name'] == 'web_test_acc'
+        assert fp_data['country'] in ('SG', 'US')
+        assert 'hardware_concurrency' in fp_data
+
+    # 4.4 测试 POST /api/accounts/fingerprint/generate (重新随机生成)
+    req = urllib.request.Request(f'{base_url}/api/accounts/fingerprint/generate',
+                                 data=json.dumps({'name': 'web_test_acc', 'country': 'JP'}).encode(),
+                                 headers={'Content-Type': 'application/json'}, method='POST')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        gen_resp = json.loads(resp.read().decode())
+        assert gen_resp['status'] == 'ok'
+        new_fp = gen_resp['data']
+        assert 'webgl_renderer' in new_fp
+    print('[OK] /api/accounts/fingerprint 端点正常')
 
     # 5. 测试 POST /api/settings 配置修改
     req = urllib.request.Request(f'{base_url}/api/settings',

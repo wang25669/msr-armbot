@@ -350,16 +350,22 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
 
         if new_tabs and ch:
             target_tid = new_tabs[0]
-            if kind == 'quiz':
-                interact_quiz(ch, target_tid, label=title, log=log)
-                wait = random.uniform(60, 90)
-                log('%s 答题后停留 %.1f 分钟' % (title, wait / 60))
-                time.sleep(wait)
-            else:
-                wait = random.uniform(120, 180)
-                log('%s 停留 %.1f 分钟' % (title, wait / 60))
-                time.sleep(wait)
-            ch.close_tab(target_tid)
+            try:
+                if kind == 'quiz':
+                    interact_quiz(ch, target_tid, label=title, log=log)
+                    wait = random.uniform(60, 90)
+                    log('%s 答题后停留 %.1f 分钟' % (title, wait / 60))
+                    time.sleep(wait)
+                else:
+                    wait = random.uniform(120, 180)
+                    log('%s 停留 %.1f 分钟' % (title, wait / 60))
+                    time.sleep(wait)
+            finally:
+                for tid in new_tabs:
+                    try:
+                        ch.close_tab(tid)
+                    except Exception:
+                        pass
         else:
             time.sleep(random.uniform(10, 20))
 
@@ -470,26 +476,32 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
 
             if new_tabs and ch:
                 target_tid = new_tabs[0]
-                # 若搜索链接无 q (如 form=ML2YBF 开始搜索)，在目标标签真实发起一次搜索
-                if not step_info.get('hasQuery') and 'bing.com' in step_href:
-                    try:
-                        c2 = ch.attach({'id': target_tid, 'webSocketDebuggerUrl': f'ws://127.0.0.1:{ch.port}/devtools/page/{target_tid}'})
-                        time.sleep(2)
-                        focused = ev(c2, """(() => {
-                          const i = document.querySelector('#sb_form_q, textarea[name=q], input[name=q]');
-                          if (i) { i.focus(); return 'OK'; }
-                          return null;
-                        })()""")
-                        if focused:
-                            c2.call('Input.insertText', {'text': 'today news'})
-                            time.sleep(random.uniform(1.0, 1.8))
-                            press_enter(c2)
-                            time.sleep(4)
-                        c2.close()
-                    except Exception as ex:
-                        log('附带搜索容忍: %s' % str(ex)[:60])
-                time.sleep(random.uniform(8, 12))
-                ch.close_tab(target_tid)
+                try:
+                    # 若搜索链接无 q (如 form=ML2YBF 开始搜索)，在目标标签真实发起一次搜索
+                    if not step_info.get('hasQuery') and 'bing.com' in step_href:
+                        try:
+                            c2 = ch.attach({'id': target_tid, 'webSocketDebuggerUrl': f'ws://127.0.0.1:{ch.port}/devtools/page/{target_tid}'})
+                            time.sleep(2)
+                            focused = ev(c2, """(() => {
+                              const i = document.querySelector('#sb_form_q, textarea[name=q], input[name=q]');
+                              if (i) { i.focus(); return 'OK'; }
+                              return null;
+                            })()""")
+                            if focused:
+                                c2.call('Input.insertText', {'text': 'today news'})
+                                time.sleep(random.uniform(1.0, 1.8))
+                                press_enter(c2)
+                                time.sleep(4)
+                            c2.close()
+                        except Exception as ex:
+                            log('附带搜索容忍: %s' % str(ex)[:60])
+                    time.sleep(random.uniform(8, 12))
+                finally:
+                    for tid in new_tabs:
+                        try:
+                            ch.close_tab(tid)
+                        except Exception:
+                            pass
             else:
                 time.sleep(random.uniform(5, 8))
 
@@ -537,8 +549,14 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
         wmin = 3 if fast else int(st.get('cards', {}).get('attribution_wait_min', 60))
         wmax = 6 if fast else int(st.get('cards', {}).get('attribution_wait_max', 120))
         if new_tabs and ch:
-            time.sleep(random.uniform(wmin, wmax))
-            ch.close_tab(new_tabs[0])
+            try:
+                time.sleep(random.uniform(wmin, wmax))
+            finally:
+                for tid in new_tabs:
+                    try:
+                        ch.close_tab(tid)
+                    except Exception:
+                        pass
         else:
             time.sleep(random.uniform(min(wmin, 10), min(wmax, 20)))
         done_count += 1
