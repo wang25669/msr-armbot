@@ -53,13 +53,13 @@ refresh_token 90 天滚动续期(每次成功刷新就续), 正常不需要反�
 ## 运行
 
 ```bash
-python3 -m msr run --all          # 全部账号串行(账号间随机等 15-40 分钟)
-python3 -m msr run sg             # 只跑一个账号
-python3 -m msr run sg --dry-run   # 只打印执行计划, 不执行
-python3 -m msr run sg --only=app  # 只跑某阶段: app/read/edge_api/search/quick/quests/earn/visual
-python3 -m msr account sg --proxy http://127.0.0.1:7890  # 设置单个账号独立代理
-python3 -m msr status             # 全部账号状态(含独立代理配置)
-python3 -m msr report             # 当日报告
+python3 -m msr run --all                 # 全部账号串行(账号间随机等 15-40 分钟)
+python3 -m msr run sg                    # 只跑一个账号(含后台 edge30m 与前台单会话浏览器并行编排)
+python3 -m msr run sg --dry-run          # 只打印执行计划, 不执行
+python3 -m msr run sg --only=dailyset    # 单跑某阶段: appcheckin/appread/edge30m/dailyset/quests/moreactivities/search/visual
+python3 -m msr account sg --proxy http://127.0.0.1:7890  # 设置单个账号独立出口代理
+python3 -m msr status                    # 全部账号状态(含独立代理配置)
+python3 -m msr report                    # 当日报告
 ```
 
 ## 全部可配置项
@@ -90,17 +90,17 @@ python3 -m msr report             # 当日报告
 
 install.sh 自动填 binary 和 version, 之后可手改。
 
-### 3. 账号 `~/.msr/accounts.json` (login 自动生成, 支持独立代理与外接端口)
+### 3. 账号 `~/.msr/accounts.json` (login 自动生成, 支持独立出口代理)
 
 ```json
 [
-  {"name": "sg", "enabled": true, "proxy": null, "cdp_port": 9222, "offset_minutes": 0},
-  {"name": "cn", "enabled": true, "proxy": "http://127.0.0.1:7890", "cdp_port": null, "offset_minutes": 45}
+  {"name": "sg", "enabled": true, "proxy": null, "offset_minutes": 0},
+  {"name": "cn", "enabled": true, "proxy": "http://127.0.0.1:7890", "offset_minutes": 45}
 ]
 ```
 
-- `proxy`: 可选独立出口代理 (`http://`, `https://`, `socks5://` 或 `null` 直连)
-- `cdp_port`: 可选外接 Chrome 远程调试端口 (如本机外挂的 9222；若为 `null` 则按需启动内置 headless chromium)
+- `proxy`: 每个账号独立出口代理 (`http://`, `https://`, `socks5://` 或 `null` 直连)。API 请求与 Chromium 浏览器请求均强制通过该代理出口，并启用 WebRTC 防泄漏策略。
+- `cdp_port`: (可选调试项，默认不需要) 仅用于开发者外挂已有 Chrome 端口进行抓包逆向；日常运行保持不填或设为 `null`，程序自动调度内置 Headless 浏览器。
 
 
 ### 4. 通知 `~/.msr/notify.json` (可选, 默认 stdout+日志)
@@ -193,17 +193,18 @@ install.sh           Armbian 一键安装
 
 任务逻辑以现网 `/root/.hermes/scripts/` 为准，逐项核对结果：
 
-| 模块 | 状态 | 说明 |
-|---|---|---|
-| App 签到（type 103） | 已一致 | 单次 POST，余额差值为准 |
-| 移动阅读（type 101 ×10） | 已一致 | 每篇间隔 60-120s，零增量即停 |
-| Edge 浏览打卡 | **已对齐** | 每次上报只 POST；上报后 180s 回读仅记日志；两次上报间隔补足 `report_per_minutes*60+5`；最后一次后等 600s 拿最终结果；响应缺 `activity` 时 30s 重发（最多 3 次） |
-| 必应搜索 | 已一致 | 按计数器补满上限 |
-| 每日活动 / 日常任务卡 | **已对齐** | 归因在"点击卡片"动作上，**直接导航 destinationUrl 不计分** → 回 dashboard 按 `dest` 参数匹配真实锚点，用真人鼠标点击（新增 `human_click`）；点击后停留 180-300s（原实现仅 8-15s，归因来不及落库） |
-| 打卡任务 (Quests/Punchcards) | **已全面支持（2026-10-17）** | 注入 `MSRewards/Desktop` 与专属请求头解锁桌面任务；自动识别 `/earn/quest/`，支持多步骤循环推进、无 `q` 搜索补全、`ms-search://` 协议兼容与多天冷却去重 |
-| 视觉搜索 | **已移植（2026-10-17）** | `msr/tasks_visual.py`：面板判据 → Bing 壁纸取图 → 镜头真人点击 → 真实键入+Enter（合成 paste 降级）→ 落页停留 15s → 面板回读裁决 |
-| 多账号独立代理出口 | **已全面支持（2026-10-17）** | 支持针对每个账号配置独立 `proxy`（HTTP/SOCKS5）与外接 `cdp_port`，API 流量与 Chromium 浏览器流量完全隔离走各自出口 |
-| 自动核查 + 自动修复 | **已新增** | 阶段抛异常或返回"未complete/未出现"时，等 4 分钟只重跑失败项一次 |
+| 阶段标识 (规范命名) | 中文说明 | 引擎 | 执行策略与风控对抗 |
+|---|---|---|---|
+| `appcheckin` | 必应移动 App 签到 | API (type103) | 模拟 BingSapphire Android 14 移动端，单次 POST，以余额差值计算增量 |
+| `appread` | 资讯文章阅读 (10篇) | API (type101) | 每篇间隔 60-120s 随机波动，读满 10 篇或零增量自动停 |
+| `edge30m` | Edge 浏览打卡 (30分钟) | API (type714/29) | 5 分钟心跳上报共 6 次。**与前台浏览器任务在后台并行执行**，总耗时省 30 分钟 |
+| `dailyset` | 每日活动 (Daily Set 3卡) | Chromium DOM | `#dailyset` 结构解析，带真人鼠标平滑轨迹点击，智能识别题目选项 (`.btq_opt` / `role=radio`) |
+| `quests` | 任务打卡 (含桌面专属) | Chromium DOM | 注入 `MSRewards/Desktop` 伪装解锁桌面专属 Punchcards；支持多步骤流转推进与多日冷却去重 |
+| `moreactivities` | 日常任务卡片 | Chromium DOM | `#moreactivities` 自动剔除已完成与兑换券卡片，真人点击停留落库 |
+| `search` | 必应 PC 搜索补全 | Chromium DOM | 读 dashboard/streaks 上限计数器，逐字真人按键键入，搜满即停 |
+| `visual` | 视觉搜索连续打卡 | Chromium DOM | 面板判据 → Bing 每日壁纸取图 → 镜头真人点击 → 键入搜索并停留落库 |
+| **单会话单实例** | 浏览器全阶段流转 | Chromium CDP | 单账号只启动一次 Chromium，连续流转所有浏览器任务后退出，告别频繁启停 |
+| **全方位指纹伪装** | 反检测与代理隔离 | Anti-Detect | Linux/ARM 平台伪装 `Win32`、抹除 `webdriver`、掩盖 WebGL 渲染器、禁用 WebRTC UDP 泄漏 |
 
 现网另有 `repair` 阶段（读奖励面板五项逐项补做）。本项目由 **planner 每次幂等重跑 + runner 失败重试** 达成同等效果，不重复实现面板抓取。
 

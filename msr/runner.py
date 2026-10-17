@@ -56,18 +56,58 @@ def run_one(name, args, config, planner, probe, api, executor):
         return
 
     st = config.load_json(config.pfile(name, 'state.json'), {}) or {}
-    results = []
-    for w in plan:
-        phase, needs = w['phase'], w['needs']
+    results_map = {}
+
+    api_phases = [w['phase'] for w in plan if w['needs'] == 'api']
+    browser_phases = [w['phase'] for w in plan if w['needs'] == 'browser']
+
+    # 1. 优先串行执行极速 API 任务 (appcheckin, appread)
+    fast_api = [ph for ph in api_phases if ph not in ('edge30m', 'edge_api', 'edge')]
+    for ph in fast_api:
         try:
-            if needs == 'api':
-                r = executor.run_api_phase(name, phase, token, pr, p, config, api, proxy=proxy)
-            else:
-                r = executor.run_browser_phase(name, phase, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
-            results.append('%s:%s' % (phase, r))
+            r = executor.run_api_phase(name, ph, token, pr, p, config, api, proxy=proxy)
+            results_map[ph] = r
+            config.log(name, 'API阶段 %s 完成: %s' % (ph, r))
         except Exception as ex:
-            results.append('%s:失败(%s)' % (phase, str(ex)[:60]))
-            config.log(name, '!!! %s 异常(其余阶段不受影响): %s' % (phase, str(ex)[:120]))
+            results_map[ph] = '失败(%s)' % str(ex)[:60]
+            config.log(name, '!!! API阶段 %s 异常: %s' % (ph, str(ex)[:120]))
+
+    # 2. 长耗时 Edge 30分钟浏览心跳任务 (若与浏览器任务共存则后台并行，节省 ~30 分钟)
+    has_edge = any(ph in ('edge30m', 'edge_api', 'edge') for ph in api_phases)
+    edge_ph = next((ph for ph in api_phases if ph in ('edge30m', 'edge_api', 'edge')), None)
+    edge_thread = None
+
+    if has_edge:
+        def edge_worker():
+            try:
+                config.log(name, '>>> [后台并行] 启动 Edge 30分钟浏览打卡心跳...')
+                r = executor.run_api_phase(name, edge_ph, token, pr, p, config, api, proxy=proxy)
+                results_map[edge_ph] = r
+                config.log(name, '<<< [后台并行] Edge 30分钟打卡完成: %s' % r)
+            except Exception as ex:
+                results_map[edge_ph] = '失败(%s)' % str(ex)[:60]
+                config.log(name, '!!! [后台并行] Edge 30分钟打卡异常: %s' % str(ex)[:120])
+
+        if browser_phases:
+            import threading
+            edge_thread = threading.Thread(target=edge_worker, name=f'edge30m-{name}')
+            edge_thread.start()
+        else:
+            edge_worker()
+
+    # 3. 前台启动单个浏览器会话，真人流转依次执行该账号的所有浏览器阶段
+    if browser_phases:
+        b_results = executor.run_browser_session(name, browser_phases, token, pr, p, config,
+                                                 proxy=proxy, cdp_port=cdp_port)
+        results_map.update(b_results)
+
+    # 4. 若有后台 Edge 打卡心跳线程，等待其 30 分钟周期结束
+    if edge_thread is not None:
+        config.log(name, '前台浏览器任务已全部就绪，等待后台 Edge 30分钟打卡结束...')
+        edge_thread.join()
+
+    # 5. 按照原始 plan 顺序组装结果
+    results = ['%s:%s' % (w['phase'], results_map.get(w['phase'], '未执行')) for w in plan]
 
     # 自动核查 + 自动修复
     bad = []
@@ -78,19 +118,21 @@ def run_one(name, args, config, planner, probe, api, executor):
     if bad and not args.dry_run:
         config.log(name, '自动修复: 等待 4 分钟后重跑 %s' % bad)
         time.sleep(240)
-        for ph in bad:
-            needs = next((t['needs'] for t in planner.TASK_TABLE.values()
-                          if t['phase'] == ph), 'api')
+        bad_api = [ph for ph in bad if next((t['needs'] for t in planner.TASK_TABLE.values() if t['phase'] == ph), 'api') == 'api']
+        bad_browser = [ph for ph in bad if ph not in bad_api]
+        for ph in bad_api:
             try:
-                if needs == 'api':
-                    r = executor.run_api_phase(name, ph, token, pr, p, config, api, proxy=proxy)
-                else:
-                    r = executor.run_browser_phase(name, ph, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
+                r = executor.run_api_phase(name, ph, token, pr, p, config, api, proxy=proxy)
                 results.append('%s:修复(%s)' % (ph, r))
                 config.log(name, '自动修复 %s: %s' % (ph, r))
             except Exception as ex:
                 results.append('%s:修复失败(%s)' % (ph, str(ex)[:50]))
                 config.log(name, '自动修复 %s 仍失败: %s' % (ph, str(ex)[:100]))
+        if bad_browser:
+            b_fixes = executor.run_browser_session(name, bad_browser, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
+            for ph, r in b_fixes.items():
+                results.append('%s:修复(%s)' % (ph, r))
+                config.log(name, '自动修复 %s: %s' % (ph, r))
 
     st['last_run'] = time.strftime('%F %T')
     st['last_results'] = results

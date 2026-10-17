@@ -15,7 +15,7 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
     ah = api.app_headers(token, rg)
     c = rg['country'].lower()
 
-    if phase == 'app':
+    if phase in ('appcheckin', 'appchekin', 'app', 'checkin'):
         old = api.get_me(name, token, rg, proxy=proxy).get('balance')
         r = api.api(name, 'POST', '/me/activities', token, ah,
                     {'amount': 1, 'attributes': {}, 'id': str(uuid.uuid4()), 'type': 103,
@@ -24,7 +24,7 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
         gained = (new or 0) - (old or 0)
         return '+%s' % gained
 
-    if phase == 'read':
+    if phase in ('appread', 'read'):
         total, done = 0, 0
         for i in range(10):
             old = api.get_me(name, token, rg, proxy=proxy).get('balance')
@@ -40,7 +40,7 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
             time.sleep(random.uniform(60, 120))
         return '%d篇+%d' % (done, total)
 
-    if phase == 'edge_api':
+    if phase in ('edge30m', 'edge_api', 'edge'):
         promos = api.get_me(name, token, rg, proxy=proxy)
         flight = api.find_promo(promos, 'edge_browsing_streak_flight')
         if flight is None:
@@ -98,11 +98,17 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
 
 def browser_cfg(config):
     """浏览器可配置项(全部有默认值, 环境变量/配置文件可覆盖)。"""
+    import os
+    import shutil
     from msr import config as C
     cfg = C.load_json(C.HOME + '/browser.json', {}) or {}
-    import os
+    default_bin = 'chromium'
+    for cand in ('google-chrome', 'chromium', 'chromium-browser', 'edge', 'msedge'):
+        if shutil.which(cand):
+            default_bin = cand
+            break
     return {
-        'binary': cfg.get('binary') or os.environ.get('MSR_CHROMIUM', 'chromium'),
+        'binary': cfg.get('binary') or os.environ.get('MSR_CHROMIUM', default_bin),
         'version': cfg.get('version') or os.environ.get('MSR_EDGE_VERSION', '141'),
         'search_budget_min': int(cfg.get('search_budget_minutes', 60)),
         'cards_budget_min': int(cfg.get('cards_budget_minutes', 25)),
@@ -110,11 +116,39 @@ def browser_cfg(config):
     }
 
 
-def run_browser_phase(name, phase, token, pr, profile_path, config, proxy=None, cdp_port=None):
-    """浏览器阶段: 起 headless chromium -> 注入 cookie -> 执行 -> 停。支持独立代理与外接 CDP 端口。"""
-    from msr import browser
+def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger):
+    """在现有 CDP 会话中分发具体浏览器任务。"""
     from msr import tasks_browser as tb
+    p = phase.lower()
+    if p in ('dailyset', 'quick'):
+        return tb.phase_dailyset(name, cdp, pr, ch=ch,
+                                 budget_seconds=bc['cards_budget_min'] * 60,
+                                 log=logger)
+    if p in ('quests', 'quest', 'punchcard'):
+        return tb.phase_quests(name, cdp, pr, ch=ch,
+                               budget_seconds=bc['cards_budget_min'] * 60,
+                               log=logger)
+    if p in ('moreactivities', 'earn', 'more'):
+        return tb.phase_moreactivities(name, cdp, pr, ch=ch,
+                                      budget_seconds=bc['cards_budget_min'] * 60,
+                                      log=logger)
+    if p in ('search', 'pcsearch'):
+        return tb.phase_search(name, cdp, pr, ch=ch,
+                               budget_seconds=bc['search_budget_min'] * 60,
+                               log=logger)
+    if p in ('visual', 'visualsearch'):
+        from msr import tasks_visual
+        return tasks_visual.run(name, cdp, pr, log=logger,
+                                used_path=config.pfile(name, 'visual_used.json'))
+    return '未知浏览器阶段 %s' % phase
 
+
+def run_browser_session(name, phases, token, pr, profile_path, config, proxy=None, cdp_port=None):
+    """单浏览器会话: 起 headless chromium -> 注入 cookie -> 连续执行所有浏览器阶段 -> 停。
+
+    返回 dict: {phase: result}。
+    """
+    from msr import browser
     bc = browser_cfg(config)
     chrome_dir = profile_path + '/chrome'
     logger = lambda msg: config.log(name, msg)
@@ -123,36 +157,32 @@ def run_browser_phase(name, phase, token, pr, profile_path, config, proxy=None, 
                           proxy=proxy, cdp_port=cdp_port)
     tabs = ch.start()
     tab = ch.new_tab('about:blank')
+    results = {}
     try:
         cdp = ch.attach(tab)
         cookies = config.load_json(config.pfile(name, 'cookie.json'))
         if cookies:
             browser.inject_cookies(cdp, cookies, log=logger)
 
-        if phase == 'search':
-            return tb.phase_search(name, cdp, pr, ch=ch,
-                                   budget_seconds=bc['search_budget_min'] * 60,
-                                   log=logger)
-        if phase == 'quick':
-            return tb.phase_quick(name, cdp, pr, ch=ch,
-                                  budget_seconds=bc['cards_budget_min'] * 60,
-                                  log=logger)
-        if phase == 'quests':
-            return tb.phase_quests(name, cdp, pr, ch=ch,
-                                   budget_seconds=bc['cards_budget_min'] * 60,
-                                   log=logger)
-        if phase == 'earn':
-            return tb.phase_earn(name, cdp, pr, ch=ch,
-                                 budget_seconds=bc['cards_budget_min'] * 60,
-                                 log=logger)
-        if phase == 'visual':
-            from msr import tasks_visual
-            return tasks_visual.run(name, cdp, pr, log=logger,
-                                    used_path=config.pfile(name, 'visual_used.json'))
-        return '未知浏览器阶段 %s' % phase
+        for phase in phases:
+            logger('>>> 开始浏览器阶段: %s' % phase)
+            try:
+                r = execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger)
+                results[phase] = r
+                logger('<<< 浏览器阶段 %s 完成: %s' % (phase, r))
+            except Exception as ex:
+                results[phase] = '失败(%s)' % str(ex)[:60]
+                logger('!!! 浏览器阶段 %s 异常: %s' % (phase, str(ex)[:120]))
+        return results
     finally:
         try:
             ch.close_tab(tab.get('id'))
         except Exception:
             pass
         ch.stop()
+
+
+def run_browser_phase(name, phase, token, pr, profile_path, config, proxy=None, cdp_port=None):
+    """单阶段调用封装(兼容历史与独立调试)。"""
+    res = run_browser_session(name, [phase], token, pr, profile_path, config, proxy=proxy, cdp_port=cdp_port)
+    return res.get(phase, '未执行')

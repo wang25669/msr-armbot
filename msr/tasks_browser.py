@@ -232,7 +232,7 @@ def interact_quiz(ch, tab_id, label='', log=print):
             pass
 
 
-def phase_quick(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
+def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     """Daily Set 3张每日活动卡。"""
     navigate(cdp, 'https://rewards.bing.com/dashboard')
     time.sleep(random.uniform(3, 5))
@@ -290,6 +290,9 @@ def phase_quick(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     navigate(cdp, 'https://rewards.bing.com/dashboard')
     time.sleep(2)
     return '处理%d张' % done_count
+
+
+phase_quick = phase_dailyset
 
 
 # ---------- 任务打卡 (Quests / Punchcards，含桌面专属打卡) ----------
@@ -420,7 +423,7 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
 
 # ---------- 日常任务卡 (More Activities) ----------
 
-def phase_earn(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
+def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     """日常任务(More Activities 更多活动卡)。"""
     navigate(cdp, 'https://rewards.bing.com/earn')
     time.sleep(random.uniform(3, 5))
@@ -458,3 +461,6 @@ def phase_earn(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
         done_count += 1
 
     return '处理%d张' % done_count
+
+
+phase_earn = phase_moreactivities

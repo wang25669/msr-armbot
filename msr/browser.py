@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import random
+import shutil
 import socket
 import struct
 import subprocess
@@ -213,12 +214,70 @@ def edge_fingerprint(version='141'):
 
 def disguise_edge(cdp, version='141', log=print):
     ua, brands, fullver = edge_fingerprint(version)
-    he_patch = ('(() => { try { const P = Object.getPrototypeOf(navigator.userAgentData);'
-                ' const orig = P.getHighEntropyValues;'
-                ' Object.defineProperty(P, "getHighEntropyValues", {value: function(h) {'
-                ' return orig.call(this, h).then(r => { r.fullVersionList = %s; return r; });'
-                '}, configurable: true, writable: true}); } catch(e) {} })()'
-                % json.dumps(fullver))
+    he_patch = ('''(() => {
+      try {
+        const P = Object.getPrototypeOf(navigator.userAgentData);
+        const orig = P.getHighEntropyValues;
+        Object.defineProperty(P, "getHighEntropyValues", {
+          value: function(h) {
+            return orig.call(this, h).then(r => {
+              r.fullVersionList = %s;
+              r.platform = "Windows";
+              r.platformVersion = "19.0.0";
+              r.architecture = "x86";
+              r.model = "";
+              r.bitness = "64";
+              return r;
+            });
+          },
+          configurable: true,
+          writable: true
+        });
+      } catch(e) {}
+
+      // 覆盖 navigator.platform 为 Win32，消除 Linux/ARM 虚拟化特征
+      try {
+        Object.defineProperty(navigator, 'platform', {
+          get: () => 'Win32',
+          configurable: true
+        });
+      } catch(e) {}
+
+      // 消除 webdriver 自动化特征
+      try {
+        Object.defineProperty(navigator, 'webdriver', {
+          get: () => false,
+          configurable: true
+        });
+      } catch(e) {}
+
+      // 规范硬件核心与内存指纹
+      try {
+        Object.defineProperty(navigator, 'hardwareConcurrency', {
+          get: () => 8,
+          configurable: true
+        });
+        Object.defineProperty(navigator, 'deviceMemory', {
+          get: () => 8,
+          configurable: true
+        });
+      } catch(e) {}
+
+      // 抹平 WebGL 渲染器指纹 (防止泄露 llvmpipe / SwiftShader 虚拟化特征)
+      try {
+        const patchWebGL = (proto) => {
+          if (!proto) return;
+          const orig = proto.getParameter;
+          proto.getParameter = function(param) {
+            if (param === 37445) return 'Google Inc. (NVIDIA)';
+            if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0)';
+            return orig.apply(this, arguments);
+          };
+        };
+        if (window.WebGLRenderingContext) patchWebGL(WebGLRenderingContext.prototype);
+        if (window.WebGL2RenderingContext) patchWebGL(WebGL2RenderingContext.prototype);
+      } catch(e) {}
+    })()''' % json.dumps(fullver))
     try:
         cdp.call('Emulation.setUserAgentOverride', {
             'userAgent': ua,
@@ -230,7 +289,7 @@ def disguise_edge(cdp, version='141', log=print):
     try:
         cdp.call('Page.addScriptToEvaluateOnNewDocument', {'source': he_patch})
     except Exception as ex:
-        log(f'Edge伪装高熵容忍: {ex}')
+        log(f'Edge伪装高熵与反指纹容忍: {ex}')
     try:
         cdp.call('Network.enable')
         cdp.call('Network.setExtraHTTPHeaders', {'headers': {
@@ -242,14 +301,14 @@ def disguise_edge(cdp, version='141', log=print):
 
 
 def verify_disguise(cdp):
-    """自检: 高熵 fullVersionList 必须是 Edge。"""
+    """自检: 高熵 fullVersionList 必须是 Edge 且 platform 为 Win32。"""
     v = ev(cdp, '(async()=>{try{'
                 'if(!navigator.userAgentData) return "NO-UAD";'
                 'const h = await navigator.userAgentData'
                 '.getHighEntropyValues(["fullVersionList"]);'
-                'return JSON.stringify(h.fullVersionList)'
+                'return JSON.stringify({ver: h.fullVersionList, plat: navigator.platform, wd: navigator.webdriver})'
                 '}catch(e){return "ERR:"+e}})()')
-    return 'Microsoft Edge' in (v or '')
+    return 'Microsoft Edge' in (v or '') and 'Win32' in (v or '')
 
 
 # ---------- chromium 生命周期 ----------
@@ -321,6 +380,11 @@ class Chromium:
 
     def __init__(self, binary='chromium', port=None, user_data_dir=None,
                  extra_args=None, version='141', proxy=None, cdp_port=None, log=print):
+        if not shutil.which(binary):
+            for cand in ('google-chrome', 'chromium', 'chromium-browser', 'edge', 'msedge'):
+                if shutil.which(cand):
+                    binary = cand
+                    break
         self.binary = binary
         self.cdp_port = cdp_port
         self.port = port or cdp_port or self._free_port()
@@ -360,6 +424,8 @@ class Chromium:
                 '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
                 '--no-first-run', '--no-default-browser-check',
                 '--disable-background-networking', '--disable-sync',
+                '--disable-blink-features=AutomationControlled',
+                '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
                 '--window-size=1280,900']
         if self.proxy:
             args.append(f'--proxy-server={self.proxy}')

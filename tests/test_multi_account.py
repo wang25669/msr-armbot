@@ -43,9 +43,9 @@ phases_cn = [w['phase'] for w in plan_cn]
 phases_sg = [w['phase'] for w in plan_sg]
 
 assert 'quests' in phases_cn and 'quests' in phases_sg
-assert 'quick' in phases_cn and 'quick' in phases_sg
+assert 'dailyset' in phases_cn and 'dailyset' in phases_sg
 assert 'search' in phases_cn and 'search' in phases_sg
-print('[OK] 区域任务计划生成包含打卡任务 (quests)')
+print('[OK] 区域任务计划生成包含打卡任务 (quests) 与每日活动 (dailyset)')
 
 shutil.rmtree(TMP)
 print('ALL_OK')
