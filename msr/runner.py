@@ -161,6 +161,13 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
     st['last_results'] = results
     st['balance'] = bal_after
     config.save_json(config.pfile(name, 'state.json'), st)
+
+    try:
+        from msr import history
+        history.record_daily_point(name, start_bal=bal_before, end_bal=bal_after, results=results)
+    except Exception:
+        pass
+
     config.log(name, '=== 运行结束 (余额: %s, 今日增量: +%d): %s ===' % (bal_after, gained, ' | '.join(results)))
 
     if notify:

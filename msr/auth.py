@@ -230,3 +230,52 @@ def _login_by_credential(name, profile_path, config, username, password, proxy=N
             print(f"登录完成但 Cookie 待确认 (条数: {len(cks)})")
     finally:
         ch.stop()
+
+
+def get_auth_status(name):
+    """检查账号登录凭据的有效性状态。返回 dict。"""
+    from msr import config, cookies as cookie_mod
+    p = config.profile(name)
+    tok_f = os.path.join(p, 'token.json')
+    ck_f = os.path.join(p, 'cookie.json')
+
+    has_token = False
+    if os.path.isfile(tok_f):
+        t = config.load_json(tok_f, {}) or {}
+        if t.get('refresh_token') or t.get('access_token'):
+            has_token = True
+
+    has_cookie = False
+    cookie_count = 0
+    has_u = False
+    if os.path.isfile(ck_f):
+        cks = config.load_json(ck_f, []) or []
+        cookie_count = len(cks)
+        diag = cookie_mod.validate_cookies(cks)
+        has_cookie = bool(cks)
+        has_u = diag.get('has_auth_u', False)
+
+    valid = has_token or has_u
+    if has_token and has_u:
+        auth_type = 'full'
+        summary = '有效 (Token+Cookie双就绪)'
+    elif has_token:
+        auth_type = 'oauth'
+        summary = '有效 (OAuth 就绪，待补Cookie)'
+    elif has_u:
+        auth_type = 'cookie'
+        summary = '有效 (Cookie 就绪)'
+    else:
+        auth_type = 'none'
+        summary = '未登录或凭据失效'
+
+    return {
+        'valid': valid,
+        'auth_type': auth_type,
+        'has_token': has_token,
+        'has_cookie': has_cookie,
+        'has_u': has_u,
+        'cookie_count': cookie_count,
+        'summary': summary
+    }
+

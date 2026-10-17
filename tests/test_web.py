@@ -76,6 +76,28 @@ try:
         assert d['count'] == 2
     print('[OK] /api/auth/cookies 导入与校验正常')
 
+    # 4.1 测试 GET /api/auth/cookies 导出 Cookie
+    req = urllib.request.Request(f'{base_url}/api/auth/cookies?name=web_test_acc')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        d = json.loads(resp.read().decode())
+        assert d['status'] == 'ok'
+        assert d['count'] == 2
+        assert d['has_u'] is True
+        assert 'json_str' in d
+    print('[OK] /api/auth/cookies 导出正常')
+
+    # 4.2 测试 GET /api/status 包含 auth 与 history_7d
+    req = urllib.request.Request(f'{base_url}/api/status')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        d = json.loads(resp.read().decode())
+        target = next(a for a in d['accounts'] if a['name'] == 'web_test_acc')
+        assert target['auth']['valid'] is True
+        assert 'history_7d' in target
+        assert len(target['history_7d']['days']) == 7
+    print('[OK] /api/status 返回自动凭据检测与 7 天得分概况正常')
+
     # 5. 测试 POST /api/settings 配置修改
     req = urllib.request.Request(f'{base_url}/api/settings',
                                  data=json.dumps({'search': {'dwell_min_seconds': 135}}).encode(),
@@ -86,6 +108,15 @@ try:
     val = settings.get('search.dwell_min_seconds', home=TMP)
     assert val == 135
     print('[OK] /api/settings 更新全局参数正常')
+
+    # 5.1 测试 POST /api/settings/reset 恢复出厂设置
+    req = urllib.request.Request(f'{base_url}/api/settings/reset', data=b'{}',
+                                 headers={'Content-Type': 'application/json'}, method='POST')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+    val_reset = settings.get('search.dwell_min_seconds', home=TMP)
+    assert val_reset == 180
+    print('[OK] /api/settings/reset 恢复默认值正常')
 
     # 6. 测试 GET /api/logs
     req = urllib.request.Request(f'{base_url}/api/logs')
