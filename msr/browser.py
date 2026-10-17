@@ -244,6 +244,68 @@ def verify_disguise(cdp):
 
 # ---------- chromium 生命周期 ----------
 
+def _base_url(cdp):
+    u = urllib.parse.urlparse(cdp.ws_url)
+    return 'http://%s:%s' % (u.hostname, u.port)
+
+
+def tab_ids(cdp):
+    try:
+        return [t['id'] for t in _http_json(_base_url(cdp) + '/json/list', timeout=5)]
+    except Exception:
+        return []
+
+
+def close_tab(cdp, tid):
+    try:
+        _http_json(_base_url(cdp) + '/json/close/' + tid, timeout=5)
+    except Exception:
+        pass
+
+
+def mouse_move(cdp, x, y):
+    cdp.call('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': x, 'y': y})
+
+
+def human_click(cdp, find_js, label='', close_new=False):
+    """真人式点击: 滚动到可见 -> 随机轨迹接近 -> 按压释放。返回新标签 id 列表。
+
+    2026-10-15 从现网 bing_daily_v2.human_click 移植。Rewards 卡片的归因
+    记在"点击卡片"这个动作上, 直接 navigate 到 destinationUrl 不落库,
+    所以卡片任务必须走真实鼠标点击。
+    """
+    before = set(tab_ids(cdp))
+    time.sleep(random.uniform(0.8, 2.0))
+    pt = ev(cdp, ("(() => { const el = (%s); if (!el) return null;"
+                  " el.scrollIntoView({block:'center'});"
+                  " const r = el.getBoundingClientRect();"
+                  " return {x: r.x + r.width/2, y: r.y + r.height/2}; })()" % find_js))
+    if not pt:
+        raise StepError('点击目标不存在: %s' % label)
+    x, y = float(pt['x']), float(pt['y'])
+    time.sleep(random.uniform(0.5, 1.2))
+    sx, sy = x + random.uniform(-400, 400), y + random.uniform(-300, 300)
+    for _ in range(random.randint(4, 7)):
+        sx += (x - sx) * random.uniform(0.3, 0.6) + random.uniform(-25, 25)
+        sy += (y - sy) * random.uniform(0.3, 0.6) + random.uniform(-25, 25)
+        mouse_move(cdp, round(sx, 1), round(sy, 1))
+        time.sleep(random.uniform(0.08, 0.2))
+    mouse_move(cdp, round(x, 1), round(y, 1))
+    time.sleep(random.uniform(0.15, 0.4))
+    cdp.call('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': x, 'y': y,
+                                          'button': 'left', 'clickCount': 1})
+    time.sleep(random.uniform(0.05, 0.15))
+    cdp.call('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': x, 'y': y,
+                                          'button': 'left', 'clickCount': 1})
+    time.sleep(random.uniform(1.0, 2.0))
+    new = [t for t in tab_ids(cdp) if t not in before]
+    if close_new:
+        for tid in new:
+            close_tab(cdp, tid)
+        return []
+    return new
+
+
 class Chromium:
     """headless chromium 实例管理(每账号一个, 用完即停)。"""
 

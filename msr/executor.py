@@ -56,18 +56,46 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api):
         if str(flight.get('complete')).lower() == 'true':
             return '已完成'
         interval = int(flight.get('report_per_minutes') or 5) * 60 + 5
+        # 2026-10-09 定稿节奏(与现网 edge_app_streak.do_edge 对齐):
+        #   每次上报只 POST, 不依赖回读; 上报后等 180s 回读一次仅记日志;
+        #   两次上报间补足微软要求的间隔; 最后一次上报后等 600s 拿最终结果。
+        # 2026-10-11 修复: 微软偶发 200 但响应体缺 activity, 防御式取 id,
+        # 缺失则隔 30s 重发(最多 3 次), 不让单次异常炸掉整个任务。
         for i in range(6):
-            api.api(name, 'POST', '/me/activities', token, eh,
-                    {'amount': 1, 'attributes': {'offerid': flight.get('offerid')},
-                     'request_user_info': True, 'type': flight.get('report_offer_type')})
-            time.sleep(20)
-            st = api.find_promo(api.get_me(name, token, rg), 'edge_browsing_streak_flight') or {}
-            config.log(name, 'edge上报%d progress=%s/%s' % (i + 1, st.get('progress'), st.get('max')))
-            if str(st.get('complete')).lower() == 'true':
-                return '完成(%d次)' % (i + 1)
+            aid = None
+            for attempt_no in range(3):
+                r = api.api(name, 'POST', '/me/activities', token, eh,
+                            {'amount': 1, 'attributes': {'offerid': flight.get('offerid')},
+                             'request_user_info': True, 'type': flight.get('report_offer_type')})
+                try:
+                    aid = r['response']['activity']['id']
+                except (KeyError, TypeError):
+                    aid = None
+                if aid:
+                    break
+                config.log(name, 'report%d 第%d次响应缺activity, 30s后重发'
+                           % (i + 1, attempt_no + 1))
+                time.sleep(30)
+            config.log(name, 'report%d act=%s 已上报' % (i + 1, (aid or '?')[:8]))
             if i < 5:
-                time.sleep(interval)
-        return '上报6次未complete'
+                time.sleep(180)
+                st = api.find_promo(api.get_me(name, token, rg),
+                                    'edge_browsing_streak_flight') or {}
+                config.log(name, 'report%d 回读: progress=%s/%s complete=%s'
+                           % (i + 1, st.get('progress'), st.get('max'), st.get('complete')))
+                if str(st.get('complete')).lower() == 'true':
+                    return '完成(%d次)' % (i + 1)
+                time.sleep(max(0, interval - 180))
+        time.sleep(600)
+        resp = api.get_me(name, token, rg)
+        st = api.find_promo(resp, 'edge_browsing_streak_flight') or {}
+        bal = resp.get('balance')
+        config.log(name, '最终回读: progress=%s/%s complete=%s 余额=%s'
+                   % (st.get('progress'), st.get('max'), st.get('complete'), bal))
+        if str(st.get('complete')).lower() == 'true':
+            return 'Edge完成(6次), 余额=%s' % bal
+        return ('Edge上报6次, progress=%s/%s complete=%s 余额=%s(计分可能延迟)'
+                % (st.get('progress'), st.get('max'), st.get('complete'), bal))
 
     return '未知API阶段'
 

@@ -65,6 +65,32 @@ def run_one(name, args, config, planner, probe, api, executor):
             results.append('%s:失败(%s)' % (phase, str(ex)[:60]))
             config.log(name, '!!! %s 异常(其余阶段不受影响): %s' % (phase, str(ex)[:120]))
 
+    # 2026-10-15 新增: 自动核查 + 自动修复。
+    # 每轮跑完检查结果: 阶段抛异常、或返回值含"未complete/失败"的, 等 4 分钟
+    # (让微软瞬时故障 503/超时恢复)后只重跑这些阶段一次。与现网 repair 阶段同目的:
+    # 不依赖用户发现, 也不对成功项做重复劳动。
+    bad = []
+    for r in results:
+        ph, _, val = r.partition(':')
+        if val.startswith('失败') or '未complete' in val or '未出现' in val:
+            bad.append(ph)
+    if bad and not args.dry_run:
+        config.log(name, '自动修复: 等待 4 分钟后重跑 %s' % bad)
+        time.sleep(240)
+        for ph in bad:
+            needs = next((t['needs'] for t in planner.TASK_TABLE.values()
+                          if t['phase'] == ph), 'api')
+            try:
+                if needs == 'api':
+                    r = executor.run_api_phase(name, ph, token, pr, p, config, api)
+                else:
+                    r = executor.run_browser_phase(name, ph, token, pr, p, config)
+                results.append('%s:修复(%s)' % (ph, r))
+                config.log(name, '自动修复 %s: %s' % (ph, r))
+            except Exception as ex:
+                results.append('%s:修复失败(%s)' % (ph, str(ex)[:50]))
+                config.log(name, '自动修复 %s 仍失败: %s' % (ph, str(ex)[:100]))
+
     st['last_run'] = time.strftime('%F %T')
     st['last_results'] = results
     st['balance'] = pr.get('balance')

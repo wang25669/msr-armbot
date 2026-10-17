@@ -5,12 +5,13 @@
 - headless 下无需抢前台(CDP 直连目标标签)
 - 域名按 probe 结果决定(cn 账号 -> cn.bing.com)
 """
+import json
 import random
 import re
 import time
 import urllib.parse
 
-from msr.browser import ev, navigate, StepError
+from msr.browser import ev, navigate, StepError, human_click, close_tab
 
 
 def bing_domain(pr):
@@ -131,12 +132,46 @@ def _dash_done(p):
     return str(p.get('complete', '')).lower() == 'true'
 
 
+def _anchor_js(dest):
+    """按 href 与 destinationUrl 的共享参数(form/filters sid/WQOskey/q)打分选锚点(零文案)。
+
+    2026-10-15 从现网 phase1 移植: API 的 destinationUrl 与页面 href 常因本地化
+    不同, 不能直接字符串相等; 用共享参数值打分取最高分锚点。
+    """
+    return ('''(() => {
+      const dest = %s;
+      const dp = (() => { try { const u = new URL(dest); const o = {};
+        u.searchParams.forEach((v,k)=>o[k.toLowerCase()]=v); return o; } catch(e) { return {}; } })();
+      const keys = [];
+      if (dp.form) keys.push(dp.form);
+      const filt = dp.filters || '';
+      const sid = (filt.match(/sid:?\\s*"?([0-9a-f-]{8,})/i)||[])[1];
+      if (sid) keys.push(sid);
+      const wqo = (filt.match(/WQOskey:?\\s*"?([A-Za-z0-9_]+)/i)||[])[1];
+      if (wqo) keys.push(wqo);
+      if (dp.q) keys.push(dp.q);
+      const anchors = [...document.querySelectorAll('a[href]')].filter(a => a.offsetParent !== null);
+      const dec = (h) => { try { return decodeURIComponent(h); } catch(e) { return h; } };
+      let best = null, bestScore = 0;
+      for (const a of anchors) {
+        const h = dec(a.href || '');
+        let s = 0;
+        for (const k of keys) { if (k && h.includes(k)) s += k.length; }
+        if (s > bestScore) { bestScore = s; best = a; }
+      }
+      return best || null;
+    })()''' % json.dumps(dest))
+
+
 def phase_cards(name, cdp, pr, source, budget_seconds=1500, log=print,
                 human_visit=None, max_tries=2):
     """phase1(每日活动) / phase5(日常任务) 通用: 点击未完成卡片。
 
-    human_visit(tab_cdp, card): 访问卡片后的停留逻辑(direct/sid 滚动+停留;
-    quiz 由调用方注入答题逻辑)。
+    2026-10-15 与现网对齐两处关键行为:
+    - **归因在"点击卡片"这个动作上, 直接 navigate 到 destinationUrl 不计分**,
+      所以每张卡都回 dashboard, 按 dest 参数匹配真实锚点做真人点击;
+    - 点击后停留 3-5 分钟(原实现只等 8-15 秒, 归因来不及落库)。
+    quiz 卡由调用方注入 human_visit 答题。
     """
     domain = bing_domain(pr)
     key = time.strftime('%m/%d/%Y')
@@ -159,28 +194,42 @@ def phase_cards(name, cdp, pr, source, budget_seconds=1500, log=print,
             n = card.get('name', '?')
             tried[n] = tried.get(n, 0) + 1
             kind = dailyset_kind(card)
-            log(f'{source}卡: {n} [{kind}] 第{tried[n]}次')
+            dest = card.get('destinationUrl') or ''
+            log('%s卡: %s [%s] 第%d次 -> %s' % (source, n, kind, tried[n], dest[:60]))
+            new_tabs = []
             try:
-                navigate(cdp, card['destinationUrl'])
-                if kind in ('direct', 'sid', 'urloffer'):
-                    scroll_human(cdp)
-                    time.sleep(random.uniform(8, 15))
-                else:  # quiz: 交给注入的答题逻辑, 无则标记跳过
-                    if human_visit is None:
-                        log(f'{n} quiz 无答题逻辑, 跳过')
-                    else:
+                # 回 dashboard, 按参数匹配锚点, 真人点击(直接导航不计分)
+                navigate(cdp, 'https://rewards.bing.com/')
+                time.sleep(random.uniform(3, 6))
+                new_tabs = human_click(cdp, _anchor_js(dest), label=n[:20], close_new=False)
+                if kind == 'quiz' and human_visit is not None:
+                    try:
                         human_visit(cdp, card)
+                    except Exception as ex:
+                        log('%s quiz交互容忍: %s' % (n, str(ex)[:60]))
+                else:
+                    wait = random.uniform(180, 300)     # 停留兼等归因落库
+                    time.sleep(wait)
+                    log('%s 停留%.1f分钟' % (n, wait / 60))
+                for tid in new_tabs:
+                    close_tab(cdp, tid)
+                new_tabs = []
+                # 回 dashboard 校验(读页面 wax 数据)
+                navigate(cdp, 'https://rewards.bing.com/')
+                time.sleep(random.uniform(2, 4))
                 done_flag = _check_done(cdp, source, key, n, domain)
                 if done_flag:
                     done.append(n)
-                    log(f'{n} ✓')
+                    log('%s ✓' % n)
                 elif tried[n] >= max_tries:
-                    log(f'{n} {tried[n]}次未落库, 放弃')
+                    log('%s %d次未落库, 放弃' % (n, tried[n]))
                 else:
-                    log(f'{n} 没落库, 稍后重试')
+                    log('%s 没落库, 稍后重试' % n)
                     time.sleep(random.uniform(15, 30))
             except StepError as ex:
-                log(f'{n} 异常: {str(ex)[:80]}')
+                log('%s 异常: %s' % (n, str(ex)[:80]))
+                for tid in new_tabs:
+                    close_tab(cdp, tid)
     return '处理%d张' % len(done)
 
 
