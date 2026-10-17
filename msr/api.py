@@ -7,11 +7,11 @@ import urllib.parse
 import urllib.request
 
 API = 'https://prod.rewardsplatform.microsoft.com/dapi'
-TOKEN_URL = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token'
+TOKEN_URL = 'https://login.live.com/oauth20_token.srf'
 CLIENT_ID = '0000000040170455'       # Bing App 官方 client id
 SCOPE = 'service::prod.rewardsplatform.microsoft.com::MBI_SSL'
 REDIRECT = 'https://login.live.com/oauth20_desktop.srf'
-DEVICE_CODE_URL = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode'
+DEVICE_CODE_URL = 'https://login.live.com/oauth20_connect.srf'
 
 EDGE_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
            'Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0')
@@ -103,10 +103,18 @@ def _token_post(name, body, proxy=None):
 
 
 def device_code_login(name, proxy=None):
-    """device-code 流程: 返回 {device_code, user_code, verification_uri}。
+    """device-code 流程: 请求设备授权码并返回 {device_code, user_code, verification_uri, interval, expires_in}。
     用户在任意浏览器完成授权后, 用 poll_device_code() 换 token。"""
-    d = _token_post(name, {'client_id': CLIENT_ID, 'scope': SCOPE}, proxy=proxy)
-    return d
+    body = {
+        'client_id': CLIENT_ID,
+        'scope': SCOPE,
+        'response_type': 'device_code'
+    }
+    req = urllib.request.Request(DEVICE_CODE_URL, data=urllib.parse.urlencode(body).encode(),
+                                 headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    opener = _build_opener(proxy)
+    with opener.open(req, timeout=30) as r:
+        return json.load(r)
 
 
 def poll_device_code_once(name, device_code, proxy=None):

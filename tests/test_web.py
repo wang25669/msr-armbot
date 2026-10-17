@@ -63,6 +63,45 @@ try:
     assert any(a['name'] == 'web_test_acc' for a in accs)
     print('[OK] /api/accounts 添加账号正常')
 
+    # 3.1 测试 POST /api/auth/device-code 获取设备码
+    from msr import api
+    orig_dc = api.device_code_login
+    orig_poll = api.poll_device_code_once
+    api.device_code_login = lambda name, proxy=None: {
+        'user_code': 'MOCK1234',
+        'device_code': 'mock_dev_code_xyz',
+        'verification_uri': 'https://www.microsoft.com/link',
+        'interval': 5,
+        'expires_in': 900
+    }
+    api.poll_device_code_once = lambda name, dev_code, proxy=None: None
+
+    try:
+        req = urllib.request.Request(f'{base_url}/api/auth/device-code',
+                                     data=json.dumps({'name': 'web_test_acc'}).encode(),
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            assert resp.status == 200
+            dc_data = json.loads(resp.read().decode())
+            assert dc_data['status'] == 'ok'
+            assert dc_data['data']['user_code'] == 'MOCK1234'
+            assert dc_data['data']['verification_uri'] == 'https://www.microsoft.com/link'
+        print('[OK] /api/auth/device-code 获取设备码正常')
+
+        # 3.2 测试 POST /api/auth/device-code/poll 轮询检测 (未授权时返回 complete: False)
+        req = urllib.request.Request(f'{base_url}/api/auth/device-code/poll',
+                                     data=json.dumps({'name': 'web_test_acc', 'device_code': dc_data['data']['device_code']}).encode(),
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            assert resp.status == 200
+            poll_data = json.loads(resp.read().decode())
+            assert poll_data['status'] == 'ok'
+            assert poll_data['complete'] is False
+        print('[OK] /api/auth/device-code/poll 轮询状态正常')
+    finally:
+        api.device_code_login = orig_dc
+        api.poll_device_code_once = orig_poll
+
     # 4. 测试 POST /api/auth/cookies 导入 Cookie
     cookie_payload = json.dumps({
         'name': 'web_test_acc',
