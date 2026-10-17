@@ -1477,10 +1477,14 @@ def run_web(host='0.0.0.0', port=8080):
     """启动轻量级 Web 控制台服务器。"""
     addr = (host, int(port))
     server = HTTPServer(addr, WebHandler)
-    print(f'MSR-ArmBot Web 控制台已启动: http://{host}:{port}')
+    print(f'MSR-ArmBot Web 控制台已启动: http://{host}:{port}', flush=True)
     append_live_log(f'Web 控制台服务已启动于 http://{host}:{port}')
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print('\nWeb 控制台正在关闭...')
+        print('\nWeb 控制台正在关闭...', flush=True)
         server.shutdown()
+
+
+start_server = run_web
+
