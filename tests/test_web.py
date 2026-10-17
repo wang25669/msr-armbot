@@ -46,6 +46,8 @@ try:
         assert resp.status == 200
         data = json.loads(resp.read().decode())
         assert 'accounts' in data
+        assert 'scheduler' in data
+        assert data['scheduler']['daily_time'] == '01:30'
     print('[OK] /api/status 正常')
 
     # 3. 测试 POST /api/accounts 添加账号

@@ -351,14 +351,19 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
         if new_tabs and ch:
             target_tid = new_tabs[0]
             try:
+                from msr import settings
+                st_card = settings.load_settings()
+                fast_mode = bool(st_card.get('schedule', {}).get('fast_mode'))
                 if kind == 'quiz':
                     interact_quiz(ch, target_tid, label=title, log=log)
-                    wait = random.uniform(60, 90)
-                    log('%s 答题后停留 %.1f 分钟' % (title, wait / 60))
+                    wait = random.uniform(3, 6) if fast_mode else random.uniform(60, 90)
+                    log('%s 答题后停留 %.1f 分钟等待结算' % (title, wait / 60))
                     time.sleep(wait)
                 else:
-                    wait = random.uniform(120, 180)
-                    log('%s 停留 %.1f 分钟' % (title, wait / 60))
+                    w_min = 3 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_min', 120))
+                    w_max = 6 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_max', 180))
+                    wait = random.uniform(w_min, w_max)
+                    log('%s 停留 %.1f 分钟等待归因' % (title, wait / 60))
                     time.sleep(wait)
             finally:
                 for tid in new_tabs:
@@ -495,7 +500,15 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                             c2.close()
                         except Exception as ex:
                             log('附带搜索容忍: %s' % str(ex)[:60])
-                    time.sleep(random.uniform(8, 12))
+                    # 从配置读取停留归因等待时间 (默认 60~120 秒，快速模式 3~6 秒)
+                    from msr import settings
+                    st_card = settings.load_settings()
+                    fast_mode = bool(st_card.get('schedule', {}).get('fast_mode'))
+                    w_min = 3 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_min', 60))
+                    w_max = 6 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_max', 120))
+                    w = random.uniform(w_min, w_max)
+                    log('%s 步骤页面停留 %.1f 秒等待服务器归因积分' % (q_name, w))
+                    time.sleep(w)
                 finally:
                     for tid in new_tabs:
                         try:

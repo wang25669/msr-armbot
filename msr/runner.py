@@ -1,6 +1,35 @@
-"""执行编排: 账号串行, 账号间随机等待, 支持多账号独立代理与区域自适配。"""
+import os
 import random
 import time
+
+
+def acquire_runner_lock(config):
+    """跨进程文件锁，防止定时任务与手动触发并发冲突。"""
+    lock_path = os.path.join(config.HOME, 'runner.lock')
+    try:
+        if os.path.isfile(lock_path):
+            with open(lock_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            if content.isdigit():
+                pid = int(content)
+                try:
+                    os.kill(pid, 0)
+                    return None
+                except OSError:
+                    pass
+        with open(lock_path, 'w', encoding='utf-8') as f:
+            f.write(str(os.getpid()))
+        return lock_path
+    except Exception:
+        return None
+
+
+def release_runner_lock(lock_path):
+    if lock_path and os.path.isfile(lock_path):
+        try:
+            os.remove(lock_path)
+        except Exception:
+            pass
 
 
 def cmd_run(args):
@@ -22,24 +51,36 @@ def cmd_run(args):
             print('账号不存在: %s' % args.name)
             return 1
 
-    rc = 0
-    w_min = 10 if sch_cfg.get('fast_mode') else int(sch_cfg.get('inter_account_wait_min', 15)) * 60
-    w_max = 20 if sch_cfg.get('fast_mode') else int(sch_cfg.get('inter_account_wait_max', 40)) * 60
+    if not getattr(args, 'dry_run', False):
+        lock = acquire_runner_lock(config)
+        if not lock:
+            print('已有自动化任务正在运行中，跳过本次并发执行以保护 Profile 与系统资源。')
+            return 0
+    else:
+        lock = None
 
-    for i, a in enumerate(accs):
-        name = a['name']
-        if i > 0:
-            wait = random.uniform(w_min, w_max)
-            config.log(name, '账号间随机等待 %.1f 分钟' % (wait / 60))
-            time.sleep(wait)
-        try:
-            run_one(name, args, config, planner, probe, api, executor, notify, settings)
-        except Exception as ex:
-            err_msg = '运行失败: %s' % str(ex)[:150]
-            config.log(name, '!!! %s' % err_msg)
-            notify.notify(f'Rewards 异常 [{name}]', err_msg, level='error')
-            rc = 1
-    return rc
+    try:
+        rc = 0
+        w_min = 10 if sch_cfg.get('fast_mode') else int(sch_cfg.get('inter_account_wait_min', 15)) * 60
+        w_max = 20 if sch_cfg.get('fast_mode') else int(sch_cfg.get('inter_account_wait_max', 40)) * 60
+
+        for i, a in enumerate(accs):
+            name = a['name']
+            if i > 0:
+                wait = random.uniform(w_min, w_max)
+                config.log(name, '账号间随机等待 %.1f 分钟' % (wait / 60))
+                time.sleep(wait)
+            try:
+                run_one(name, args, config, planner, probe, api, executor, notify, settings)
+            except Exception as ex:
+                err_msg = '运行失败: %s' % str(ex)[:150]
+                config.log(name, '!!! %s' % err_msg)
+                notify.notify(f'Rewards 异常 [{name}]', err_msg, level='error')
+                rc = 1
+        return rc
+    finally:
+        if lock:
+            release_runner_lock(lock)
 
 
 def run_one(name, args, config, planner, probe, api, executor, notify=None, settings=None):

@@ -39,6 +39,8 @@ DEFAULT_SETTINGS = {
 
     # 4. 多账号编排与调度参数
     "schedule": {
+        "daily_enabled": True,          # 每日自动循环定时开关
+        "daily_time": "01:30",          # 每日定时启动时间 (24小时制 HH:MM)
         "inter_account_wait_min": 15,   # 账号间最小随机等待时间 (分钟，防批量并发风控)
         "inter_account_wait_max": 40,   # 账号间最大随机等待时间 (分钟)
         "inter_stage_wait_min": 3,      # 阶段间随机过渡等待最小时间 (分钟)

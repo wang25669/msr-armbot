@@ -17,6 +17,8 @@ assert st['search']['dwell_min_seconds'] == 180
 assert st['search']['dwell_max_seconds'] == 300
 assert st['search']['stall_max_retries'] == 12
 assert st['cards']['attribution_wait_min'] == 60
+assert st['schedule']['daily_time'] == '01:30'
+assert st['schedule']['daily_enabled'] is True
 assert 'serverchan' in st['notify']
 print('[OK] 默认配置结构完整')
 

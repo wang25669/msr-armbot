@@ -119,6 +119,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         <span class="logo-tag">WEB 控制台</span>
       </div>
       <div class="flex-row">
+        <span id="scheduler-badge" style="font-size:13px; color:var(--text-sub); margin-right:8px; background:rgba(255,255,255,0.05); padding:6px 12px; border-radius:6px; border:1px solid var(--border);">⏰ 每日定时: 加载中...</span>
         <button class="btn btn-secondary" onclick="openPipelineModal()">📋 任务执行流程</button>
         <button class="btn btn-secondary" onclick="fetchStatus()">刷新状态</button>
         <button class="btn" onclick="triggerRunAll()">一键运行全部</button>
@@ -285,6 +286,17 @@ HTML_CONTENT = """<!DOCTYPE html>
             <h4 style="color:var(--primary); margin-bottom:12px; display:flex; align-items:center; gap:6px;">
               ⏱️ 多账号编排与调度参数 (Schedule)
             </h4>
+            <div class="form-group">
+              <label>每日自动定时执行总开关 (到点自动唤醒拉起浏览器执行全部账号)</label>
+              <select id="sch-daily-enabled">
+                <option value="true">开启 (每日自动定时循环运行)</option>
+                <option value="false">关闭 (仅手动触发)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>每日定时启动时间 (24小时制 HH:MM，默认 01:30)</label>
+              <input type="text" id="sch-daily-time" placeholder="01:30">
+            </div>
             <div class="form-group">
               <label>极速测试模式 (fast_mode, 开启后等待压缩至 3-6 秒)</label>
               <select id="cfg-fast-mode">
@@ -708,6 +720,15 @@ HTML_CONTENT = """<!DOCTYPE html>
         renderDashboard(data.accounts || []);
         renderManageList(data.accounts || []);
         document.getElementById('stat-summary').innerText = `总账号数: ${data.accounts?.length || 0} | 服务器时间: ${data.time || ''}`;
+        if (data.scheduler) {
+          const sch = data.scheduler;
+          const badge = document.getElementById('scheduler-badge');
+          if (badge) {
+            badge.innerHTML = sch.daily_enabled
+              ? `⏰ 每日定时: <b style="color:var(--primary); font-family:monospace;">${sch.daily_time}</b> <span style="color:#10b981;">(自动唤醒)</span>`
+              : `⏰ 每日定时: <span style="color:var(--text-sub);">已暂停</span>`;
+          }
+        }
       } catch(err) {
         toast('加载状态失败: ' + err);
       }
@@ -1073,6 +1094,8 @@ HTML_CONTENT = """<!DOCTYPE html>
         document.getElementById('m-edge-interval').value = s.mobile?.edge30m_interval ?? 305;
 
         // 4. schedule
+        document.getElementById('sch-daily-enabled').value = String(s.schedule?.daily_enabled !== false);
+        document.getElementById('sch-daily-time').value = s.schedule?.daily_time || '01:30';
         document.getElementById('cfg-fast-mode').value = String(!!s.schedule?.fast_mode);
         document.getElementById('sch-acc-min').value = s.schedule?.inter_account_wait_min ?? 15;
         document.getElementById('sch-acc-max').value = s.schedule?.inter_account_wait_max ?? 40;
@@ -1145,6 +1168,8 @@ HTML_CONTENT = """<!DOCTYPE html>
           edge30m_interval: parseInt(document.getElementById('m-edge-interval').value) || 305
         },
         schedule: {
+          daily_enabled: document.getElementById('sch-daily-enabled').value === 'true',
+          daily_time: document.getElementById('sch-daily-time').value.trim() || '01:30',
           fast_mode: document.getElementById('cfg-fast-mode').value === 'true',
           inter_account_wait_min: parseInt(document.getElementById('sch-acc-min').value) || 15,
           inter_account_wait_max: parseInt(document.getElementById('sch-acc-max').value) || 40,
@@ -1532,7 +1557,15 @@ class WebHandler(BaseHTTPRequestHandler):
                 'fingerprint': fp,
                 'fingerprint_summary': fp_summary
             })
-        self._json_resp({'accounts': detailed, 'time': time.strftime('%F %T')})
+        from msr import settings
+        st_cfg = settings.load_settings()
+        sch = st_cfg.get('schedule', {})
+        scheduler_info = {
+            'daily_enabled': sch.get('daily_enabled', True),
+            'daily_time': sch.get('daily_time', '01:30'),
+            'status': '运行中' if sch.get('daily_enabled', True) else '已暂停'
+        }
+        self._json_resp({'accounts': detailed, 'scheduler': scheduler_info, 'time': time.strftime('%F %T')})
 
     def _handle_device_code_start(self, payload):
         from msr import api, config
@@ -1647,10 +1680,61 @@ class WebHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
 
 
+def _start_scheduler_daemon():
+    """轻量级内置每日定时调度引擎。
+
+    即便在无 crontab 的裸机环境(Windows/macOS/无cron的Linux)，也能保证每天到达配置的时间(如 01:30)
+    自动唤醒全账号串行执行，执行完毕后彻底杀除 Chromium 并释放内存。
+    """
+    last_trigger_date = None
+
+    def scheduler_loop():
+        nonlocal last_trigger_date
+        import subprocess
+        from msr import settings
+        while True:
+            try:
+                time.sleep(20)
+                st = settings.load_settings()
+                sch = st.get('schedule', {})
+                if not sch.get('daily_enabled', True):
+                    continue
+
+                daily_time = sch.get('daily_time', '01:30')
+                now_hm = time.strftime('%H:%M')
+                today_str = time.strftime('%Y-%m-%d')
+
+                if now_hm == daily_time and last_trigger_date != today_str:
+                    last_trigger_date = today_str
+                    append_live_log(f'⏰ [定时调度] 到达每日预定时间 {daily_time}，正在自动唤醒全账号任务流程...')
+
+                    jitter_max = int(sch.get('random_start_delay_max', 0))
+                    if jitter_max > 0 and not sch.get('fast_mode'):
+                        jitter_sec = random.uniform(0, jitter_max * 60)
+                        append_live_log(f'⏰ [定时调度] 开启随机抖动，等待 {jitter_sec / 60:.1f} 分钟后开始执行...')
+                        time.sleep(jitter_sec)
+
+                    cmd = [sys.executable, '-m', 'msr', 'run', '--all']
+                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                    for line in iter(proc.stdout.readline, ''):
+                        line = line.strip()
+                        if line:
+                            append_live_log(line)
+                    proc.stdout.close()
+                    proc.wait()
+                    append_live_log(f'⏰ [定时调度] 全账号任务已完成 (exit={proc.returncode})，浏览器已完全退出并释放系统内存。下次将在明日 {daily_time} 自动执行。')
+            except Exception as ex:
+                append_live_log(f'⏰ [定时调度异常]: {ex}')
+
+    t = threading.Thread(target=scheduler_loop, daemon=True, name='DailyScheduler')
+    t.start()
+
+
 def run_web(host='0.0.0.0', port=8080):
     """启动轻量级 Web 控制台服务器。"""
     addr = (host, int(port))
     server = HTTPServer(addr, WebHandler)
+    _start_scheduler_daemon()
     print(f'MSR-ArmBot Web 控制台已启动: http://{host}:{port}', flush=True)
     append_live_log(f'Web 控制台服务已启动于 http://{host}:{port}')
     try:
