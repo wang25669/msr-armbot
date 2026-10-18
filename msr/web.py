@@ -570,34 +570,75 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
 
       <div class="nav-tabs" style="margin-bottom:16px;">
-        <button id="modal-tab-dc" class="tab-btn active" onclick="switchModalTab('dc')">设备码免密授权 (推荐)</button>
-        <button id="modal-tab-ck" class="tab-btn" onclick="switchModalTab('ck')">Cookie 快速粘贴</button>
+        <button id="modal-tab-pwd" class="tab-btn active" onclick="switchModalTab('pwd')">微软账号密码登录 (推荐)</button>
+        <button id="modal-tab-ck" class="tab-btn" onclick="switchModalTab('ck')">Cookie 快速导入 (免密备选)</button>
       </div>
 
-      <!-- 设备码授权页面 -->
-      <div id="modal-panel-dc">
-        <p style="font-size:13px; color:var(--text-sub); margin-bottom:12px;">
-          官方 OAuth2 设备码流：点击下方按钮生成代码，并在手机或电脑浏览器中打开授权链接输入代码完成登录，免密且无惧 2FA。
+      <!-- 账号密码自动化登录与风控接管页面 -->
+      <div id="modal-panel-pwd">
+        <p style="font-size:13px; color:var(--text-sub); margin-bottom:14px; line-height:1.5;">
+          输入微软账号密码，后台 Chromium 将全自动登录并智能应对风控质询（支持 Authenticator 双位数匹配、邮箱验证码输入与人机拼图远程接管）。
         </p>
-        <div style="text-align:center; padding:16px; background:#070d19; border-radius:8px; margin-bottom:14px;">
-          <div id="dc-code-display" style="font-size:28px; font-weight:800; color:var(--primary); letter-spacing:4px;">------</div>
-          <div id="dc-status-text" style="font-size:13px; color:var(--text-sub); margin-top:8px;">点击下方按钮向微软请求代码</div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:12px;">
+          <div class="form-group">
+            <label>微软账号 (邮箱 / 手机号)</label>
+            <input type="text" id="login-username" placeholder="例如: your_name@outlook.com">
+          </div>
+          <div class="form-group">
+            <label>微软密码</label>
+            <input type="password" id="login-password" placeholder="请输入微软账号密码">
+          </div>
         </div>
-        <div class="flex-row" style="justify-content:center;">
-          <button id="dc-gen-btn" class="btn" onclick="startDeviceCodeFlow()">获取授权代码</button>
-          <a id="dc-open-link" href="#" target="_blank" class="btn btn-secondary" style="display:none;">打开微软授权页面</a>
+
+        <!-- 手机 Authenticator 匹配数字提示卡片 (条件展示) -->
+        <div id="login-auth-push-box" style="display:none; background:rgba(14,165,233,0.15); border:1px solid #0284c7; border-radius:8px; padding:12px; margin-bottom:12px; text-align:center;">
+          <div style="font-size:13px; color:#38bdf8; margin-bottom:6px;">📱 微软触发手机 Authenticator 二次验证，请在手机应用上选择数字：</div>
+          <div style="font-size:32px; font-weight:800; color:#38bdf8; letter-spacing:4px;" id="auth-code-val">--</div>
+          <div style="font-size:12px; color:var(--text-sub); margin-top:4px;">（在手机上点击对应数字后系统将自动继续）</div>
+        </div>
+
+        <!-- 安全验证码输入卡片 (条件展示) -->
+        <div id="login-otp-box" style="display:none; background:rgba(234,179,8,0.15); border:1px solid #eab308; border-radius:8px; padding:12px; margin-bottom:12px;">
+          <div id="login-otp-prompt" style="font-size:13px; color:#facc15; margin-bottom:8px;">✉️ 微软需要安全验证码</div>
+          <div style="display:flex; gap:8px;">
+            <input type="text" id="login-otp-input" placeholder="请输入 6 位安全验证码" style="flex:1;">
+            <button class="btn" onclick="submitSessionOtp()">提交验证码</button>
+          </div>
+        </div>
+
+        <!-- 实时远程交互窗口 (用于 Arkose 拼图验证码或复杂质询) -->
+        <div id="interactive-canvas-box" style="display:none; background:#070d19; border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:12px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <span style="font-size:12px; color:#94a3b8;">🖱️ 实时交互画面 (点击图片可直接点击浏览器网页，如旋转拼图、选择选项):</span>
+            <button class="btn btn-secondary btn-sm" onclick="refreshLiveScreenshot()">刷新画面</button>
+          </div>
+          <div style="text-align:center; overflow:auto; max-height:380px; background:#000; border-radius:6px;">
+            <img id="live-screen-img" src="" alt="远程浏览器画面加载中..." style="max-width:100%; cursor:crosshair; display:inline-block;" onclick="handleScreenClick(event)">
+          </div>
+        </div>
+
+        <div id="login-pwd-status" style="font-size:13px; padding:10px; border-radius:6px; background:#070d19; color:var(--text-sub); margin-bottom:14px; min-height:38px; display:flex; align-items:center;">
+          准备就绪。支持账号密码登录、手机 Authenticator 二次验证、安全验证码输入及人机拼图远程交互。
+        </div>
+
+        <div class="flex-row" style="justify-content:space-between;">
+          <button class="btn btn-secondary btn-sm" onclick="toggleInteractiveCanvas()">🖥️ 远程实时画面</button>
+          <div class="flex-row">
+            <button id="login-cancel-btn" class="btn btn-secondary" style="display:none; margin-right:8px;" onclick="cancelLoginSession()">取消登录</button>
+            <button id="login-pwd-btn" class="btn" onclick="startLoginSession()">一键全自动登录 / 启动接管</button>
+          </div>
         </div>
       </div>
 
       <!-- Cookie 粘贴页面 -->
       <div id="modal-panel-ck" style="display:none;">
         <p style="font-size:13px; color:var(--text-sub); margin-bottom:10px;">
-          粘贴 Cookie-Editor 导出的 JSON 数组或请求头 Raw Cookie (name=val; ...):
+          粘贴 Cookie-Editor 导出的 JSON 数组或请求头 Raw Cookie (name=val; ...)，导入时系统将自动基于该会话换取 Token：
         </p>
         <textarea id="ck-text-input" rows="8" placeholder='[{"name":"_U","value":"..."}, ...]'></textarea>
         <div style="margin-top:12px; display:flex; justify-content:space-between; align-items:center;">
           <span id="ck-result-msg" style="font-size:13px; color:var(--text-sub);"></span>
-          <button class="btn" onclick="submitCookies()">导入并验证 Cookie</button>
+          <button id="login-ck-btn" class="btn" onclick="submitCookies()">导入 Cookie 并自动激活 Token</button>
         </div>
       </div>
     </div>
@@ -1377,90 +1418,238 @@ HTML_CONTENT = """<!DOCTYPE html>
       
       const hintEl = document.getElementById('login-auth-hint');
       if (isReLogin) {
-        hintEl.innerHTML = `<span style="color:var(--success)">🟢 该账号当前登录凭据有效。</span> 如需更换微软账户或更新会话，请点击下方生成新代码或粘贴新 Cookie。`;
+        hintEl.innerHTML = `<span style="color:var(--success)">🟢 该账号当前登录凭据有效。</span> 如需更换微软账户或刷新会话，请在下方直接输入新账号密码或导入新 Cookie。`;
       } else {
-        hintEl.innerHTML = `<span style="color:var(--danger)">🔴 该账号尚未登录或凭据已失效。</span> 请使用设备码授权或粘贴包含 _U 的 Cookie 激活。`;
+        hintEl.innerHTML = `<span style="color:var(--danger)">🔴 该账号尚未登录或凭据失效。</span> 推荐在下方输入微软账号密码一键全自动登录，亦可粘贴 Cookie 激活。`;
       }
 
-      document.getElementById('dc-code-display').innerText = '------';
-      document.getElementById('dc-status-text').innerText = '点击下方按钮向微软官方请求授权代码';
-      document.getElementById('dc-open-link').style.display = 'none';
+      document.getElementById('login-username').value = name.includes('@') ? name : '';
+      document.getElementById('login-password').value = '';
+      document.getElementById('login-pwd-status').innerHTML = '准备就绪。支持账号密码登录、手机 Authenticator 二次验证、安全验证码输入及人机拼图远程交互。';
+      document.getElementById('login-pwd-btn').disabled = false;
+      document.getElementById('login-cancel-btn').style.display = 'none';
+      document.getElementById('login-auth-push-box').style.display = 'none';
+      document.getElementById('login-otp-box').style.display = 'none';
+      document.getElementById('interactive-canvas-box').style.display = 'none';
+      isCanvasOpen = false;
+      if (loginPollTimer) { clearInterval(loginPollTimer); loginPollTimer = null; }
       document.getElementById('ck-text-input').value = '';
       document.getElementById('ck-result-msg').innerText = '';
       document.getElementById('login-modal').style.display = 'flex';
-      switchModalTab('dc');
+      switchModalTab('pwd');
     }
 
+    let loginPollTimer = null;
+    let isCanvasOpen = false;
+
     function closeLoginModal() {
-      if (dcPollTimer) clearInterval(dcPollTimer);
+      if (loginPollTimer) { clearInterval(loginPollTimer); loginPollTimer = null; }
       document.getElementById('login-modal').style.display = 'none';
       fetchStatus();
     }
 
     function switchModalTab(tab) {
-      document.getElementById('modal-tab-dc').classList.toggle('active', tab === 'dc');
+      document.getElementById('modal-tab-pwd').classList.toggle('active', tab === 'pwd');
       document.getElementById('modal-tab-ck').classList.toggle('active', tab === 'ck');
-      document.getElementById('modal-panel-dc').style.display = tab === 'dc' ? 'block' : 'none';
+      document.getElementById('modal-panel-pwd').style.display = tab === 'pwd' ? 'block' : 'none';
       document.getElementById('modal-panel-ck').style.display = tab === 'ck' ? 'block' : 'none';
     }
 
-    async function startDeviceCodeFlow() {
+    function toggleInteractiveCanvas() {
+      isCanvasOpen = !isCanvasOpen;
+      const box = document.getElementById('interactive-canvas-box');
+      box.style.display = isCanvasOpen ? 'block' : 'none';
+      if (isCanvasOpen) {
+        refreshLiveScreenshot();
+      }
+    }
+
+    function refreshLiveScreenshot() {
       if (!activeAccountName) return;
-      document.getElementById('dc-status-text').innerText = '正在向微软官方请求设备代码...';
+      const img = document.getElementById('live-screen-img');
+      img.src = `/api/auth/session/screenshot?name=${encodeURIComponent(activeAccountName)}&_t=${Date.now()}`;
+    }
+
+    async function handleScreenClick(e) {
+      if (!activeAccountName) return;
+      const img = e.target;
+      const scaleX = (img.naturalWidth || img.clientWidth) / img.clientWidth;
+      const scaleY = (img.naturalHeight || img.clientHeight) / img.clientHeight;
+      const x = Math.round(e.offsetX * scaleX);
+      const y = Math.round(e.offsetY * scaleY);
       try {
-        const res = await fetch('/api/auth/device-code', {
+        await fetch('/api/auth/session/mouse', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: activeAccountName, x, y})
+        });
+        setTimeout(refreshLiveScreenshot, 500);
+      } catch(err) {
+        console.error('Click error:', err);
+      }
+    }
+
+    async function startLoginSession() {
+      const u = document.getElementById('login-username').value.trim();
+      const p = document.getElementById('login-password').value;
+      if (!u || !p) return toast('请输入微软账号与密码');
+
+      const btn = document.getElementById('login-pwd-btn');
+      const cancelBtn = document.getElementById('login-cancel-btn');
+      const statusEl = document.getElementById('login-pwd-status');
+      btn.disabled = true;
+      cancelBtn.style.display = 'inline-block';
+      statusEl.innerHTML = '<span style="color:var(--primary)">⏳ 正在启动安全 Chromium 实例并连接微软登录网关...</span>';
+
+      try {
+        const res = await fetch('/api/auth/session/start', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: activeAccountName, username: u, password: p})
+        });
+        const d = await res.json();
+        if (d.status !== 'ok') {
+          throw new Error(d.message || '启动失败');
+        }
+        if (loginPollTimer) clearInterval(loginPollTimer);
+        loginPollTimer = setInterval(pollLoginSession, 1200);
+      } catch(err) {
+        statusEl.innerHTML = `<span style="color:var(--danger)">❌ 启动失败: ${err}</span>`;
+        btn.disabled = false;
+        cancelBtn.style.display = 'none';
+      }
+    }
+
+    async function pollLoginSession() {
+      if (!activeAccountName) return;
+      try {
+        const res = await fetch(`/api/auth/session/status?name=${encodeURIComponent(activeAccountName)}`);
+        const s = await res.json();
+        const statusEl = document.getElementById('login-pwd-status');
+        const authPushBox = document.getElementById('login-auth-push-box');
+        const otpBox = document.getElementById('login-otp-box');
+
+        if (s.status === 'success') {
+          clearInterval(loginPollTimer);
+          loginPollTimer = null;
+          statusEl.innerHTML = `<strong style="color:var(--success)">🎉 登录成功！Cookie 与 Token 已自动换取并固化（积分: ${s.result?.balance || 0}, 区域: ${s.result?.country || '未知'}）。</strong>`;
+          authPushBox.style.display = 'none';
+          otpBox.style.display = 'none';
+          document.getElementById('login-pwd-btn').disabled = false;
+          document.getElementById('login-cancel-btn').style.display = 'none';
+          toast('微软账号登录成功');
+          fetchStatus();
+          return;
+        }
+
+        if (s.status === 'error') {
+          clearInterval(loginPollTimer);
+          loginPollTimer = null;
+          statusEl.innerHTML = `<span style="color:var(--danger)">❌ 登录失败: ${s.message || s.error_msg || '未知错误'}</span>`;
+          document.getElementById('login-pwd-btn').disabled = false;
+          document.getElementById('login-cancel-btn').style.display = 'none';
+          toast('登录中断: ' + (s.message || ''));
+          return;
+        }
+
+        statusEl.innerHTML = `<span style="color:var(--primary)">⏳ ${s.message || '正在处理中...'}</span>`;
+
+        if (s.status === 'wait_auth_push' && s.auth_code) {
+          authPushBox.style.display = 'block';
+          document.getElementById('auth-code-val').innerText = s.auth_code;
+        } else {
+          authPushBox.style.display = 'none';
+        }
+
+        if (s.status === 'wait_otp') {
+          otpBox.style.display = 'block';
+          document.getElementById('login-otp-prompt').innerText = s.otp_prompt || '微软要求输入安全验证码';
+        } else {
+          otpBox.style.display = 'none';
+        }
+
+        if (s.status === 'wait_interactive' && !isCanvasOpen) {
+          toggleInteractiveCanvas();
+        }
+
+        if (isCanvasOpen) {
+          refreshLiveScreenshot();
+        }
+
+      } catch(err) {
+        console.error('Poll error:', err);
+      }
+    }
+
+    async function submitSessionOtp() {
+      const code = document.getElementById('login-otp-input').value.trim();
+      if (!code) return toast('请输入验证码');
+      toast('正在提交安全验证码...');
+      try {
+        const res = await fetch('/api/auth/session/submit-otp', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: activeAccountName, code})
+        });
+        const d = await res.json();
+        if (d.status === 'ok') {
+          document.getElementById('login-otp-input').value = '';
+          toast('验证码已提交');
+        } else {
+          toast('提交失败: ' + (d.message || ''));
+        }
+      } catch(e) {
+        toast('提交异常: ' + e);
+      }
+    }
+
+    async function cancelLoginSession() {
+      if (!confirm('确定取消当前登录流程吗？')) return;
+      try {
+        await fetch('/api/auth/session/cancel', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({name: activeAccountName})
         });
-        const d = await res.json();
-        if (d.status !== 'ok') throw new Error(d.message || '请求失败');
-
-        const uri = d.data.verification_uri || 'https://microsoft.com/devicelogin';
-        const code = d.data.user_code;
-        document.getElementById('dc-code-display').innerText = code;
-        document.getElementById('dc-status-text').innerHTML = `请在打开的页面输入代码授权。等待授权中...`;
-        const linkEl = document.getElementById('dc-open-link');
-        linkEl.href = uri;
-        linkEl.style.display = 'inline-flex';
-
-        if (dcPollTimer) clearInterval(dcPollTimer);
-        const intervalSec = Math.max(5, d.data.interval || 5);
-        dcPollTimer = setInterval(async () => {
-          const pollRes = await fetch('/api/auth/device-code/poll', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({name: activeAccountName, device_code: d.data.device_code})
-          });
-          const pollData = await pollRes.json();
-          if (pollData.complete) {
-            clearInterval(dcPollTimer);
-            document.getElementById('dc-status-text').innerHTML = `<strong style="color:var(--success)">🎉 授权成功！Token 已持久化保存。</strong>`;
-            toast('设备码授权成功');
-            fetchStatus();
-          }
-        }, intervalSec * 1000);
-
-      } catch(err) {
-        document.getElementById('dc-status-text').innerText = '获取失败: ' + err;
-      }
+      } catch(e) {}
+      if (loginPollTimer) { clearInterval(loginPollTimer); loginPollTimer = null; }
+      document.getElementById('login-pwd-btn').disabled = false;
+      document.getElementById('login-cancel-btn').style.display = 'none';
+      document.getElementById('login-pwd-status').innerHTML = '登录流程已取消。';
+      document.getElementById('login-auth-push-box').style.display = 'none';
+      document.getElementById('login-otp-box').style.display = 'none';
     }
+
+    const submitCredentialLogin = startLoginSession;
 
     async function submitCookies() {
       const content = document.getElementById('ck-text-input').value.trim();
       if (!content) return toast('请输入 Cookie 内容');
-      const res = await fetch('/api/auth/cookies', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name: activeAccountName, cookies_raw: content})
-      });
-      const d = await res.json();
-      if (d.status === 'ok') {
-        document.getElementById('ck-result-msg').innerHTML = `<span style="color:var(--success)">✅ 导入成功 (${d.count}条, 含_U=${d.has_u})</span>`;
-        toast('Cookie 导入成功');
-        fetchStatus();
-      } else {
-        document.getElementById('ck-result-msg').innerHTML = `<span style="color:var(--danger)">❌ 校验失败: ${d.message}</span>`;
+
+      const btn = document.getElementById('login-ck-btn');
+      const msgEl = document.getElementById('ck-result-msg');
+      btn.disabled = true;
+      msgEl.innerHTML = '<span style="color:var(--primary)">⏳ 正在解析并尝试静默生成 Token...</span>';
+
+      try {
+        const res = await fetch('/api/auth/cookies', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: activeAccountName, cookies_raw: content})
+        });
+        const d = await res.json();
+        if (d.status === 'ok') {
+          const tokMsg = d.has_token ? '已自动生成并激活 Token' : '已就绪 (可跑搜索任务)';
+          msgEl.innerHTML = `<span style="color:var(--success)">✅ 导入成功 (${d.count}条, ${tokMsg})</span>`;
+          toast('Cookie 导入成功');
+          fetchStatus();
+        } else {
+          msgEl.innerHTML = `<span style="color:var(--danger)">❌ 校验失败: ${d.message}</span>`;
+        }
+      } catch(e) {
+        msgEl.innerHTML = `<span style="color:var(--danger)">❌ 请求失败: ${e}</span>`;
+      } finally {
+        btn.disabled = false;
       }
     }
 
@@ -1539,6 +1728,41 @@ class WebHandler(BaseHTTPRequestHandler):
             from msr import fingerprint
             fp = fingerprint.load_or_create(name)
             self._json_resp({'status': 'ok', 'data': fp})
+            return
+
+        if path == '/api/auth/session/status':
+            params = urllib.parse.parse_qs(u.query)
+            name = params.get('name', [None])[0]
+            if not name:
+                self._json_resp({'status': 'error', 'message': '缺少账号参数 name'}, code=400)
+                return
+            from msr import auth
+            sess = auth.get_session(name)
+            if not sess:
+                self._json_resp({'status': 'idle', 'name': name})
+            else:
+                self._json_resp(sess.to_dict())
+            return
+
+        if path == '/api/auth/session/screenshot':
+            params = urllib.parse.parse_qs(u.query)
+            name = params.get('name', [None])[0]
+            from msr import auth
+            img_bytes = auth.get_session_screenshot(name) if name else None
+            if img_bytes:
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+                self.send_cors()
+                self.end_headers()
+                self.wfile.write(img_bytes)
+            else:
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/gif')
+                self.send_header('Cache-Control', 'no-store, no-cache')
+                self.send_cors()
+                self.end_headers()
+                self.wfile.write(b'GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;')
             return
 
         self.send_error(404, 'Not Found')
@@ -1631,12 +1855,51 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json_resp({'status': 'ok', 'message': '推送测试请求已发送'})
             return
 
-        if path == '/api/auth/device-code':
-            self._handle_device_code_start(payload)
+        if path == '/api/auth/credential':
+            self._handle_credential_login(payload)
             return
 
-        if path == '/api/auth/device-code/poll':
-            self._handle_device_code_poll(payload)
+        if path == '/api/auth/session/start':
+            from msr import auth, config
+            name = payload.get('name')
+            username = payload.get('username')
+            password = payload.get('password')
+            if not name or not username or not password:
+                self._json_resp({'status': 'error', 'message': '账号、用户名和密码不能为空'}, code=400)
+                return
+            acc_cfg = config.get_account(name) or {}
+            proxy = acc_cfg.get('proxy')
+            sess = auth.start_session(name, username, password, proxy=proxy,
+                                      log_cb=lambda m: append_live_log(f'[{name}] {m}'))
+            self._json_resp({'status': 'ok', 'message': '登录会话已启动', 'session': sess.to_dict()})
+            return
+
+        if path == '/api/auth/session/submit-otp':
+            from msr import auth
+            name = payload.get('name')
+            code = (payload.get('code') or '').strip()
+            if not name or not code:
+                self._json_resp({'status': 'error', 'message': '账号与验证码不能为空'}, code=400)
+                return
+            res = auth.submit_session_otp(name, code)
+            self._json_resp(res)
+            return
+
+        if path == '/api/auth/session/mouse':
+            from msr import auth
+            name = payload.get('name')
+            x = payload.get('x', 0)
+            y = payload.get('y', 0)
+            res = auth.session_mouse_click(name, x, y)
+            self._json_resp(res)
+            return
+
+        if path == '/api/auth/session/cancel':
+            from msr import auth
+            name = payload.get('name')
+            if name:
+                auth.cancel_session(name)
+            self._json_resp({'status': 'ok'})
             return
 
         if path == '/api/auth/cookies':
@@ -1782,40 +2045,28 @@ class WebHandler(BaseHTTPRequestHandler):
         }
         self._json_resp({'accounts': detailed, 'scheduler': scheduler_info, 'time': time.strftime('%F %T')})
 
-    def _handle_device_code_start(self, payload):
-        from msr import api, config
+    def _handle_credential_login(self, payload):
+        from msr import auth, config
         name = payload.get('name')
-        acc_cfg = config.get_account(name) or {}
-        proxy = acc_cfg.get('proxy')
-        try:
-            dc = api.device_code_login(name, proxy=proxy)
-            append_live_log(f'[{name}] 生成设备码成功: {dc.get("user_code")}')
-            self._json_resp({'status': 'ok', 'data': dc})
-        except Exception as ex:
-            self._json_resp({'status': 'error', 'message': str(ex)}, code=500)
+        username = payload.get('username')
+        password = payload.get('password')
+        if not name or not username or not password:
+            self._json_resp({'status': 'error', 'message': '账号、用户名和密码不能为空'}, code=400)
+            return
 
-    def _handle_device_code_poll(self, payload):
-        from msr import api, config, probe
-        name = payload.get('name')
-        device_code = payload.get('device_code')
         acc_cfg = config.get_account(name) or {}
         proxy = acc_cfg.get('proxy')
-        p = config.profile(name)
         try:
-            tok = api.poll_device_code_once(name, device_code, proxy=proxy)
-            if tok:
-                api.save_token(name, tok, p)
-                pr = probe.probe_account(name, tok['access_token'], proxy=proxy)
-                config.save_json(config.pfile(name, 'region.json'), pr)
-                append_live_log(f'[{name}] 设备码授权成功，已保存 Token 及探测结果 (国家: {pr.get("country")})')
-                self._json_resp({'status': 'ok', 'complete': True})
-            else:
-                self._json_resp({'status': 'ok', 'complete': False})
+            append_live_log(f'[{name}] 开始微软账号全自动登录 (账号: {username})...')
+            res = auth.login_with_credential(name, username, password, proxy=proxy,
+                                             log_cb=lambda m: append_live_log(f'[{name}] {m}'))
+            self._json_resp(res)
         except Exception as ex:
+            append_live_log(f'[{name}] 登录失败: {ex}')
             self._json_resp({'status': 'error', 'message': str(ex)}, code=500)
 
     def _handle_cookies_import(self, payload):
-        from msr import config, cookies
+        from msr import config, cookies, auth
         name = payload.get('name')
         raw = payload.get('cookies_raw', '')
         try:
@@ -1826,7 +2077,14 @@ class WebHandler(BaseHTTPRequestHandler):
             diag = cookies.validate_cookies(cks)
             config.save_json(config.pfile(name, 'cookie.json'), cks)
             append_live_log(f'[{name}] 导入了 {len(cks)} 条 Cookie (含 _U={diag["has_auth_u"]})')
-            self._json_resp({'status': 'ok', 'count': len(cks), 'has_u': diag['has_auth_u']})
+
+            acc_cfg = config.get_account(name) or {}
+            proxy = acc_cfg.get('proxy')
+            append_live_log(f'[{name}] 正在基于导入的会话自动尝试换取 OAuth2 Token...')
+            tok = auth.exchange_token_from_cookies(name, proxy=proxy, log_cb=lambda m: append_live_log(f'[{name}] {m}'))
+
+            has_tok = bool(tok)
+            self._json_resp({'status': 'ok', 'count': len(cks), 'has_u': diag['has_auth_u'], 'has_token': has_tok})
         except Exception as ex:
             self._json_resp({'status': 'error', 'message': str(ex)}, code=500)
 

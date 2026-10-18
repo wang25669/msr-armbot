@@ -1,24 +1,25 @@
 """微软账号多方式登录与凭据固化系统。
 
-支持四种应对微软不同风控与环境的登录策略:
-1. device-code (推荐): 官方 OAuth2 设备码流，纯终端输出链接与代码，手机/任意浏览器授权，免密且无惧 2FA。
-2. cookies: 导入 Cookie-Editor / EditThisCookie / Raw 请求头文本，100% 绕过人机滑块与验证码。
-3. interactive: 启动 Headless/GUI 远程调试浏览器，用户在浏览器中手动登录，脚本自动嗅探会话并固化 Cookie。
-4. credential: 自动填入账号密码，智能处理“保持登录”确认，遇到二次验证(2FA)自动降级等待用户手机确认。
+支持两大核心登录与凭据闭环策略:
+1. credential (推荐): 现代化账号密码自动化登录，原生适配微软 Fluent UI，支持智能密码切换、保持登录确认与 2FA 提示，自动提取 Cookie 并无感换取 OAuth Token。
+2. cookies (备选): 导入 Cookie-Editor JSON 数组或 Raw 请求头文本，自动清洗并基于已登录会话静默换取 OAuth Token。
 """
+import base64
 import json
 import os
 import sys
+import threading
 import time
+import urllib.parse
 
 from msr import cookies as cookie_mod
 
 
 def cmd_login(args):
-    from msr import config, api, probe
+    from msr import config
 
     name = args.name
-    method = getattr(args, 'method', None) or 'device'
+    method = getattr(args, 'method', None) or 'credential'
     proxy = getattr(args, 'proxy', None)
     username = getattr(args, 'username', None)
     password = getattr(args, 'password', None)
@@ -27,23 +28,18 @@ def cmd_login(args):
     p = config.profile(name)
     config.log(name, '=== 登录引导开始 (method=%s proxy=%s) ===' % (method, proxy or '直连'))
 
-    # 若指定了 cookie_file 或显式选择 cookies 方式
     if cookie_file or method == 'cookies':
-        _login_by_cookies(name, cookie_file)
+        _login_by_cookies(name, cookie_file, proxy=proxy)
     elif method == 'interactive':
         _login_by_interactive(name, p, config, proxy=proxy)
-    elif method == 'credential' or (username and password):
-        _login_by_credential(name, p, config, username, password, proxy=proxy)
     else:
-        # 默认推荐: 设备码流
-        _login_by_device_code(name, p, config, api, probe, proxy=proxy)
-
-    # 检查并引导浏览器 Cookie (若尚未导入)
-    ck_path = config.pfile(name, 'cookie.json')
-    if not os.path.isfile(ck_path):
-        print('\n提示: 该账号尚未配置浏览器 Cookie。若要跑浏览器任务(搜索/每日活动/打卡)，建议补:')
-        print(f'  msr login {name} --cookies <导出的cookies.json>')
-        print(f'  或使用交互式登录: msr login {name} --method interactive')
+        # 默认推荐: 账号密码自动化登录
+        if not username:
+            username = input('请输入微软账号邮箱 (例如 xxx@outlook.com): ').strip()
+        if not password:
+            import getpass
+            password = getpass.getpass('请输入微软账号密码: ').strip()
+        login_with_credential(name, username, password, proxy=proxy, log_cb=print)
 
     # 更新或登记 accounts.json
     accs = config.accounts()
@@ -65,36 +61,105 @@ def cmd_login(args):
     config.log(name, '=== 登录引导完成 ===')
 
 
-def _login_by_device_code(name, profile_path, config, api, probe, proxy=None):
-    """方式 1: 微软官方 OAuth2 设备码流 (Device Code Flow)。"""
-    print('\n[1/2] 微软官方设备码授权 (免密码、支持 2FA、手机/任意浏览器打开):')
-    dc = api.device_code_login(name, proxy=proxy)
-    uri = dc.get('verification_uri', 'https://microsoft.com/devicelogin')
-    code = dc.get('user_code')
-    print(f'  1. 打开授权网址: {uri}')
-    print(f'  2. 输入设备代码: {code}')
-    print('  3. 登录并同意授权中...', flush=True)
+def exchange_token_from_cookies(name, proxy=None, cdp=None, ch=None, log_cb=None):
+    """通过无头浏览器中已注入的微软 Cookie，静默单点登录自动获取 OAuth2 Token。"""
+    from msr import config, api, probe, browser
+    log = log_cb or (lambda m: config.log(name, m))
+    ck_path = config.pfile(name, 'cookie.json')
+    cookies = config.load_json(ck_path)
+    if not cookies:
+        log('未找到 cookie.json，无法换取 Token')
+        return None
 
-    t = api.poll_device_code(name, dc['device_code'],
-                             interval=int(dc.get('interval', 5)),
-                             proxy=proxy)
-    api.save_token(name, t, profile_path)
-    config.log(name, '设备码授权成功，OAuth2 Token 已持久化保存')
+    own_ch = False
+    if ch is None or cdp is None:
+        chrome_dir = config.profile(name) + '/chrome'
+        ch = browser.Chromium(user_data_dir=chrome_dir, proxy=proxy, log=log)
+        tabs = ch.start()
+        page_tabs = [t for t in tabs if t.get('type') == 'page']
+        tab = page_tabs[0] if page_tabs else ch.new_tab('about:blank')
+        cdp = ch.attach(tab)
+        own_ch = True
 
-    print('\n[2/2] 探测账号区域与任务特权:')
-    rg_path = config.pfile(name, 'region.json')
-    tok = config.load_json(config.pfile(name, 'token.json'))
-    pr = probe.probe_account(name, tok['access_token'], proxy=proxy)
-    config.save_json(rg_path, pr)
-    print('  国家/区域 : %s' % pr.get('country'))
-    print('  系统语言  : %s' % pr.get('language'))
-    print('  当前等级  : %s' % (pr.get('levelInfo') or {}).get('activeLevel'))
-    print('  当前余额  : %s' % pr.get('balance'))
-    print('  可用任务  : %s' % ', '.join(pr.get('task_names', [])))
+    try:
+        browser.inject_cookies(cdp, cookies, log=log)
+        cdp.call('Network.enable')
+
+        code_holder = []
+        def on_event(ev):
+            if ev.get('method') == 'Network.requestWillBeSent':
+                url = ev.get('params', {}).get('request', {}).get('url', '')
+                if 'code=' in url and 'oauth20_desktop' in url:
+                    parsed = urllib.parse.urlparse(url)
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    c = qs.get('code', [None])[0]
+                    if c:
+                        code_holder.append(c)
+
+        prev_handler = cdp.event_handler
+        cdp.event_handler = on_event
+
+        client_id = api.CLIENT_ID
+        scope = api.SCOPE
+        redirect = api.REDIRECT
+        auth_url = 'https://login.live.com/oauth20_authorize.srf?' + urllib.parse.urlencode({
+            'client_id': client_id,
+            'scope': scope,
+            'response_type': 'code',
+            'redirect_uri': redirect,
+            'prompt': 'none'
+        })
+        cdp.call('Page.navigate', {'url': auth_url})
+
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if code_holder:
+                break
+            time.sleep(0.3)
+
+        cdp.event_handler = prev_handler
+        if not code_holder:
+            log('未能静默获取 OAuth 授权码 (可能缺少 login.live.com 会话 Cookie)')
+            return None
+
+        code = code_holder[0]
+        body = {
+            'grant_type': 'authorization_code',
+            'client_id': client_id,
+            'code': code,
+            'redirect_uri': redirect,
+            'scope': scope
+        }
+        tok = api._token_post(name, body, proxy=proxy)
+        if not tok.get('refresh_token') and not tok.get('access_token'):
+            return None
+
+        api.save_token(name, tok, config.profile(name))
+        log('通过 Cookie 静默生成并固化 OAuth Token 成功！')
+
+        # 探测账号属性与区域
+        try:
+            pr = probe.probe_account(name, tok['access_token'], proxy=proxy)
+            config.save_json(config.pfile(name, 'region.json'), pr)
+            log(f'自动探测账号信息成功: 区域={pr.get("country")} 余额={pr.get("balance")}')
+        except Exception as e:
+            log(f'探测账号属性提示: {e}')
+
+        return tok
+    except Exception as ex:
+        log(f'静默换取 Token 异常: {ex}')
+        return None
+    finally:
+        if own_ch:
+            try:
+                ch.stop()
+            except Exception:
+                pass
 
 
-def _login_by_cookies(name, cookie_file=None):
-    """方式 2: Cookie 结构化导入与智能清洗。"""
+def _login_by_cookies(name, cookie_file=None, proxy=None):
+    """方式 2: Cookie 导入并自动换取 Token。"""
+    from msr import config
     if cookie_file and os.path.isfile(cookie_file):
         print(f'\n正在从文件导入 Cookie: {cookie_file}')
         diag = cookie_mod.import_file(name, cookie_file)
@@ -114,16 +179,21 @@ def _login_by_cookies(name, cookie_file=None):
         if not cookies:
             print('Cookie 格式无法解析，请确保是合法的 JSON 数组或键值对字符串')
             return
-        from msr import config
         dest = config.pfile(name, 'cookie.json')
         config.save_json(dest, cookies)
         diag = cookie_mod.validate_cookies(cookies)
 
     print(f"Cookie 校验结果: 条数={diag['count']}, 核心登录凭据(_U)={diag['has_auth_u']}, 状态={diag['reason']}")
+    print("正在尝试通过 Cookie 自动生成 OAuth2 Token...")
+    tok = exchange_token_from_cookies(name, proxy=proxy, log_cb=print)
+    if tok:
+        print("🎉 Token 自动换取成功！双凭据 (Cookie+Token) 已全部就绪。")
+    else:
+        print("💡 Cookie 已就绪。未能自动换取 Token，系统将优先以纯浏览器模式执行搜索赚分任务。")
 
 
 def _login_by_interactive(name, profile_path, config, proxy=None):
-    """方式 3: 启动带有远程调试的 Headless Chromium，自动嗅探已登录 Cookie。"""
+    """方式 3: 启动带有远程调试的 Headless Chromium，用户远程在浏览器中手动登录。"""
     from msr import browser
     chrome_dir = os.path.join(profile_path, 'chrome')
     ch = browser.Chromium(user_data_dir=chrome_dir, proxy=proxy, log=lambda m: config.log(name, m))
@@ -158,78 +228,503 @@ def _login_by_interactive(name, profile_path, config, proxy=None):
 
     if not success:
         print('\n登录超时或未检测到有效 Cookie')
+    else:
+        print("正在自动通过捕获的会话换取 OAuth Token...")
+        exchange_token_from_cookies(name, proxy=proxy, cdp=cdp, ch=ch, log_cb=print)
+
     try:
         ch.stop()
     except Exception:
         pass
 
 
-def _login_by_credential(name, profile_path, config, username, password, proxy=None):
-    """方式 4: 自动键入账号密码，自适应 2FA 提示。"""
+def inspect_login_page(cdp):
+    """自适应探测微软登录页的当前状态与风控质询类型。"""
     from msr import browser
-    chrome_dir = os.path.join(profile_path, 'chrome')
-    ch = browser.Chromium(user_data_dir=chrome_dir, proxy=proxy, log=lambda m: config.log(name, m))
-    ch.start()
-    tab = ch.new_tab('https://login.live.com/')
-    cdp = ch.attach(tab)
+    script = '''(() => {
+        const text = (document.body ? document.body.innerText : '') || '';
+        const url = location.href || '';
+        
+        // 1. 成功页面判断
+        if (url.includes('bing.com') || url.includes('account.microsoft.com') || url.includes('rewards.bing.com') || url.includes('privacynotice') || url.includes('myaccount.microsoft.com')) {
+            return { type: 'success_url', url: url };
+        }
+        
+        // 2. 账号与风控错误拦截
+        if (text.includes('此 Microsoft 帐户不存在') || text.includes("That Microsoft account doesn't exist")) {
+            return { type: 'error', error: '此 Microsoft 帐户不存在，请核对用户名' };
+        }
+        if (text.includes('密码不正确') || text.includes('Your account or password is incorrect')) {
+            return { type: 'error', error: '密码不正确，请核对密码' };
+        }
+        if (text.includes('此帐户已被锁定') || text.includes('Your account has been locked') || text.includes('我们检测到异常活动')) {
+            return { type: 'error', error: '该微软账户触发了安全风控拦截或已被锁定，需通过官方渠道重置' };
+        }
 
-    print(f'\n正在以自动化表单方式登录账号: {username} ...')
+        // 3. 保持登录状态 (KMSI) 弹窗
+        const kmsiBtn = document.querySelector('#acceptButton, input[value=Yes], input[value="是"], #idSIButton9');
+        if (kmsiBtn && (text.includes('保持登录状态') || text.includes('Stay signed in'))) {
+            return { type: 'kmsi' };
+        }
+
+        // 4. 手机 Authenticator 匹配数字 (Number Matching)
+        const signEl = document.querySelector('#idRichContext_DisplaySign, .display-sign-in-large-text, #displaySign, [data-test-id=displaySign]');
+        if (signEl && signEl.innerText.trim()) {
+            return { type: 'auth_push', code: signEl.innerText.trim() };
+        }
+
+        // 5. 二次验证/手机/邮箱 OTC 验证码输入框
+        const otcInput = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #idTxtBx_OTC');
+        if (otcInput) {
+            let prompt = '微软要求输入安全验证码';
+            const pEl = document.querySelector('#idDiv_SAOTCC_Description, .text-body, #idDiv_SAOTCS_Description');
+            if (pEl && pEl.innerText.trim()) {
+                prompt = pEl.innerText.trim();
+            }
+            return { type: 'otp_input', prompt: prompt };
+        }
+
+        // 6. 验证方式选择列表 (Proof Selection)
+        const proofs = document.querySelector('#idDiv_SAOTCS_Proofs, .tile-container, #idDiv_SAOTCS_Proofs_List');
+        if (proofs && (text.includes('验证你的身份') || text.includes('Verify your identity'))) {
+            return { type: 'proof_selection' };
+        }
+
+        // 7. 人机拼图验证码 (Arkose Labs FunCaptcha)
+        const arkose = document.querySelector('iframe[src*="arkoselabs"], iframe[src*="arkose"], #enforcementFrame, div[id*="wlspisp"]');
+        if (arkose || text.includes('请解决谜题') || text.includes('证明你不是机器人') || text.includes('Please solve the puzzle')) {
+            return { type: 'arkose_challenge' };
+        }
+
+        // 8. 密码输入页
+        const pwdInput = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
+        if (pwdInput) {
+            return { type: 'password_entry' };
+        }
+
+        // 9. 智能识别并切换至“使用密码”模式
+        const leaf = Array.from(document.querySelectorAll('*')).find(x => {
+            const t = (x.innerText || '').trim();
+            return (t === '使用密码' || t === 'Use password') && x.children.length === 0;
+        });
+        if (leaf) {
+            return { type: 'switch_to_password' };
+        }
+
+        // 10. 用户名输入页
+        const userInput = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
+        if (userInput) {
+            return { type: 'username_entry' };
+        }
+
+        // 11. 通用下一步 / 协议同意 (KMSI 等)
+        const nextBtn = document.querySelector('#iNext, #iLandingViewAction, #idSIButton9, input[type=submit], button[type=submit]');
+        if (nextBtn && (text.includes('下一步') || text.includes('继续') || text.includes('Next') || text.includes('Continue'))) {
+            return { type: 'generic_next' };
+        }
+
+        return { type: 'other', url: url };
+    })()'''
     try:
-        time.sleep(3)
-        # 输入用户名
-        cdp.call('Runtime.evaluate', {
-            'expression': f'''(() => {{
-                const i = document.querySelector('input[type=email], input[name=loginfmt]');
-                if (i) {{ i.value = "{username}"; i.dispatchEvent(new Event("input")); return true; }}
-                return false;
-            }})()'''
-        })
-        time.sleep(1)
-        cdp.call('Runtime.evaluate', {'expression': 'document.querySelector("#idSIButton9, input[type=submit]")?.click()'})
-        time.sleep(3)
+        res = browser.ev(cdp, script)
+        return res if isinstance(res, dict) else {'type': 'other'}
+    except Exception:
+        return {'type': 'other'}
 
-        # 输入密码
-        cdp.call('Runtime.evaluate', {
-            'expression': f'''(() => {{
-                const p = document.querySelector('input[type=password], input[name=passwd]');
-                if (p) {{ p.value = "{password}"; p.dispatchEvent(new Event("input")); return true; }}
-                return false;
-            }})()'''
-        })
-        time.sleep(1)
-        cdp.call('Runtime.evaluate', {'expression': 'document.querySelector("#idSIButton9, input[type=submit]")?.click()'})
-        time.sleep(4)
 
-        # 处理 "保持登录状态?" 提示
-        cdp.call('Runtime.evaluate', {'expression': 'document.querySelector("#acceptButton, input[type=submit]")?.click()'})
-        time.sleep(3)
+class LoginSession:
+    """账号登录多重交互与风控接管会话管理类。"""
 
-        # 检查是否要求二次验证
-        needs_2fa = browser.ev(cdp, '''(() => {
-            const t = document.body.innerText || "";
-            return t.includes("验证您的身份") || t.includes("Authenticator") || t.includes("批准请求") || t.includes("安全代码");
-        })()''')
-        if needs_2fa:
-            print('>>> [安全提示] 微软触发了二次验证 (2FA / Authenticator)，请在手机微软验证器上点击确认或输入代码，脚本等待最多 90 秒...')
-            for _ in range(30):
-                time.sleep(3)
-                url = browser.ev(cdp, 'location.href') or ''
-                if 'bing.com' in url or 'account.microsoft.com' in url or 'myaccount' in url:
+    def __init__(self, name, username, password, proxy=None, log_cb=None):
+        self.name = name
+        self.username = username
+        self.password = password
+        self.proxy = proxy
+        self.log_cb = log_cb
+        self.status = 'starting'  # starting, running, wait_auth_push, wait_otp, wait_interactive, success, error
+        self.message = '正在初始化安全 Chromium 实例...'
+        self.auth_code = None
+        self.otp_prompt = None
+        self.error_msg = None
+        self.logs = []
+        self.created_at = time.time()
+        self.updated_at = time.time()
+        self.ch = None
+        self.cdp = None
+        self.thread = None
+        self.stop_requested = False
+        self.result = None
+        self._lock = threading.Lock()
+
+    def log(self, msg):
+        ts = time.strftime('%H:%M:%S')
+        line = f'[{ts}] {msg}'
+        with self._lock:
+            self.logs.append(line)
+            if len(self.logs) > 80:
+                self.logs.pop(0)
+        if self.log_cb:
+            try:
+                self.log_cb(msg)
+            except Exception:
+                pass
+
+    def start(self):
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def cancel(self):
+        self.stop_requested = True
+        self.status = 'error'
+        self.message = '用户已取消登录会话'
+        self._cleanup()
+
+    def _cleanup(self):
+        if self.ch:
+            try:
+                self.ch.stop()
+            except Exception:
+                pass
+            self.ch = None
+            self.cdp = None
+
+    def get_screenshot(self):
+        if not self.cdp:
+            return None
+        from msr import browser
+        b64 = browser.capture_screenshot(self.cdp, quality=65)
+        if b64:
+            try:
+                return base64.b64decode(b64)
+            except Exception:
+                return None
+        return None
+
+    def submit_otp(self, code):
+        if not self.cdp:
+            return {'status': 'error', 'message': '浏览器未就绪'}
+        from msr import browser
+        self.log(f'正在向微软页面填入安全验证码: {code} ...')
+        script = f'''(() => {{
+            const inp = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #idTxtBx_OTC');
+            if (inp) {{
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                setter.call(inp, "{code}");
+                inp.dispatchEvent(new Event('input', {{bubbles: true}}));
+                inp.dispatchEvent(new Event('change', {{bubbles: true}}));
+                const btn = document.querySelector('#idSubmit_SAOTCC_Continue, #idSIButton9, button[type=submit], input[type=submit]');
+                if (btn) btn.click();
+                return true;
+            }}
+            return false;
+        }})()'''
+        ok = browser.ev(self.cdp, script)
+        if ok:
+            self.status = 'running'
+            self.message = '验证码已提交，正在等待微软校验...'
+            return {'status': 'ok'}
+        return {'status': 'error', 'message': '未能定位验证码输入框，请确认当前画面是否在输入验证码'}
+
+    def dispatch_mouse_click(self, x, y):
+        if not self.cdp:
+            return {'status': 'error', 'message': '浏览器未就绪'}
+        from msr import browser
+        try:
+            browser.mouse_click(self.cdp, x, y)
+            self.log(f'用户远程交互点击视口坐标: ({x}, {y})')
+            return {'status': 'ok'}
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}
+
+    def to_dict(self):
+        with self._lock:
+            return {
+                'name': self.name,
+                'status': self.status,
+                'message': self.message,
+                'auth_code': self.auth_code,
+                'otp_prompt': self.otp_prompt,
+                'error_msg': self.error_msg,
+                'logs': list(self.logs),
+                'result': self.result,
+                'updated_at': self.updated_at
+            }
+
+    def _run(self):
+        from msr import config, browser, cookies as cookie_mod
+        profile_path = config.profile(self.name)
+        chrome_dir = os.path.join(profile_path, 'chrome')
+
+        try:
+            self.log(f'正在启动安全无头 Chromium 实例 (账号: {self.username})...')
+            self.ch = browser.Chromium(user_data_dir=chrome_dir, proxy=self.proxy, log=self.log)
+            from msr import fingerprint
+            fp = fingerprint.load_or_create(self.name)
+            self.ch.fingerprint = fp
+
+            tabs = self.ch.start()
+            page_tabs = [t for t in tabs if t.get('type') == 'page']
+            tab = page_tabs[0] if page_tabs else self.ch.new_tab('about:blank')
+            self.cdp = self.ch.attach(tab)
+
+            self.log('正在打开微软登录网关 (https://login.live.com/)...')
+            browser.navigate(self.cdp, 'https://login.live.com/')
+            time.sleep(3)
+
+            username_injected = False
+            password_injected = False
+
+            deadline = time.time() + 180
+            while time.time() < deadline and not self.stop_requested:
+                self.updated_at = time.time()
+
+                # A. 优先检查当前是否有有效 Cookie (可能已登录或者在任何步骤后完成)
+                try:
+                    res = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com']})
+                    cks = res.get('cookies', [])
+                    diag = cookie_mod.validate_cookies(cks)
+                    curr_url = browser.ev(self.cdp, 'location.href') or ''
+                    if diag.get('has_auth_u') or ('bing.com' in curr_url and diag.get('has_muid')) or ('account.microsoft.com' in curr_url):
+                        self.log('检测到已进入微软会话，正在导航至 Bing 提取并固化全量 Cookie...')
+                        browser.navigate(self.cdp, 'https://www.bing.com/')
+                        time.sleep(3)
+                        res2 = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com']})
+                        final_cks = res2.get('cookies', [])
+                        diag2 = cookie_mod.validate_cookies(final_cks)
+                        if diag2['has_auth_u'] or diag2['has_muid']:
+                            config.save_json(config.pfile(self.name, 'cookie.json'), final_cks)
+                            self.log(f'✅ 成功捕获并保存全量 Cookie (共 {len(final_cks)} 条, 含 _U={diag2["has_auth_u"]})')
+                            self.log('正在自动通过登录会话静默换取 OAuth2 Token...')
+                            tok = exchange_token_from_cookies(self.name, proxy=self.proxy, cdp=self.cdp, ch=self.ch, log_cb=self.log)
+                            rg = config.load_json(config.pfile(self.name, 'region.json'), {}) or {}
+
+                            self.result = {
+                                'status': 'ok',
+                                'message': '微软账号自动化登录成功！Cookie 与 Token 双凭据已全部就绪。',
+                                'cookie_count': len(final_cks),
+                                'has_token': bool(tok),
+                                'balance': rg.get('balance', 0),
+                                'country': rg.get('country', '未知')
+                            }
+                            self.status = 'success'
+                            self.message = '🎉 登录成功！所有凭据已自动固化就绪。'
+                            break
+                except Exception:
+                    pass
+
+                # B. 检测页面状态
+                state = inspect_login_page(self.cdp)
+                st_type = state.get('type')
+
+                if st_type == 'error':
+                    self.status = 'error'
+                    self.error_msg = state.get('error')
+                    self.message = f'登录异常: {self.error_msg}'
+                    self.log(f'❌ 微软错误提示: {self.error_msg}')
                     break
 
-        # 导航到 Bing 落地并提取 Cookie
-        browser.navigate(cdp, 'https://www.bing.com/')
-        time.sleep(3)
-        res = cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com']})
-        cks = res.get('cookies', [])
-        diag = cookie_mod.validate_cookies(cks)
-        if diag['has_auth_u'] or diag['has_muid']:
-            config.save_json(config.pfile(name, 'cookie.json'), cks)
-            print(f"[OK] 账号密码自动化登录成功! Cookie 已保存 (共 {len(cks)} 条)")
-        else:
-            print(f"登录完成但 Cookie 待确认 (条数: {len(cks)})")
-    finally:
-        ch.stop()
+                elif st_type == 'username_entry' and not username_injected:
+                    self.status = 'running'
+                    self.message = '正在填入微软账号...'
+                    self.log('正在填入微软账号...')
+                    user_ok = browser.ev(self.cdp, f'''(() => {{
+                        const input = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
+                        if (input) {{
+                            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                            setter.call(input, "{self.username}");
+                            input.dispatchEvent(new Event('input', {{bubbles: true}}));
+                            input.dispatchEvent(new Event('change', {{bubbles: true}}));
+                            return true;
+                        }}
+                        return false;
+                    }})()''')
+                    if user_ok:
+                        username_injected = True
+                        time.sleep(0.8)
+                        browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
+                        time.sleep(3)
+
+                elif st_type == 'switch_to_password':
+                    self.status = 'running'
+                    self.message = '检测到默认非密码选项，自动切换至“使用密码”模式...'
+                    self.log('检测到默认非密码选项，自动切换至“使用密码”模式')
+                    browser.ev(self.cdp, '''(() => {
+                        const leaf = Array.from(document.querySelectorAll('*')).find(x => {
+                            const t = (x.innerText || '').trim();
+                            return (t === '使用密码' || t === 'Use password') && x.children.length === 0;
+                        });
+                        if (leaf) {
+                            const target = leaf.closest('a, button, [role=button], .fui-Link') || leaf;
+                            target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                            target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                            target.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                        }
+                    })()''')
+                    time.sleep(2.5)
+
+                elif st_type == 'password_entry' and not password_injected:
+                    self.status = 'running'
+                    self.message = '正在填入密码并提交...'
+                    self.log('正在填入密码并提交...')
+                    pwd_ok = browser.ev(self.cdp, f'''(() => {{
+                        const p = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
+                        if (p) {{
+                            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                            setter.call(p, "{self.password}");
+                            p.dispatchEvent(new Event('input', {{bubbles: true}}));
+                            p.dispatchEvent(new Event('change', {{bubbles: true}}));
+                            return true;
+                        }}
+                        return false;
+                    }})()''')
+                    if pwd_ok:
+                        password_injected = True
+                        time.sleep(0.8)
+                        browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
+                        time.sleep(3)
+
+                elif st_type == 'kmsi':
+                    self.log('处理“保持登录状态”确认...')
+                    browser.ev(self.cdp, 'document.querySelector("#acceptButton, input[value=Yes], input[value=\'是\'], #idSIButton9, button[type=submit]")?.click()')
+                    time.sleep(2.5)
+
+                elif st_type == 'auth_push':
+                    code = state.get('code')
+                    self.status = 'wait_auth_push'
+                    self.auth_code = code
+                    self.message = f'微软触发手机 Authenticator 验证，请在手机应用上选择数字：【 {code} 】'
+                    self.log(f'>>> [安全提示] 微软触发手机 Authenticator 二次验证，匹配数字: 【 {code} 】')
+                    time.sleep(3)
+
+                elif st_type == 'otp_input':
+                    prompt = state.get('prompt') or '请输入安全验证码'
+                    self.status = 'wait_otp'
+                    self.otp_prompt = prompt
+                    self.message = f'微软需要输入安全验证码: {prompt}'
+                    time.sleep(2)
+
+                elif st_type in ('arkose_challenge', 'proof_selection'):
+                    self.status = 'wait_interactive'
+                    if st_type == 'arkose_challenge':
+                        self.message = '检测到人机拼图验证码(Arkose)，请在下方实时交互窗口中点击完成验证'
+                    else:
+                        self.message = '检测到微软身份验证方式选择，请在下方实时交互窗口中点击选择'
+                    time.sleep(2)
+
+                elif st_type == 'generic_next':
+                    browser.ev(self.cdp, 'document.querySelector("#iNext, #iLandingViewAction, #idSIButton9, input[type=submit]")?.click()')
+                    time.sleep(2)
+
+                else:
+                    time.sleep(1.5)
+
+            if not self.result and self.status != 'error':
+                if self.stop_requested:
+                    self.status = 'error'
+                    self.message = '登录已取消'
+                else:
+                    self.status = 'error'
+                    self.message = '登录超时 (180秒未完成)，可能存在未通过的风控验证'
+
+        except Exception as ex:
+            self.status = 'error'
+            self.error_msg = str(ex)
+            self.message = f'异常: {ex}'
+            self.log(f'登录过程发生异常: {ex}')
+        finally:
+            self._cleanup()
+
+
+_active_sessions = {}
+_sessions_lock = threading.Lock()
+
+
+def get_session(name):
+    with _sessions_lock:
+        return _active_sessions.get(name)
+
+
+def start_session(name, username, password, proxy=None, log_cb=None):
+    with _sessions_lock:
+        if name in _active_sessions:
+            try:
+                _active_sessions[name].cancel()
+            except Exception:
+                pass
+        sess = LoginSession(name, username, password, proxy=proxy, log_cb=log_cb)
+        _active_sessions[name] = sess
+        sess.start()
+        return sess
+
+
+def cancel_session(name):
+    with _sessions_lock:
+        sess = _active_sessions.pop(name, None)
+        if sess:
+            sess.cancel()
+
+
+def submit_session_otp(name, code):
+    sess = get_session(name)
+    if not sess:
+        return {'status': 'error', 'message': '未找到活跃的登录会话'}
+    return sess.submit_otp(code)
+
+
+def session_mouse_click(name, x, y):
+    sess = get_session(name)
+    if not sess:
+        return {'status': 'error', 'message': '未找到活跃的登录会话'}
+    return sess.dispatch_mouse_click(x, y)
+
+
+def get_session_screenshot(name):
+    sess = get_session(name)
+    if not sess:
+        return None
+    return sess.get_screenshot()
+
+
+def login_with_credential(name, username, password, proxy=None, log_cb=None):
+    """现代化微软账号密码全自动登录与多重风控质询接管。"""
+    session = start_session(name, username, password, proxy=proxy, log_cb=log_cb)
+    deadline = time.time() + 180
+    prompted_auth_code = None
+    prompted_otp = False
+
+    while time.time() < deadline:
+        if session.status == 'success':
+            return session.result
+        if session.status == 'error':
+            raise RuntimeError(session.error_msg or session.message)
+
+        if session.status == 'wait_auth_push' and session.auth_code != prompted_auth_code:
+            prompted_auth_code = session.auth_code
+            if log_cb:
+                log_cb(f'>>> [安全提示] 微软触发手机 Authenticator 验证，请在手机上选择数字：【 {session.auth_code} 】')
+
+        if session.status == 'wait_otp' and not prompted_otp:
+            prompted_otp = True
+            if sys.stdin and sys.stdin.isatty():
+                print(f'\n>>> 微软要求输入安全验证码 ({session.otp_prompt or "邮箱/短信"}):', flush=True)
+                try:
+                    code = input('请输入验证码: ').strip()
+                    if code:
+                        session.submit_otp(code)
+                except Exception:
+                    pass
+            else:
+                if log_cb:
+                    log_cb(f'>>> [安全提示] 微软要求输入安全验证码: {session.otp_prompt} (请在 Web 控制台输入提交)')
+
+        if session.status == 'wait_interactive':
+            if log_cb:
+                log_cb('>>> [风控提示] 检测到微软人机拼图/复杂安全质询，请在 Web 控制台进行远程交互操作')
+
+        time.sleep(1)
+
+    session.cancel()
+    raise RuntimeError('登录超时或等待验证超时')
 
 
 def get_auth_status(name):
@@ -259,12 +754,12 @@ def get_auth_status(name):
     if has_token and has_u:
         auth_type = 'full'
         summary = '有效 (Token+Cookie双就绪)'
-    elif has_token:
-        auth_type = 'oauth'
-        summary = '有效 (OAuth 就绪，待补Cookie)'
     elif has_u:
         auth_type = 'cookie'
         summary = '有效 (Cookie 就绪)'
+    elif has_token:
+        auth_type = 'oauth'
+        summary = '有效 (OAuth 就绪，待补Cookie)'
     else:
         auth_type = 'none'
         summary = '未登录或凭据失效'
@@ -278,4 +773,3 @@ def get_auth_status(name):
         'cookie_count': cookie_count,
         'summary': summary
     }
-

@@ -9,6 +9,9 @@ import threading
 import time
 import urllib.request
 
+os.environ['NO_PROXY'] = '127.0.0.1,localhost'
+os.environ['no_proxy'] = '127.0.0.1,localhost'
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from msr import config, web
@@ -63,59 +66,134 @@ try:
     assert any(a['name'] == 'web_test_acc' for a in accs)
     print('[OK] /api/accounts 添加账号正常')
 
-    # 3.1 测试 POST /api/auth/device-code 获取设备码
-    from msr import api
-    orig_dc = api.device_code_login
-    orig_poll = api.poll_device_code_once
-    api.device_code_login = lambda name, proxy=None: {
-        'user_code': 'MOCK1234',
-        'device_code': 'mock_dev_code_xyz',
-        'verification_uri': 'https://www.microsoft.com/link',
-        'interval': 5,
-        'expires_in': 900
+    # 3.1 测试 POST /api/auth/credential 账号密码自动化登录接口 (Mock 测试)
+    from msr import auth
+    orig_login = auth.login_with_credential
+    auth.login_with_credential = lambda name, username, password, proxy=None, log_cb=None: {
+        'status': 'ok',
+        'message': '测试登录成功',
+        'cookie_count': 10,
+        'has_token': True,
+        'balance': 5000,
+        'country': 'SG'
     }
-    api.poll_device_code_once = lambda name, dev_code, proxy=None: None
-
     try:
-        req = urllib.request.Request(f'{base_url}/api/auth/device-code',
+        req = urllib.request.Request(f'{base_url}/api/auth/credential',
+                                     data=json.dumps({'name': 'web_test_acc', 'username': 'test@outlook.com', 'password': 'pass123'}).encode(),
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            assert resp.status == 200
+            res_data = json.loads(resp.read().decode())
+            assert res_data['status'] == 'ok'
+            assert res_data['balance'] == 5000
+        print('[OK] /api/auth/credential 账号密码登录接口正常')
+    finally:
+        auth.login_with_credential = orig_login
+
+    # 3.2 测试交互式风控接管会话接口 (/api/auth/session/*)
+    class FakeSession:
+        def __init__(self):
+            self.status = 'wait_auth_push'
+            self.auth_code = '42'
+            self.otp_prompt = None
+            self.message = '请在手机上确认'
+        def to_dict(self):
+            return {'status': self.status, 'auth_code': self.auth_code, 'message': self.message}
+    fake_sess = FakeSession()
+    orig_start_sess = auth.start_session
+    orig_get_sess = auth.get_session
+    orig_sub_otp = auth.submit_session_otp
+    orig_mouse = auth.session_mouse_click
+    orig_cancel = auth.cancel_session
+    orig_shot = auth.get_session_screenshot
+
+    auth.start_session = lambda name, username, password, proxy=None, log_cb=None: fake_sess
+    auth.get_session = lambda name: fake_sess
+    auth.submit_session_otp = lambda name, code: {'status': 'ok'}
+    auth.session_mouse_click = lambda name, x, y: {'status': 'ok'}
+    auth.cancel_session = lambda name: None
+    auth.get_session_screenshot = lambda name: b'\xff\xd8\xff\xe0\x00\x10JFIF'
+    try:
+        # 3.2.1 启动会话
+        req = urllib.request.Request(f'{base_url}/api/auth/session/start',
+                                     data=json.dumps({'name': 'web_test_acc', 'username': 'test@outlook.com', 'password': 'pass123'}).encode(),
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            d = json.loads(resp.read().decode())
+            assert d['status'] == 'ok'
+
+        # 3.2.2 查询会话状态
+        req = urllib.request.Request(f'{base_url}/api/auth/session/status?name=web_test_acc')
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            d = json.loads(resp.read().decode())
+            assert d['status'] == 'wait_auth_push'
+            assert d['auth_code'] == '42'
+
+        # 3.2.3 获取远程截屏
+        req = urllib.request.Request(f'{base_url}/api/auth/session/screenshot?name=web_test_acc')
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            assert resp.headers['Content-Type'] == 'image/jpeg'
+            assert len(resp.read()) > 0
+
+        # 3.2.4 提交 OTP 验证码
+        req = urllib.request.Request(f'{base_url}/api/auth/session/submit-otp',
+                                     data=json.dumps({'name': 'web_test_acc', 'code': '123456'}).encode(),
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            d = json.loads(resp.read().decode())
+            assert d['status'] == 'ok'
+
+        # 3.2.5 模拟远程鼠标点击
+        req = urllib.request.Request(f'{base_url}/api/auth/session/mouse',
+                                     data=json.dumps({'name': 'web_test_acc', 'x': 100, 'y': 200}).encode(),
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            d = json.loads(resp.read().decode())
+            assert d['status'] == 'ok'
+
+        # 3.2.6 取消会话
+        req = urllib.request.Request(f'{base_url}/api/auth/session/cancel',
                                      data=json.dumps({'name': 'web_test_acc'}).encode(),
                                      headers={'Content-Type': 'application/json'}, method='POST')
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
-            dc_data = json.loads(resp.read().decode())
-            assert dc_data['status'] == 'ok'
-            assert dc_data['data']['user_code'] == 'MOCK1234'
-            assert dc_data['data']['verification_uri'] == 'https://www.microsoft.com/link'
-        print('[OK] /api/auth/device-code 获取设备码正常')
+            d = json.loads(resp.read().decode())
+            assert d['status'] == 'ok'
 
-        # 3.2 测试 POST /api/auth/device-code/poll 轮询检测 (未授权时返回 complete: False)
-        req = urllib.request.Request(f'{base_url}/api/auth/device-code/poll',
-                                     data=json.dumps({'name': 'web_test_acc', 'device_code': dc_data['data']['device_code']}).encode(),
-                                     headers={'Content-Type': 'application/json'}, method='POST')
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            assert resp.status == 200
-            poll_data = json.loads(resp.read().decode())
-            assert poll_data['status'] == 'ok'
-            assert poll_data['complete'] is False
-        print('[OK] /api/auth/device-code/poll 轮询状态正常')
+        print('[OK] /api/auth/session/* 交互式登录与多重风控接管接口全部正常')
     finally:
-        api.device_code_login = orig_dc
-        api.poll_device_code_once = orig_poll
+        auth.start_session = orig_start_sess
+        auth.get_session = orig_get_sess
+        auth.submit_session_otp = orig_sub_otp
+        auth.session_mouse_click = orig_mouse
+        auth.cancel_session = orig_cancel
+        auth.get_session_screenshot = orig_shot
 
     # 4. 测试 POST /api/auth/cookies 导入 Cookie
-    cookie_payload = json.dumps({
-        'name': 'web_test_acc',
-        'cookies_raw': '[{"name": "_U", "value": "val123"}, {"name": "MUID", "value": "muid456"}]'
-    }).encode()
-    req = urllib.request.Request(f'{base_url}/api/auth/cookies', data=cookie_payload,
-                                 headers={'Content-Type': 'application/json'}, method='POST')
-    with urllib.request.urlopen(req, timeout=5) as resp:
-        assert resp.status == 200
-        d = json.loads(resp.read().decode())
-        assert d['status'] == 'ok'
-        assert d['has_u'] is True
-        assert d['count'] == 2
-    print('[OK] /api/auth/cookies 导入与校验正常')
+    orig_exchange = auth.exchange_token_from_cookies
+    auth.exchange_token_from_cookies = lambda name, proxy=None, cdp=None, ch=None, log_cb=None: {'access_token': 'fake_token'}
+    try:
+        cookie_payload = json.dumps({
+            'name': 'web_test_acc',
+            'cookies_raw': '[{"name": "_U", "value": "val123"}, {"name": "MUID", "value": "muid456"}]'
+        }).encode()
+        req = urllib.request.Request(f'{base_url}/api/auth/cookies', data=cookie_payload,
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            d = json.loads(resp.read().decode())
+            assert d['status'] == 'ok'
+            assert d['has_u'] is True
+            assert d['count'] == 2
+            assert d.get('has_token') is True
+        print('[OK] /api/auth/cookies 导入与校验正常')
+    finally:
+        auth.exchange_token_from_cookies = orig_exchange
 
     # 4.1 测试 GET /api/auth/cookies 导出 Cookie
     req = urllib.request.Request(f'{base_url}/api/auth/cookies?name=web_test_acc')

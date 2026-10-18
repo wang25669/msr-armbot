@@ -84,26 +84,57 @@ def cmd_run(args):
 
 
 def run_one(name, args, config, planner, probe, api, executor, notify=None, settings=None):
+    from msr import auth
     p = config.profile(name)
     tok = config.load_json(config.pfile(name, 'token.json')) or {}
-    rg = config.load_json(config.pfile(name, 'region.json'))
-    if not tok.get('refresh_token'):
-        raise RuntimeError('无 token, 先 msr login %s' % name)
+    rg = config.load_json(config.pfile(name, 'region.json')) or {}
+    ck_path = config.pfile(name, 'cookie.json')
+    has_cookie = os.path.isfile(ck_path) and bool(config.load_json(ck_path))
 
     acc_cfg = config.get_account(name) or {}
     proxy = acc_cfg.get('proxy')
     cdp_port = acc_cfg.get('cdp_port')
 
+    # 1. 自动凭据自愈：若无 Token 但有 Cookie，自动尝试静默换取并固化
+    if not tok.get('refresh_token') and has_cookie:
+        config.log(name, '检测到缺少 OAuth Token，正在利用 Cookie 静默自动生成...')
+        new_tok = auth.exchange_token_from_cookies(name, proxy=proxy)
+        if new_tok:
+            tok = new_tok
+            rg = config.load_json(config.pfile(name, 'region.json')) or {}
+
+    has_token = bool(tok.get('refresh_token') or tok.get('access_token'))
+    if not has_token and not has_cookie:
+        raise RuntimeError('无可用登录凭据 (未配置账号密码、Cookie 或 Token)，先 msr login %s' % name)
+
     config.log(name, '=== 运行开始 (proxy=%s cdp_port=%s) ===' % (proxy or '直连', cdp_port or '内置'))
-    token = api.refresh_access(name, p, rg, proxy=proxy)
 
-    pr = probe.probe_account(name, token, proxy=proxy)
-    pr['probed_at'] = time.strftime('%F %T')
+    token = None
+    pr = None
+    if has_token:
+        try:
+            token = api.refresh_access(name, p, rg, proxy=proxy)
+            pr = probe.probe_account(name, token, proxy=proxy)
+            pr['probed_at'] = time.strftime('%F %T')
+            config.save_json(config.pfile(name, 'region.json'), pr)
+            config.log(name, 'region=%s balance=%s' % (pr['country'], pr.get('balance')))
+        except Exception as ex:
+            config.log(name, f'Token 刷新/探测失败: {ex}')
+            if not has_cookie:
+                raise
+
+    if not pr:
+        # 纯 Cookie 模式：跳过 API 阶段，全额执行浏览器搜索与卡片活动
+        config.log(name, '当前以纯 Cookie 模式运行: 跳过 API 阶段，全额执行浏览器搜索与活动打卡')
+        pr = rg or {'country': 'SG', 'language': 'zh-hans', 'balance': 0, 'task_names': []}
+        plan = [{'phase': ph, 'needs': 'browser'} for ph in planner.BROWSER_ALWAYS]
+    else:
+        plan = planner.plan(pr, force_phases=args.only)
+        if not has_cookie:
+            config.log(name, '未检测到浏览器 Cookie，跳过浏览器端任务；仅执行 API 阶段')
+            plan = [w for w in plan if w['needs'] == 'api']
+
     bal_before = pr.get('balance') or 0
-    config.save_json(config.pfile(name, 'region.json'), pr)
-    config.log(name, 'region=%s balance=%s' % (pr['country'], pr.get('balance')))
-
-    plan = planner.plan(pr, force_phases=args.only)
     if args.dry_run:
         print('%s 执行计划: %s' % (name, ' -> '.join(w['phase'] for w in plan)))
         return
@@ -189,12 +220,13 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
 
     # 获取运行后最新余额
     bal_after = bal_before
-    try:
-        rg_me = {'country': pr['country'], 'language': pr['language']}
-        me_resp = api.get_me(name, token, rg_me, proxy=proxy)
-        bal_after = me_resp.get('balance') or bal_before
-    except Exception:
-        pass
+    if token:
+        try:
+            rg_me = {'country': pr['country'], 'language': pr['language']}
+            me_resp = api.get_me(name, token, rg_me, proxy=proxy)
+            bal_after = me_resp.get('balance') or bal_before
+        except Exception:
+            pass
 
     gained = max(0, (bal_after or 0) - (bal_before or 0))
 

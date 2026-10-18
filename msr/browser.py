@@ -22,9 +22,12 @@ class StepError(Exception):
     pass
 
 
+_no_proxy_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _http_json(url, method='GET', timeout=15, headers=None):
     req = urllib.request.Request(url, method=method, headers=headers or {})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _no_proxy_opener.open(req, timeout=timeout) as r:
         raw = r.read().decode()
     try:
         return json.loads(raw) if raw else {}
@@ -334,6 +337,22 @@ def close_tab(cdp, tid):
 
 def mouse_move(cdp, x, y):
     cdp.call('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': x, 'y': y})
+
+
+def mouse_click(cdp, x, y):
+    """在指定视口坐标模拟左键点击。"""
+    cdp.call('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': int(x), 'y': int(y), 'button': 'left', 'clickCount': 1})
+    time.sleep(0.05)
+    cdp.call('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': int(x), 'y': int(y), 'button': 'left'})
+
+
+def capture_screenshot(cdp, quality=60):
+    """截取当前页面快照, 返回 base64 字符串。"""
+    try:
+        res = cdp.call('Page.captureScreenshot', {'format': 'jpeg', 'quality': quality})
+        return res.get('data', '')
+    except Exception:
+        return ''
 
 
 def human_click(cdp, find_js, label='', close_new=False):

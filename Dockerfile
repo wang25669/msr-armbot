@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     WEB_PORT=8080 \
     CRON_SCHEDULE="30 1 * * *"
 
-# 安装 Chromium、中文字体、cron 定时器及基础依赖
+# 安装 Chromium、中文字体、cron 定时器及基础依赖 (保留 tzdata 供宿主机挂载或环境变量适配)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     fonts-wqy-zenhei \
@@ -20,9 +20,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
-
-# 设置时区为亚洲/上海
-RUN ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && dpkg-reconfigure -f noninteractive tzdata
 
 WORKDIR /app
 

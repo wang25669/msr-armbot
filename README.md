@@ -23,30 +23,31 @@ install.sh 做三件事: 装 chromium(缺才装) -> 写默认配置 -> 注册 sy
 
 ## 登录账号
 
+### 方式 1: 账号密码全自动登录与多重风控接管 (推荐)
+
 ```bash
-python3 -m msr login <账号名>
+python3 -m msr login <账号名> -u <微软账号邮箱> -p <密码>
 ```
 
-1. 终端显示 `verification_uri` + `user_code`
-2. 手机/任意浏览器打开该网址, 输入代码, 登录微软账号(含 2FA)
-3. 自动拿到 token 并探测区域, 写入 `~/.msr/profiles/<名>/`
+后台自动驱动无头 Chromium 模拟真实用户交互完成登录，自动提取 Bing/Live 完整会话 Cookie，并通过静默 SSO 自动换取 OAuth2 Token 与自探测区域，实现一键双凭据闭环配置。
 
-### 有浏览器侧任务的账号, 补一步 cookie 导入
+**针对更换新设备或异地 IP 触发微软风控的完备应对能力**：
+- **手机 Authenticator 推送**：系统自动探测双位数匹配质询，终端与 Web 控制台显著展示匹配数字（例如 `【 58 】`），手机端点击确认后自动继续；
+- **邮箱 / 短信验证码 (OTP)**：终端交互式提示输入，Web 控制台实时提供动态验证码提交表单；
+- **人机拼图验证码 (Arkose FunCaptcha)**：Web 控制台内置“远程实时画面”，无需配置 SSH 隧道，在网页中直接点击画面即可旋转拼图、选择验证方式；
+- **保持登录 (KMSI) 与隐私确认**：系统自动识别并点击确认，无缝进入会话。
 
-浏览器任务(搜索/每日活动卡)需要 bing.com 登录 cookie:
+### 方式 2: Cookie 快速导入 (免密 / 绕过新设备风控)
 
+如果已有电脑浏览器登录会话（信任设备），可直接导入 Cookie 免除新设备二次风控：
 1. 电脑浏览器登录 bing.com
-2. Cookie-Editor 类插件导出 cookies (JSON)
-3. `python3 -m msr login <账号名> --cookies cookies.json`
-
-兜底(cookie 导入失败/风控要重新验证): SSH 隧道远程登录
-
+2. 使用 Cookie-Editor 等插件导出 cookies (JSON 或 Raw Header)
+3. 导入 Cookie 并自动换取 Token：
 ```bash
-# Armbian: headless chromium 开调试端口
-chromium --headless=new --remote-debugging-port=9222 --user-data-dir=/tmp/x
-# 本地: ssh -L 9222:127.0.0.1:9222 user@armbian
-# 本地 Chrome 打开 chrome://inspect -> inspect 登录页直接操作
+python3 -m msr login <账号名> --cookies cookies.json
 ```
+
+系统会自动解析校验 Cookie（提取 `_U` 会话），并即刻基于导入会话静默换取 OAuth2 Token。在日常任务执行时，若 Token 缺失或过期，系统也会自动从 Cookie 自愈换取，确保任务自动化持续运行。
 
 refresh_token 90 天滚动续期(每次成功刷新就续), 正常不需要反复登录。失效时报告显示 `token失效需重新登录`。
 
@@ -84,9 +85,10 @@ services:
     environment:
       - WEB_PORT=8080
       - CRON_SCHEDULE=30 1 * * *
-      - TZ=Asia/Shanghai
     volumes:
       - ./data:/data
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     shm_size: '1gb'
     security_opt:
       - seccomp:unconfined
@@ -99,8 +101,8 @@ docker compose up -d
 启动后在浏览器打开 `http://<服务器IP>:8080` 进入 Web 控制中心：
 1. **添加账号与独立代理**：直接在网页填写名称、设置该账号专属出口代理 (HTTP/SOCKS5)；
 2. **账号在线授权**：
-   - 方式 A (推荐设备码)：一键生成 Device Code，打开微软网址输入代码即可完成授权；
-   - 方式 B (Cookie 导入)：粘贴 Cookie-Editor 导出的 JSON 或 Raw Header，在线自动清洗校验；
+   - 方式 A (推荐账号密码)：输入微软账号与密码，后台无头浏览器全自动模拟登录交互，并一键换取 OAuth2 Token 与自探测区域；
+   - 方式 B (Cookie 导入)：粘贴 Cookie-Editor 导出的 JSON 或 Raw Header，自动清洗校验并即刻触发后台静默 SSO 换取 Token；
 3. **集中风控参数调节**：可视化修改搜索停留秒数、卡片延迟、Server酱 SendKey 等；
 4. **任务调度与实时日志**：一键“立即运行”、“排期预览”，实时查看任务滚屏日志。
 
@@ -203,7 +205,7 @@ python3 -m msr run <名>                # 全量
 msr/__main__.py      CLI 入口
 msr/config.py        数据目录 + 多账号 profile
 msr/api.py           RewardsPlatform API + token 生命周期
-msr/auth.py          登录引导 (device-code + cookie 导入)
+msr/auth.py          登录引导 (账号密码全自动登录 + Cookie 导入与 Token 静默自愈互换)
 msr/probe.py         区域/任务集探测
 msr/planner.py       执行计划生成
 msr/runner.py        编排 (串行/随机等待/dry-run)

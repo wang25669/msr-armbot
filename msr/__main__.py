@@ -2,7 +2,7 @@
 """msr - Microsoft Rewards automation for ARM Linux & Containers.
 
 Usage:
-  msr login <name> [--method device|cookies|interactive|credential] [--cookies FILE] [--proxy URL]  引导账号登录
+  msr login <name> [--method credential|cookies|interactive] [--username EMAIL] [--password PWD] [--cookies FILE] [--proxy URL]  引导账号登录
   msr account <name> [--proxy URL] [--enable/--disable]                 查看或更新账号独立配置
   msr run [name|--all] [--dry-run] [--only PHASES] [--fast]            执行账号任务链
   msr settings [--set key=val] [--get key]                             查看或调整全局参数配置
@@ -89,8 +89,8 @@ def main():
     # login
     p = sub.add_parser('login', help='引导账号登录 (支持多种策略)')
     p.add_argument('name')
-    p.add_argument('--method', choices=['device', 'cookies', 'interactive', 'credential'],
-                   default='device', help='登录方式: device(设备码)|cookies(导入)|interactive(交互式)|credential(账号密码)')
+    p.add_argument('--method', choices=['credential', 'cookies', 'interactive'],
+                   default='credential', help='登录方式: credential(账号密码推荐)|cookies(导入)|interactive(交互式)')
     p.add_argument('--cookies', help='浏览器导出的 cookies.json 文件路径')
     p.add_argument('--username', help='微软账号邮箱 (用于 credential 登录)')
     p.add_argument('--password', help='微软账号密码 (用于 credential 登录)')
