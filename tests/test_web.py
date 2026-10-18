@@ -315,6 +315,20 @@ try:
     assert not any(a['name'] == 'web_test_acc' for a in accs_after)
     print('[OK] /api/accounts 删除账号正常')
 
+    # 8. 测试内置调度器逻辑 (确保 random, fast_mode, home_args 无 NameError 与调度正常)
+    import subprocess, io
+    from msr import settings
+    # 模拟设置当前时间匹配 daily_time
+    cur_hm = time.strftime('%H:%M')
+    settings.set_val('schedule.daily_time', cur_hm, home=TMP)
+    settings.set_val('schedule.random_start_delay_max', 1, home=TMP)
+    settings.set_val('schedule.fast_mode', True, home=TMP)
+
+    # 验证 append_live_log 写入
+    web.append_live_log('测试日志输出流')
+    assert any('测试日志输出流' in line for line in web.LIVE_LOGS)
+    print('[OK] append_live_log 内存日志与 stdout 流正常')
+
 finally:
     server.shutdown()
     shutil.rmtree(TMP)

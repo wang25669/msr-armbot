@@ -30,6 +30,7 @@
 import copy
 import json
 import os
+import random
 import sys
 import threading
 import time
@@ -42,11 +43,13 @@ MAX_LIVE_LOGS = 1000
 
 
 def append_live_log(msg):
+    ts = time.strftime('%H:%M:%S')
+    line = f'[{ts}] {msg}'
     with LIVE_LOGS_LOCK:
-        ts = time.strftime('%H:%M:%S')
-        LIVE_LOGS.append(f'[{ts}] {msg}')
+        LIVE_LOGS.append(line)
         if len(LIVE_LOGS) > MAX_LIVE_LOGS:
             LIVE_LOGS.pop(0)
+    print(line, flush=True)
 
 
 HTML_CONTENT = """<!DOCTYPE html>
@@ -2093,15 +2096,18 @@ class WebHandler(BaseHTTPRequestHandler):
         name = payload.get('name') or urllib.parse.parse_qs(u.query).get('name', [None])[0]
         dry = 'dry_run' in u.query or payload.get('dry_run')
 
+        from msr import config
+        home_args = ['--home', config.HOME] if getattr(config, 'HOME', None) else []
+
         if dry:
-            cmd = [sys.executable, '-m', 'msr', 'run', name or '--all', '--dry-run']
+            cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', name or '--all', '--dry-run']
             p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             self._json_resp({'status': 'ok', 'output': p.stdout})
             return
 
         def bg_runner():
             append_live_log(f'>>> 开始执行任务: {name or "--all"}')
-            cmd = [sys.executable, '-m', 'msr', 'run', name or '--all']
+            cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', name or '--all']
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             for line in iter(proc.stdout.readline, ''):
                 line = line.strip()
@@ -2170,7 +2176,7 @@ def _start_scheduler_daemon():
                 time.sleep(20)
                 st = settings.load_settings()
                 sch = st.get('schedule', {})
-                if not sch.get('daily_enabled', True):
+                if not sch.get('daily_enabled', sch.get('enabled', True)):
                     continue
 
                 daily_time = sch.get('daily_time', '01:30')
@@ -2187,7 +2193,11 @@ def _start_scheduler_daemon():
                         append_live_log(f'⏰ [定时调度] 开启随机抖动，等待 {jitter_sec / 60:.1f} 分钟后开始执行...')
                         time.sleep(jitter_sec)
 
-                    cmd = [sys.executable, '-m', 'msr', 'run', '--all']
+                    from msr import config
+                    home_args = ['--home', config.HOME] if getattr(config, 'HOME', None) else []
+                    cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', '--all']
+                    if sch.get('fast_mode'):
+                        cmd.append('--fast')
                     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
                     for line in iter(proc.stdout.readline, ''):
                         line = line.strip()
