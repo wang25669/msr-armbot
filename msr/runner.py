@@ -45,7 +45,7 @@ def cmd_run(args):
     if not accs:
         print('无账号。先 msr login <name>')
         return 1
-    if args.name and args.name != '--all':
+    if args.name and args.name != '--all' and not getattr(args, 'all', False):
         accs = [a for a in accs if a['name'] == args.name]
         if not accs:
             print('账号不存在: %s' % args.name)

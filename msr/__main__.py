@@ -108,6 +108,7 @@ def main():
     # run
     p = sub.add_parser('run', help='执行任务链')
     p.add_argument('name', nargs='?', default=None)
+    p.add_argument('--all', action='store_true', help='执行全部有效账号')
     p.add_argument('--dry-run', action='store_true', help='仅打印排期计划，不执行')
     p.add_argument('--only', default=None, help='只跑指定阶段 (例如: dailyset,moreactivities,search)')
     p.add_argument('--fast', action='store_true', help='极速调试模式 (所有停留等待压缩至 3-6 秒)')
