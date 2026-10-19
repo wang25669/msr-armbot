@@ -122,8 +122,8 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
         log('PC搜索已满额: %d/%d (根据促销属性)' % (current_prog, target_max))
         return '%d/%d' % (current_prog, target_max)
 
-    log('PC搜索启动: 当前进度 %d/%d (单次停留 %.1f-%.1f 秒/词)' % (
-        current_prog, target_max, dwell_min, dwell_max))
+    log('PC搜索启动: 当前进度 %d/%d (模式=%s, 单次停留 %.1f-%.1f 秒/词)' % (
+        current_prog, target_max, '极速测试[fast_mode]' if fast else '防风控真机', dwell_min, dwell_max))
 
     queries_en = [
         'weather forecast', 'world news today', 'python tutorial for beginners',
@@ -160,23 +160,67 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
 
         try:
             href = typed_search(cdp, q, domain)
-            scroll_human(cdp)
-            log('搜索[%d] %s -> %s' % (searches_done, q, str(href)[:60]))
+            log('搜索[%d] 关键词: "%s" -> %s' % (searches_done, q, str(href)[:60]))
             consecutive_errors = 0
 
-            # 模拟真人点击任意搜索结果并停留浏览
-            if random.random() < click_prob:
+            # 初始 3-6 秒: 搜索结果页真人滚动与初读
+            time.sleep(random.uniform(1.2, 2.5))
+            scroll_human(cdp)
+
+            # 模拟真人点击任意搜索结果并开启新标签阅读
+            res_tab_id = None
+            c_res = None
+            if random.random() < click_prob and ch:
                 try:
-                    result_links = ev(cdp, """(() => {
-                        const anchors = [...document.querySelectorAll('#b_results .b_algo h2 a')];
-                        return anchors.filter(a => a.href && a.offsetParent).slice(0, 8).map(a => a.href);
-                    })()""") or []
-                    if result_links:
-                        pick = random.choice(result_links)
-                        navigate(cdp, pick)
-                        scroll_human(cdp)
+                    pick_js = """(() => {
+                        const anchors = Array.from(document.querySelectorAll('#b_results .b_algo h2 a')).filter(a => a.href && a.offsetParent);
+                        if (anchors.length === 0) return null;
+                        const pick = anchors[Math.floor(Math.random() * Math.min(anchors.length, 6))];
+                        return { href: pick.href, title: pick.innerText.replace(/\\n/g, ' ').trim() };
+                    })()"""
+                    pick = ev(cdp, pick_js)
+                    if pick and pick.get('href'):
+                        r_href = pick['href']
+                        r_title = pick.get('title', '')[:25]
+                        log('搜索[%d] 拟态翻阅: 开启新标签阅读搜索结果 [%s] -> %s' % (searches_done, r_title, r_href[:60]))
+                        res_tab = ch.new_tab(r_href)
+                        if res_tab and res_tab.get('id'):
+                            res_tab_id = res_tab['id']
+                            try:
+                                c_res = ch.attach(res_tab)
+                                time.sleep(random.uniform(2.0, 3.5))
+                                scroll_human(c_res)
+                            except Exception:
+                                pass
+                except Exception as ex:
+                    log('搜索结果点击容忍: %s' % str(ex)[:60])
+
+            # 核心节奏停留: 180-300 秒 (等待微软风控冷却，fast_mode 下 3-6 秒)
+            dwell = random.uniform(dwell_min, dwell_max)
+            log('搜索[%d] 模拟真人深度阅读停留 %.1f 秒 (%s)...' % (
+                searches_done, dwell, '在独立文章标签页' if res_tab_id else '在主搜索结果页'))
+            t_start = time.time()
+            while time.time() - t_start < dwell:
+                chunk = min(25.0, dwell - (time.time() - t_start))
+                if chunk > 0:
+                    time.sleep(chunk)
+                    if c_res and random.random() < 0.4:
+                        try:
+                            scroll_human(c_res)
+                        except Exception:
+                            pass
+                    elapsed = time.time() - t_start
+                    if dwell > 60 and elapsed < dwell - 10 and int(elapsed) % 60 < 25:
+                        log('搜索[%d] 真人阅读中: 已停留 %ds/%ds...' % (searches_done, int(elapsed), int(dwell)))
+
+            # 阅读结束，关闭结果标签页，返回 Bing 主搜索页
+            if res_tab_id and ch:
+                try:
+                    ch.close_tab(res_tab_id)
                 except Exception:
                     pass
+                log('搜索[%d] 完成文章阅读，已关闭结果标签页并返回主搜索' % searches_done)
+
         except Exception as ex:
             consecutive_errors += 1
             log('搜索[%d] 异常: %s' % (searches_done, str(ex)[:80]))
@@ -192,11 +236,6 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
                 break
             time.sleep(random.uniform(3, 6))
             continue
-
-        # 核心节奏等待: 3-5 分钟 (等待微软冷却计数器刷新，fast_mode 3-6 秒)
-        dwell = random.uniform(dwell_min, dwell_max)
-        log('搜索[%d] 模拟真人阅读停留 %.1f 秒...' % (searches_done, dwell))
-        time.sleep(dwell)
 
         # 回读积分进度
         if token:
@@ -438,39 +477,55 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
 
             # 检测可点击的活跃步骤
             step_info = ev(cdp, """(() => {
-              const anchors = Array.from(document.querySelectorAll("main a[href]")).filter(a => {
+              const anchors = Array.from(document.querySelectorAll("main a[href], main button")).filter(a => {
                 const p = a.closest("div[class*=flex-col], div[class*=rounded]") || a.parentElement;
-                const isSuccess = p && p.innerHTML.includes("bg-statusSuccess");
-                if (isSuccess) return false;
+                if (p && (p.innerHTML.includes("bg-statusSuccess") || p.innerHTML.includes("已完成") || p.querySelector("svg[class*=success]"))) return false;
 
                 const t = a.innerText || "";
-                return a.href.includes("bing.com/search") || a.href.includes("ms-search://") ||
+                const h = a.href || "";
+                if (h.includes("/dashboard") || h.includes("/earn") || h.includes("/redeem") || h.includes("/pointsbreakdown") || h.includes("terms") || h.includes("privacy")) return false;
+                return h.includes("bing.com/search") || h.includes("ms-search://") || h.includes("bing.com/create") ||
+                       h.includes("REWARDSQUIZ") || h.includes("microsoft.com") ||
                        t.includes("分") || t.includes("搜索") || t.includes("尝试") ||
-                       t.includes("定义") || t.includes("查找") || t.includes("试用");
+                       t.includes("定义") || t.includes("查找") || t.includes("试用") ||
+                       t.includes("探索") || t.includes("下载") || t.includes("开始") || t.includes("+");
               });
               if (anchors.length === 0) return null;
               const target = anchors[0];
-              if (target.href.startsWith("ms-search://")) {
+              const p = target.closest("div[class*=flex-col], div[class*=rounded]") || target.parentElement;
+              const pTitle = p?.querySelector("h2, h3, h4, [class*=title]")?.innerText?.replace(/\\n/g, ' ')?.trim() || "";
+              const pText = p?.innerText?.replace(/\\n/g, ' ')?.trim() || "";
+
+              let href = target.href || "";
+              if (href.startsWith("ms-search://")) {
                 let q = "";
                 try {
-                  const u = new URL(target.href);
+                  const u = new URL(href);
                   q = u.searchParams.get("q") || "";
                 } catch(e) {
-                  const m = target.href.match(/[?&]q=([^&]+)/);
+                  const m = href.match(/[?&]q=([^&]+)/);
                   if (m) q = decodeURIComponent(m[1]);
                 }
-                target.href = "https://www.bing.com/search?q=" + encodeURIComponent(q || "today news");
+                href = "https://www.bing.com/search?q=" + encodeURIComponent(q || "today news");
+                target.href = href;
                 target.target = "_blank";
               }
               let hasQ = false;
               try {
-                const u = new URL(target.href, location.href);
+                const u = new URL(href, location.href);
                 hasQ = !!u.searchParams.get("q");
               } catch(e) {}
+
+              const multiDayMatch = pText.match(/(\\d+\\s*\\/\\s*\\d+\\s*天已完成)/) || pText.match(/(\\d+\\s*of\\s*\\d+\\s*days)/);
+
               return {
-                text: target.innerText.replace(/\\n/g, ' ').trim(),
-                href: target.href,
-                hasQuery: hasQ
+                text: target.innerText.replace(/\\n/g, ' ').trim() || pTitle,
+                title: pTitle,
+                href: href,
+                hasQuery: hasQ,
+                cardText: pText,
+                isMultiDay: !!multiDayMatch,
+                multiDayProg: multiDayMatch ? multiDayMatch[1] : null
               };
             })()""")
 
@@ -480,7 +535,13 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
 
             step_text = step_info['text']
             step_href = step_info['href']
-            if step_href in seen_step_urls:
+            if step_info.get('isMultiDay'):
+                prog_str = step_info.get('multiDayProg') or '跨日任务'
+                if step_href in seen_step_urls:
+                    log('%s 跨日累计步骤 (%s) 今日打卡搜索已完成，微软规则要求间隔24小时次日继续，转入下一打卡' % (q_name, prog_str))
+                    break
+                log('%s 发现跨日累计步骤: %s (需每日打卡推进)' % (q_name, prog_str))
+            elif step_href in seen_step_urls:
                 log('%s 步骤已处理过(需等待冷却或次日刷新)，进入下一打卡' % q_name)
                 break
             seen_step_urls.add(step_href)
@@ -488,15 +549,19 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             log('执行步骤: %s -> %s' % (step_text[:30], step_href[:60]))
 
             click_selector = """(() => {
-              const el = Array.from(document.querySelectorAll("main a[href]")).find(a => {
+              const el = Array.from(document.querySelectorAll("main a[href], main button")).find(a => {
                 const p = a.closest("div[class*=flex-col], div[class*=rounded]") || a.parentElement;
-                if (p && p.innerHTML.includes("bg-statusSuccess")) return false;
+                if (p && (p.innerHTML.includes("bg-statusSuccess") || p.innerHTML.includes("已完成") || p.querySelector("svg[class*=success]"))) return false;
                 const t = a.innerText || "";
-                return a.href.includes("bing.com/search") || a.href.includes("ms-search://") ||
+                const h = a.href || "";
+                if (h.includes("/dashboard") || h.includes("/earn") || h.includes("/redeem") || h.includes("/pointsbreakdown") || h.includes("terms") || h.includes("privacy")) return false;
+                return h.includes("bing.com/search") || h.includes("ms-search://") || h.includes("bing.com/create") ||
+                       h.includes("REWARDSQUIZ") || h.includes("microsoft.com") ||
                        t.includes("分") || t.includes("搜索") || t.includes("尝试") ||
-                       t.includes("定义") || t.includes("查找") || t.includes("试用");
+                       t.includes("定义") || t.includes("查找") || t.includes("试用") ||
+                       t.includes("探索") || t.includes("下载") || t.includes("开始") || t.includes("+");
               });
-              if (el && el.href.startsWith("ms-search://")) {
+              if (el && el.href && el.href.startsWith("ms-search://")) {
                 let q = "";
                 try {
                   const u = new URL(el.href);
@@ -516,8 +581,26 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             if new_tabs and ch:
                 target_tid = new_tabs[0]
                 try:
-                    # 若搜索链接无 q (如 form=ML2YBF 开始搜索)，在目标标签真实发起一次搜索
-                    if not step_info.get('hasQuery') and 'bing.com' in step_href:
+                    # 1. 测验/竞答类打卡卡片 (如 Spotify 测验、节日竞答等)
+                    is_quiz = 'REWARDSQUIZ' in step_href or 'quiz' in step_href.lower() or any(k in step_text for k in ('测验', '竞答', '小测验', '问答'))
+                    if is_quiz:
+                        interact_quiz(ch, target_tid, label=step_text, log=log)
+                    # 2. 搜索类打卡卡片 (若链接无 q 参数，根据卡片上下文智能发起语义搜索)
+                    elif not step_info.get('hasQuery') and 'bing.com' in step_href:
+                        ctx = (step_info.get('title') or '') + ' ' + (step_info.get('cardText') or '') + ' ' + q_name
+                        if any(k in ctx for k in ('万圣节', 'Halloween', 'halloween')):
+                            term = random.choice(['万圣节服装创意', '万圣节南瓜灯雕刻教程', '万圣节高清壁纸', '万圣节AI图像生成'])
+                        elif any(k in ctx for k in ('音乐', 'Spotify', 'spotify', '歌曲', '歌单')):
+                            term = random.choice(['best spotify playlists 2026', '流行音乐热歌榜', 'relaxing acoustic music'])
+                        elif any(k in ctx for k in ('电影', '影视', '剧集', 'movie')):
+                            term = random.choice(['top movies 2026 on netflix', '最新科幻电影推荐', '豆瓣高分电影榜单'])
+                        elif any(k in ctx for k in ('健身', '运动', 'HIIT', 'workout')):
+                            term = random.choice(['居家HIIT高强度训练教程', '晨练全身拉伸动作', '核心肌群力量训练'])
+                        elif any(k in ctx for k in ('食谱', '美食', '烹饪', 'recipe')):
+                            term = random.choice(['家常快手菜菜谱', '健康减脂晚餐食谱', '空气炸锅简单美食'])
+                        else:
+                            term = random.choice(['今日国内外热点新闻', '科技创新最新成果', 'weather forecast today'])
+
                         try:
                             c2 = ch.attach({'id': target_tid, 'webSocketDebuggerUrl': f'ws://127.0.0.1:{ch.port}/devtools/page/{target_tid}'})
                             time.sleep(2)
@@ -527,13 +610,25 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                               return null;
                             })()""")
                             if focused:
-                                c2.call('Input.insertText', {'text': 'today news'})
+                                log('%s 触发语义搜索: "%s"' % (q_name, term))
+                                c2.call('Input.insertText', {'text': term})
                                 time.sleep(random.uniform(1.0, 1.8))
                                 press_enter(c2)
-                                time.sleep(4)
+                                time.sleep(3)
+                                scroll_human(c2)
                             c2.close()
                         except Exception as ex:
                             log('附带搜索容忍: %s' % str(ex)[:60])
+                    else:
+                        # 3. 常规网页 / 壁纸浏览类卡片: 模拟阅读与滚动
+                        try:
+                            c2 = ch.attach({'id': target_tid, 'webSocketDebuggerUrl': f'ws://127.0.0.1:{ch.port}/devtools/page/{target_tid}'})
+                            time.sleep(2)
+                            scroll_human(c2)
+                            c2.close()
+                        except Exception:
+                            pass
+
                     # 从配置读取停留归因等待时间 (默认 60~120 秒，快速模式 3~6 秒)
                     from msr import settings
                     st_card = settings.load_settings()
