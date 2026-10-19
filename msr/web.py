@@ -533,7 +533,15 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
 
       <div class="pipeline-step">
-        <span class="pipeline-badge" style="background:#06b6d4;">阶段 9 · 容错核查</span>
+        <span class="pipeline-badge" style="background:#10b981;">阶段 9 · 积分结算</span>
+        <div>
+          <strong style="color:#fff;">检查并领取待领取积分 (claim)</strong>
+          <div style="font-size:12px; color:var(--text-sub); margin-top:3px;">检查 Dashboard 顶部是否有已达成但待领取的额外积分面板，自动展开并点击完成结算入账。</div>
+        </div>
+      </div>
+
+      <div class="pipeline-step">
+        <span class="pipeline-badge" style="background:#06b6d4;">阶段 10 · 容错核查</span>
         <div>
           <strong style="color:#fff;">自动核查与重跑修复 (repair)</strong>
           <div style="font-size:12px; color:var(--text-sub); margin-top:3px;">检测未满分卡片，等待 4 分钟后自动回补重试，完成时通过 Server酱/Telegram 推送报告。</div>

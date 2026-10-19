@@ -166,6 +166,8 @@ def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger, t
         from msr import tasks_visual
         return tasks_visual.run(name, cdp, pr, log=logger,
                                 used_path=config.pfile(name, 'visual_used.json'))
+    if p in ('claim', 'pointclaim', 'claimpoints'):
+        return tb.phase_claim(name, cdp, pr, ch=ch, log=logger)
     return '未知浏览器阶段 %s' % phase
 
 

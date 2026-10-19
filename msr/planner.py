@@ -9,6 +9,7 @@
   moreactivities: 日常任务 (浏览器 #moreactivities)
   search:         必应 PC 搜索 (浏览器补满上限)
   visual:         视觉搜索连续打卡 (浏览器壁纸搜图)
+  claim:          检查并领取待领取积分 (浏览器 dashboard 结算领取)
 """
 from msr import api
 
@@ -18,6 +19,7 @@ TASK_TABLE = {
     'quests':                        {'phase': 'quests',         'needs': 'browser'},
     'morePromotions':                {'phase': 'moreactivities', 'needs': 'browser'},
     'visualSearch':                  {'phase': 'visual',         'needs': 'browser', 'optional': True},
+    'pointClaim':                    {'phase': 'claim',          'needs': 'browser', 'optional': True},
     'edge_browsing_streak_flight':   {'phase': 'edge30m',        'needs': 'api'},
     'edge_browsing_streak_eligible': {'phase': 'edge30m',        'needs': 'api'},
     'app_checkin':                   {'phase': 'appcheckin',     'needs': 'api'},
@@ -44,7 +46,10 @@ ALIAS_MAP = {
     'quests': 'quests',
     'punchcard': 'quests',
     'search': 'search',
-    'visual': 'visual'
+    'visual': 'visual',
+    'claim': 'claim',
+    'pointclaim': 'claim',
+    'claimpoints': 'claim'
 }
 
 
@@ -66,6 +71,8 @@ def classify(promo_name):
         return 'morePromotions'
     if 'visual' in promo_name.lower():
         return 'visualSearch'
+    if 'pointclaim' in promo_name.lower() or 'claim' in promo_name.lower():
+        return 'pointClaim'
     if 'edge_browsing_streak' in promo_name:
         return promo_name
     if 'readarticle' in promo_name:
@@ -94,7 +101,7 @@ def plan(probe_result, force_phases=None):
             have.add(c)
 
     # 浏览器侧阶段: 默认按顺序尝试, 由 executor 在浏览器里按当天实际卡片执行
-    BROWSER_ALWAYS = ['dailyset', 'quests', 'moreactivities', 'search', 'visual']
+    BROWSER_ALWAYS = ['dailyset', 'quests', 'moreactivities', 'search', 'visual', 'claim']
 
     want_phases = [
         {'phase': 'appcheckin', 'needs': 'api'},          # type103 签到总是有效

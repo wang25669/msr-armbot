@@ -11,7 +11,7 @@ SG_PROMOS = ['edge_entertainment_spotify', 'level_info', 'Rewards_EdgeUsage_prog
 CN_PROMOS = ['edge_browsing_streak_eligible', 'edge_browsing_streak_flight',
              'WW_NewLevel1_search_PC']
 
-expected_phases = ['appcheckin', 'appread', 'edge30m', 'dailyset', 'quests', 'moreactivities', 'search', 'visual']
+expected_phases = ['appcheckin', 'appread', 'edge30m', 'dailyset', 'quests', 'moreactivities', 'search', 'visual', 'claim']
 
 sg_plan = planner.plan({'task_names': SG_PROMOS})
 phases = [w['phase'] for w in sg_plan]
@@ -27,10 +27,10 @@ assert phases_cn == expected_phases, phases_cn
 print('  [OK] cn 与 sg 同构(浏览器内自适配, 无需区域硬编码)')
 
 # force_phases 与别名解析测试
-f = planner.plan({'task_names': []}, force_phases='appchekin,read,quick,earn')
+f = planner.plan({'task_names': []}, force_phases='appchekin,read,quick,earn,pointclaim')
 phases_f = [w['phase'] for w in f]
 print('force 别名解析计划:', phases_f)
-assert phases_f == ['appcheckin', 'appread', 'dailyset', 'moreactivities']
-print('  [OK] --only 别名自适应映射 (appchekin->appcheckin, read->appread, quick->dailyset, earn->moreactivities)')
+assert phases_f == ['appcheckin', 'appread', 'dailyset', 'moreactivities', 'claim']
+print('  [OK] --only 别名自适应映射 (appchekin->appcheckin, read->appread, quick->dailyset, earn->moreactivities, pointclaim->claim)')
 print()
 print('ALL_OK')

@@ -745,3 +745,117 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
 
 
 phase_earn = phase_moreactivities
+
+
+def phase_claim(name, cdp, pr, ch=None, log=print):
+    """检查并领取待领取积分 (移植自现网 bing_daily_v2.phase6)。
+
+    1. 导航到 rewards dashboard;
+    2. 检查是否有待领取积分 (API pointClaimBannerPromotion / DOM 可领取文案 / pr 探测属性);
+    3. 若有，通过真人点击展开可领取面板，并点击领取积分;
+    4. 回读确认并记录增量。
+    """
+    dash_url = 'https://rewards.bing.com/'
+    log('开始检查是否有可领取积分...')
+    navigate(cdp, dash_url)
+    time.sleep(3)
+
+    # 1. 先通过页面内 API 获取 pointClaimBannerPromotion 结构化信息
+    claim_api = ev(cdp, """(async () => {
+      try {
+        const res = await fetch('/api/getuserinfo?type=1', {credentials: 'include'});
+        if (!res.ok) return null;
+        const d = await res.json();
+        return d && d.dashboard ? (d.dashboard.pointClaimBannerPromotion || null) : null;
+      } catch (e) {
+        return null;
+      }
+    })()""")
+
+    # 2. 从 DOM 中提取待领取数字 (若 DOM 明确显示 0 则表示已无待领)
+    dom_points = ev(cdp, """(() => {
+      const t = document.body.innerText || '';
+      const m = t.match(/可领取\\s*(\\d+)/) || t.match(/(\\d+)\\s*(?:待领取|可领取)/) || t.match(/claimable\\s*(\\d+)/i);
+      return m ? parseInt(m[1], 10) : null;
+    })()""")
+
+    if dom_points is not None and dom_points == 0:
+        log('今日无可领取积分 (页面显示可领取为 0), 跳过')
+        return '今日无可领取积分(跳过)'
+
+    # 3. 结合 pr promotions 兜底判断
+    pr_points = 0
+    if dom_points is None and not claim_api:
+        for promo in (pr or {}).get('promotions', []):
+            attrs = promo.get('attributes', {})
+            bd = attrs.get('claimable_points_breakdown')
+            if bd:
+                try:
+                    bd_obj = json.loads(bd) if isinstance(bd, str) else bd
+                    pts = int(bd_obj.get('TotalClaimablePoints') or 0)
+                    if pts > 0:
+                        pr_points = pts
+                        break
+                except Exception:
+                    pass
+            if attrs.get('claimable_points') in ('True', True) and int(attrs.get('claimable_balance_lsearchcap', 0) or 0) > 0:
+                pr_points = int(attrs.get('claimable_balance_lsearchcap'))
+                break
+
+    total_claimable = dom_points if dom_points is not None else pr_points
+    if claim_api and not total_claimable:
+        try:
+            total_claimable = int(claim_api.get('attributes', {}).get('claimable_points') or 0)
+        except Exception:
+            total_claimable = 0
+
+    if not claim_api and (total_claimable is None or total_claimable <= 0):
+        log('今日无可领取积分 (API/DOM 无待领取记录), 跳过')
+        return '今日无可领取积分(跳过)'
+
+    pts_str = f'{total_claimable}分' if total_claimable and total_claimable > 0 else '有待领积分'
+    log(f'检测到可领取积分: 约 {pts_str} (API: {bool(claim_api)})')
+
+    # 4. 执行 UI 点击领取
+    # 第一步：展开“可领取”面板按钮 (如果尚未展开)
+    panel_selector = """(() => {
+      const btns = [...document.querySelectorAll('button, [role="button"]')];
+      return btns.find(b => {
+        const t = (b.innerText || '').trim();
+        return (t.includes('可领取') || /claimable/i.test(t)) && !t.includes('领取积分') && !t.includes('已领取');
+      }) || null;
+    })()"""
+
+    has_panel = ev(cdp, f"!!({panel_selector})")
+    if has_panel:
+        try:
+            human_click(cdp, panel_selector, label='可领取面板', close_new=False)
+            time.sleep(random.uniform(2.0, 3.5))
+        except Exception as ex:
+            log(f'点击可领取面板提示: {ex}')
+
+    # 第二步：在弹层或页面内点击“领取积分”按钮
+    btn_selector = """(() => {
+      const dialog = document.querySelector('[role="dialog"], [role="alertdialog"]');
+      const scope = dialog ? [...dialog.querySelectorAll('button, a')] : [...document.querySelectorAll('button, a, [role="button"]')];
+      return scope.find(x => {
+        const t = (x.innerText || '').trim().replace(/\\s+/g, ' ');
+        return /^\\d+\\s*待领取\\s*领取积分/.test(t) || t.includes('领取积分') || /claim\\s*points/i.test(t) || (t.includes('待领取') && t.includes('领取'));
+      }) || null;
+    })()"""
+
+    has_btn = ev(cdp, f"!!({btn_selector})")
+    if not has_btn:
+        scroll_human(cdp)
+        time.sleep(2)
+        has_btn = ev(cdp, f"!!({btn_selector})")
+
+    if not has_btn:
+        log('未找到"领取积分"按钮 (可能已自动入账或无需点击)')
+        return f'检测到{total_claimable}分(未见领取按钮)' if (total_claimable and total_claimable > 0) else '无可领取'
+
+    human_click(cdp, btn_selector, label='领取积分', close_new=False)
+    time.sleep(random.uniform(4.0, 6.0))
+    log('已点击领取积分按钮并完成结算等待')
+    return f'领取{total_claimable}分' if (total_claimable and total_claimable > 0) else '领取完成'
+

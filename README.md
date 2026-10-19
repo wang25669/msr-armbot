@@ -248,6 +248,7 @@ install.sh           Armbian 一键安装
 | `moreactivities` | 日常任务卡片 | Chromium DOM | `#moreactivities` 自动剔除已完成与兑换券卡片，真人点击停留落库 |
 | `search` | 必应 PC 搜索补全 | Chromium DOM | 读 dashboard/streaks 上限计数器，逐字真人按键键入，搜满即停 |
 | `visual` | 视觉搜索连续打卡 | Chromium DOM | 面板判据 → Bing 每日壁纸取图 → 镜头真人点击 → 键入搜索并停留落库 |
+| `claim` | 待领取积分结算 | Chromium DOM | API/DOM 检测到可领取积分面板时，真人展开并点击领取完成结算 |
 | **单会话单实例** | 浏览器全阶段流转 | Chromium CDP | 单账号只启动一次 Chromium，连续流转所有浏览器任务后退出，告别频繁启停 |
 | **全方位指纹伪装** | 反检测与代理隔离 | Anti-Detect | Linux/ARM 平台伪装 `Win32`、抹除 `webdriver`、掩盖 WebGL 渲染器、禁用 WebRTC UDP 泄漏 |
 
@@ -267,6 +268,7 @@ install.sh           Armbian 一键安装
 | 必应搜索 | 读 dashboard 计数器 `max`，≤0 视为当天无搜索任务，直接跳过 |
 | 每日活动 / 日常任务 | 读 dashboard 对应卡片列表，为空返回“今日无XX任务（跳过）” |
 | 视觉搜索 | 读面板“视觉搜索 活动: x/1”；读不到 = 无此任务跳过；已完成也跳过 |
+| 积分领取 | 读 API `pointClaimBannerPromotion` / DOM “可领取”文案；无可领取积分自动跳过 |
 
 注意：视觉“面板读不到就跳过”是按用户 2026-10-17 的明确要求实现的。历史上有过
 “卡片 DOM 时有时无但任务仍在”的情况（2026-10-07~09），若以后遇到面板不渲染导致
