@@ -448,7 +448,7 @@ class Chromium:
 
     def __init__(self, binary='chromium', port=None, user_data_dir=None,
                  extra_args=None, version='141', proxy=None, cdp_port=None, log=print,
-                 fingerprint=None):
+                 fingerprint=None, headless=True, disable_webrtc_leak=True):
         if not shutil.which(binary):
             for cand in ('google-chrome', 'chromium', 'chromium-browser', 'edge', 'msedge'):
                 if shutil.which(cand):
@@ -462,6 +462,8 @@ class Chromium:
         self.version = version
         self.proxy = proxy
         self.fingerprint = fingerprint or {}
+        self.headless = headless
+        self.disable_webrtc_leak = disable_webrtc_leak
         self.extra_args = extra_args or []
         self.log = log
         self.proc = None
@@ -503,7 +505,6 @@ class Chromium:
         # 针对 ARM 低功耗/低内存环境全盘调优的 Chromium 启动参数
         args = [
             self.binary,
-            '--headless=new',
             f'--remote-debugging-port={self.port}',
             f'--user-data-dir={self.user_data_dir}',
             '--no-sandbox',
@@ -514,7 +515,6 @@ class Chromium:
             '--disable-background-networking',
             '--disable-sync',
             '--disable-blink-features=AutomationControlled',
-            '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
             '--disable-extensions',
             '--disable-component-update',
             '--disk-cache-size=33554432',          # 限制磁盘缓存为 32MB，保护 ARM 存储介质
@@ -522,6 +522,10 @@ class Chromium:
             '--js-flags=--max-old-space-size=256', # 限制 V8 堆内存为 256MB，防止 ARM OOM 崩溃
             f'--window-size={w},{h}'
         ]
+        if self.headless:
+            args.append('--headless=new')
+        if self.disable_webrtc_leak:
+            args.append('--force-webrtc-ip-handling-policy=disable_non_proxied_udp')
         if self.proxy:
             args.append(f'--proxy-server={self.proxy}')
             self.log(f'Chromium 挂载代理出口: {self.proxy}')

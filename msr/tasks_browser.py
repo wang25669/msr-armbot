@@ -140,8 +140,14 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
         '故宫博物院展览', '中国空间站最新动态', '世界名画高清赏析', '羽毛球世锦赛赛程',
         '流行音乐新歌榜', '居家收纳整理技巧', '秋季润燥养生汤', '人工智能最新技术'
     ]
-    is_cn = (pr.get('country') or '').lower() == 'cn'
-    queries = queries_zh + queries_en if is_cn else queries_en + queries_zh
+    qlang = s_cfg.get('query_language', 'auto')
+    if qlang == 'zh':
+        queries = queries_zh
+    elif qlang == 'en':
+        queries = queries_en
+    else:
+        is_cn = (pr.get('country') or '').lower() == 'cn'
+        queries = queries_zh + queries_en if is_cn else queries_en + queries_zh
     random.shuffle(queries)
 
     t0 = time.time()
@@ -350,7 +356,12 @@ def interact_quiz(ch, tab_id, label='', log=print):
             except Exception as e:
                 log('quiz交互点击容忍: %s' % str(e)[:60])
                 break
-            time.sleep(random.uniform(3, 6))
+            from msr import settings
+            st_cfg = settings.load_settings()
+            c_cfg = st_cfg.get('cards', {})
+            q_min = int(c_cfg.get('quiz_step_delay_min', 3))
+            q_max = int(c_cfg.get('quiz_step_delay_max', 6))
+            time.sleep(random.uniform(q_min, q_max))
     finally:
         try:
             cdp_quiz.close()
@@ -430,6 +441,49 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
 
 
 phase_quick = phase_dailyset
+
+
+def resolve_quest_subtask_action(step_info, q_name):
+    """根据任务卡片固有通用属性(URL结构、Query参数、卡片元数据)自适应解析动作类型。
+
+    绝不针对任何特定节日、主题硬编码关键词。
+    通用操作分流:
+    1. 'quiz': 具有官方测验标识 (filters=BTBQ/BTB/REWARDSQUIZ 或路径含 quiz)
+    2. 'search_direct': 具有搜索终结点且已有预设关键词 q
+    3. 'search_semantic': 具有搜索终结点但无 q (开放式搜索任务)，从卡片 title 元数据提取核心题干搜索
+    4. 'landing': 常规网页/壁纸/活动介绍落地页，模拟自然浏览与停留
+    """
+    href = step_info.get('href') or ''
+    title = (step_info.get('title') or '').strip()
+    card_text = (step_info.get('cardText') or '').strip()
+    has_query = step_info.get('hasQuery', False)
+
+    # 1. 测验/竞答类属性判定 (Quiz / Trivia)
+    if any(k in href for k in ('REWARDSQUIZ', 'BTBQ', 'BTB')) or '/quiz' in href.lower():
+        return {'action': 'quiz', 'search_term': None, 'reason': 'URL携带官方测验标识(REWARDSQUIZ/BTBQ/quiz)'}
+
+    # 2. 搜索类属性判定 (Search)
+    parsed = urllib.parse.urlparse(href)
+    is_search = 'bing.com' in parsed.netloc and parsed.path.rstrip('/') == '/search'
+
+    if is_search:
+        if has_query:
+            return {'action': 'search_direct', 'search_term': None, 'reason': 'URL已携带官方预置搜索词'}
+        # 开放式搜索任务: 从卡片元数据中的 title (标题) 净化提取主题词
+        clean_term = title
+        for prefix in ('Bing 有您的', 'Bing有您的', '通过', '使用', '在您的桌面上', '在桌面上', '探索', '查找', '关于'):
+            clean_term = clean_term.replace(prefix, '')
+        clean_term = re.sub(r'[^\w\s\u4e00-\u9fa5]', ' ', clean_term).strip()
+
+        if 2 <= len(clean_term) <= 30:
+            chosen_term = clean_term
+        else:
+            matches = re.findall(r'[\u4e00-\u9fa5a-zA-Z0-9]{2,8}', card_text)
+            chosen_term = matches[0] if (matches and len(matches[0]) >= 2) else '今日热点要闻'
+        return {'action': 'search_semantic', 'search_term': chosen_term, 'reason': f'开放式搜索任务，从卡片元数据提取核心词: "{chosen_term}"'}
+
+    # 3. 常规落地页属性 (Landing Page / Wallpaper / Promotion)
+    return {'action': 'landing', 'search_term': None, 'reason': '常规展示/体验类落地页'}
 
 
 # ---------- 任务打卡 (Quests / Punchcards，含桌面专属打卡) ----------
@@ -577,26 +631,14 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             if new_tabs and ch:
                 target_tid = new_tabs[0]
                 try:
-                    # 1. 测验/竞答类打卡卡片 (如 Spotify 测验、节日竞答等)
-                    is_quiz = 'REWARDSQUIZ' in step_href or 'quiz' in step_href.lower() or any(k in step_text for k in ('测验', '竞答', '小测验', '问答'))
-                    if is_quiz:
-                        interact_quiz(ch, target_tid, label=step_text, log=log)
-                    # 2. 搜索类打卡卡片 (若链接无 q 参数，根据卡片上下文智能发起语义搜索)
-                    elif not step_info.get('hasQuery') and 'bing.com' in step_href:
-                        ctx = (step_info.get('title') or '') + ' ' + (step_info.get('cardText') or '') + ' ' + q_name
-                        if any(k in ctx for k in ('万圣节', 'Halloween', 'halloween')):
-                            term = random.choice(['万圣节服装创意', '万圣节南瓜灯雕刻教程', '万圣节高清壁纸', '万圣节AI图像生成'])
-                        elif any(k in ctx for k in ('音乐', 'Spotify', 'spotify', '歌曲', '歌单')):
-                            term = random.choice(['best spotify playlists 2026', '流行音乐热歌榜', 'relaxing acoustic music'])
-                        elif any(k in ctx for k in ('电影', '影视', '剧集', 'movie')):
-                            term = random.choice(['top movies 2026 on netflix', '最新科幻电影推荐', '豆瓣高分电影榜单'])
-                        elif any(k in ctx for k in ('健身', '运动', 'HIIT', 'workout')):
-                            term = random.choice(['居家HIIT高强度训练教程', '晨练全身拉伸动作', '核心肌群力量训练'])
-                        elif any(k in ctx for k in ('食谱', '美食', '烹饪', 'recipe')):
-                            term = random.choice(['家常快手菜菜谱', '健康减脂晚餐食谱', '空气炸锅简单美食'])
-                        else:
-                            term = random.choice(['今日国内外热点新闻', '科技创新最新成果', 'weather forecast today'])
+                    action_info = resolve_quest_subtask_action(step_info, q_name)
+                    act = action_info['action']
+                    log('%s 步骤属性解析: [%s] -> %s (%s)' % (q_name, act, step_text[:25], action_info['reason']))
 
+                    if act == 'quiz':
+                        interact_quiz(ch, target_tid, label=step_text, log=log)
+                    elif act == 'search_semantic':
+                        term = action_info['search_term']
                         try:
                             c2 = ch.attach({'id': target_tid, 'webSocketDebuggerUrl': f'ws://127.0.0.1:{ch.port}/devtools/page/{target_tid}'})
                             time.sleep(2)
@@ -606,7 +648,7 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                               return null;
                             })()""")
                             if focused:
-                                log('%s 触发语义搜索: "%s"' % (q_name, term))
+                                log('%s 在新标签输入任务主题词搜索: "%s"' % (q_name, term))
                                 c2.call('Input.insertText', {'text': term})
                                 time.sleep(random.uniform(1.0, 1.8))
                                 press_enter(c2)
@@ -614,9 +656,9 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                                 scroll_human(c2)
                             c2.close()
                         except Exception as ex:
-                            log('附带搜索容忍: %s' % str(ex)[:60])
+                            log('开放式搜索执行容忍: %s' % str(ex)[:60])
                     else:
-                        # 3. 常规网页 / 壁纸浏览类卡片: 模拟阅读与滚动
+                        # search_direct 或 landing: 模拟自然视线浏览与平滑滚动
                         try:
                             c2 = ch.attach({'id': target_tid, 'webSocketDebuggerUrl': f'ws://127.0.0.1:{ch.port}/devtools/page/{target_tid}'})
                             time.sleep(2)

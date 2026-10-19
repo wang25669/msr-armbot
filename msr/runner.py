@@ -38,8 +38,7 @@ def cmd_run(args):
     st_cfg = settings.load_settings()
     sch_cfg = st_cfg.get('schedule', {})
     if getattr(args, 'fast', False):
-        st_cfg['schedule']['fast_mode'] = True
-        settings.save_settings(st_cfg)
+        sch_cfg['fast_mode'] = True
 
     accs = [a for a in config.accounts() if a.get('enabled', True)]
     if not accs:
@@ -200,8 +199,13 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
         if val.startswith('失败') or '未complete' in val or '未出现' in val:
             bad.append(ph)
     if bad and not args.dry_run:
-        config.log(name, '自动修复: 等待 4 分钟后重跑 %s' % bad)
-        time.sleep(240)
+        from msr import settings as S
+        st_runner = S.load_settings()
+        retry_mins = int(st_runner.get('schedule', {}).get('retry_wait_minutes', 4))
+        fast_mode = bool(st_runner.get('schedule', {}).get('fast_mode', False))
+        wait_s = 5 if fast_mode else retry_mins * 60
+        config.log(name, '自动修复: 等待 %.1f 分钟后重跑 %s' % (wait_s / 60, bad))
+        time.sleep(wait_s)
         bad_api = [ph for ph in bad if next((t['needs'] for t in planner.TASK_TABLE.values() if t['phase'] == ph), 'api') == 'api']
         bad_browser = [ph for ph in bad if ph not in bad_api]
         for ph in bad_api:

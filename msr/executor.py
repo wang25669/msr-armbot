@@ -73,8 +73,12 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
                 return '资格后无flight'
         if str(flight.get('complete')).lower() == 'true':
             return '已完成'
-        interval = int(flight.get('report_per_minutes') or 5) * 60 + 5
-        for i in range(6):
+        from msr import settings
+        st_edge = settings.load_settings()
+        fast_mode = bool(st_edge.get('schedule', {}).get('fast_mode', False))
+        edge_reports = int(st_edge.get('mobile', {}).get('edge30m_reports', 6))
+        interval = 10 if fast_mode else int(st_edge.get('mobile', {}).get('edge30m_interval', 305))
+        for i in range(edge_reports):
             aid = None
             for attempt_no in range(3):
                 r = api.api(name, 'POST', '/me/activities', token, eh,
@@ -88,48 +92,53 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
                     break
                 config.log(name, 'report%d 第%d次响应缺activity, 30s后重发'
                            % (i + 1, attempt_no + 1))
-                time.sleep(30)
+                time.sleep(5 if fast_mode else 30)
             config.log(name, 'report%d act=%s 已上报' % (i + 1, (aid or '?')[:8]))
-            if i < 5:
-                time.sleep(180)
+            if i < edge_reports - 1:
+                read_wait = min(5 if fast_mode else 180, interval // 2)
+                time.sleep(read_wait)
                 st = api.find_promo(api.get_me(name, token, rg, proxy=proxy),
                                     'edge_browsing_streak_flight') or {}
                 config.log(name, 'report%d 回读: progress=%s/%s complete=%s'
                            % (i + 1, st.get('progress'), st.get('max'), st.get('complete')))
                 if str(st.get('complete')).lower() == 'true':
                     return '完成(%d次)' % (i + 1)
-                time.sleep(max(0, interval - 180))
-        time.sleep(600)
+                time.sleep(max(0, interval - read_wait))
+        time.sleep(5 if fast_mode else 600)
         resp = api.get_me(name, token, rg, proxy=proxy)
         st = api.find_promo(resp, 'edge_browsing_streak_flight') or {}
         bal = resp.get('balance')
         config.log(name, '最终回读: progress=%s/%s complete=%s 余额=%s'
                    % (st.get('progress'), st.get('max'), st.get('complete'), bal))
         if str(st.get('complete')).lower() == 'true':
-            return 'Edge完成(6次), 余额=%s' % bal
-        return ('Edge上报6次, progress=%s/%s complete=%s 余额=%s(计分可能延迟)'
-                % (st.get('progress'), st.get('max'), st.get('complete'), bal))
+            return 'Edge完成(%d次), 余额=%s' % (edge_reports, bal)
+        return ('Edge上报%d次, progress=%s/%s complete=%s 余额=%s(计分可能延迟)'
+                % (edge_reports, st.get('progress'), st.get('max'), st.get('complete'), bal))
 
     return '未知API阶段'
 
 
 def browser_cfg(config):
-    """浏览器可配置项(全部有默认值, 环境变量/配置文件可覆盖)。"""
+    """浏览器可配置项(从 settings.json 统一读取)。"""
     import os
     import shutil
-    from msr import config as C
-    cfg = C.load_json(C.HOME + '/browser.json', {}) or {}
+    from msr import settings as S
+    st = S.load_settings()
+    b_cfg = st.get('browser', {})
+    s_cfg = st.get('search', {})
+    c_cfg = st.get('cards', {})
     default_bin = 'chromium'
     for cand in ('google-chrome', 'chromium', 'chromium-browser', 'edge', 'msedge'):
         if shutil.which(cand):
             default_bin = cand
             break
     return {
-        'binary': cfg.get('binary') or os.environ.get('MSR_CHROMIUM', default_bin),
-        'version': cfg.get('version') or os.environ.get('MSR_EDGE_VERSION', '141'),
-        'search_budget_min': int(cfg.get('search_budget_minutes', 60)),
-        'cards_budget_min': int(cfg.get('cards_budget_minutes', 25)),
-        'headless': cfg.get('headless', True),
+        'binary': b_cfg.get('binary') or os.environ.get('MSR_CHROMIUM', default_bin),
+        'version': b_cfg.get('version') or os.environ.get('MSR_EDGE_VERSION', '141'),
+        'search_budget_min': int(s_cfg.get('budget_minutes', 120)),
+        'cards_budget_min': int(c_cfg.get('budget_minutes', 35)),
+        'headless': b_cfg.get('headless', True),
+        'disable_webrtc_leak': b_cfg.get('disable_webrtc_leak', True)
     }
 
 
@@ -180,7 +189,9 @@ def run_browser_session(name, phases, token, pr, profile_path, config, proxy=Non
 
     ch = browser.Chromium(binary=bc['binary'], user_data_dir=chrome_dir,
                           version=fp.get('edge_version', bc['version']), log=logger,
-                          proxy=proxy, cdp_port=cdp_port, fingerprint=fp)
+                          proxy=proxy, cdp_port=cdp_port, fingerprint=fp,
+                          headless=bc.get('headless', True),
+                          disable_webrtc_leak=bc.get('disable_webrtc_leak', True))
     tabs = ch.start()
     # 优先复用 start 创建好的首个标签，避免多余空白标签占用 ARM 内存
     tab = tabs[0] if tabs else ch.new_tab('about:blank')
@@ -208,6 +219,16 @@ def run_browser_session(name, phases, token, pr, profile_path, config, proxy=Non
                 # 每个阶段完成后，立即关闭所有可能产生的子标签，及时释放 ARM 内存并保护当前活跃标签
                 cur_tid = cdp.path.split('/')[-1].split('?')[0] if (hasattr(cdp, 'path') and cdp.path) else tab.get('id')
                 ch.cleanup_extra_tabs(keep_tab_id=cur_tid)
+
+                if phase != phases[-1]:
+                    from msr import settings as S
+                    st_cfg = S.load_settings()
+                    fast_mode = bool(st_cfg.get('schedule', {}).get('fast_mode', False))
+                    s_min = 2 if fast_mode else int(st_cfg.get('schedule', {}).get('inter_stage_wait_min', 3)) * 60
+                    s_max = 5 if fast_mode else int(st_cfg.get('schedule', {}).get('inter_stage_wait_max', 5)) * 60
+                    wait_stage = random.uniform(s_min, s_max)
+                    logger('阶段过渡: 等待 %.1f 秒后进入下一阶段...' % wait_stage)
+                    time.sleep(wait_stage)
 
         return results
     finally:
