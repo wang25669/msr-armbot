@@ -474,7 +474,7 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                 hasQ = !!u.searchParams.get("q");
               } catch(e) {}
               return {
-                text: target.innerText.replace(/\n/g, ' ').trim(),
+                text: target.innerText.replace(/\\n/g, ' ').trim(),
                 href: target.href,
                 hasQuery: hasQ
               };
