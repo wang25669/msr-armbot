@@ -96,11 +96,12 @@ def plan(probe_result, force_phases=None):
     # 浏览器侧阶段: 默认按顺序尝试, 由 executor 在浏览器里按当天实际卡片执行
     BROWSER_ALWAYS = ['dailyset', 'quests', 'moreactivities', 'search', 'visual']
 
-    want_phases = [{'phase': 'appcheckin', 'needs': 'api'}]          # type103 总是有效
+    want_phases = [
+        {'phase': 'appcheckin', 'needs': 'api'},          # type103 签到总是有效
+        {'phase': 'appread', 'needs': 'api'},             # 移动端10篇阅读(+30分)默认纳入
+    ]
     if 'edge_browsing_streak_flight' in have or 'edge_browsing_streak_eligible' in have:
         want_phases.append({'phase': 'edge30m', 'needs': 'api'})
-    if 'ENUS_readarticle3_30points' in have:
-        want_phases.append({'phase': 'appread', 'needs': 'api'})
     for ph in BROWSER_ALWAYS:
         want_phases.append({'phase': ph, 'needs': 'browser'})
     return want_phases

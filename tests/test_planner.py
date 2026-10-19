@@ -11,13 +11,13 @@ SG_PROMOS = ['edge_entertainment_spotify', 'level_info', 'Rewards_EdgeUsage_prog
 CN_PROMOS = ['edge_browsing_streak_eligible', 'edge_browsing_streak_flight',
              'WW_NewLevel1_search_PC']
 
-expected_phases = ['appcheckin', 'edge30m', 'dailyset', 'quests', 'moreactivities', 'search', 'visual']
+expected_phases = ['appcheckin', 'appread', 'edge30m', 'dailyset', 'quests', 'moreactivities', 'search', 'visual']
 
 sg_plan = planner.plan({'task_names': SG_PROMOS})
 phases = [w['phase'] for w in sg_plan]
 print('sg 计划:', phases)
 assert phases == expected_phases, phases
-assert all(w['needs'] == 'browser' for w in sg_plan[2:])
+assert all(w['needs'] == 'browser' for w in sg_plan[3:])
 print('  [OK] API侧在前, 浏览器侧在后, 阶段命名已规范对齐')
 
 cn_plan = planner.plan({'task_names': CN_PROMOS})

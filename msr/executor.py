@@ -25,20 +25,37 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
         return '+%s' % gained
 
     if phase in ('appread', 'read'):
+        from msr import settings
+        st = settings.load_settings()
+        fast_mode = bool(st.get('schedule', {}).get('fast_mode'))
+        target_count = int(st.get('mobile', {}).get('read_article_count', 10))
+        w_min = 2 if fast_mode else int(st.get('mobile', {}).get('read_interval_min', 60))
+        w_max = 5 if fast_mode else int(st.get('mobile', {}).get('read_interval_max', 120))
+
         total, done = 0, 0
-        for i in range(10):
+        for i in range(target_count):
             old = api.get_me(name, token, rg, proxy=proxy).get('balance')
             r = api.api(name, 'POST', '/me/activities', token, ah,
                         {'amount': 1, 'id': secrets.token_hex(64), 'type': 101,
                          'attributes': {'offerid': 'ENUS_readarticle3_30points'}, 'country': c}, proxy=proxy)
             new = (r.get('response') or {}).get('balance', old)
             g = (new or 0) - (old or 0)
+            if g <= 0:
+                if i == 0:
+                    config.log(name, 'App阅读: 今日额度已满或暂无加分')
+                else:
+                    config.log(name, f'App阅读: 已达今日上限 (完成 {done} 篇, 累计 +{total} 分)')
+                break
             total += g
             done = i + 1
-            if g <= 0:
-                break
-            time.sleep(random.uniform(60, 120))
+            if i < target_count - 1:
+                wait_sec = random.uniform(w_min, w_max)
+                config.log(name, f'App阅读 [{done}/{target_count}篇]: 本篇+{g}分, 累计+{total}分, 等待 {wait_sec:.0f}s 模拟真实翻阅...')
+                time.sleep(wait_sec)
+            else:
+                config.log(name, f'App阅读 [{done}/{target_count}篇]: 本篇+{g}分, 累计+{total}分 (全部完成)')
         return '%d篇+%d' % (done, total)
+
 
     if phase in ('edge30m', 'edge_api', 'edge'):
         promos = api.get_me(name, token, rg, proxy=proxy)

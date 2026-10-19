@@ -646,6 +646,10 @@ class Chromium:
                     except Exception:
                         pass
 
+    kill = stop
+    close = stop
+
+
 
 # ---------- cookie 注入(B1 登录方案) ----------
 

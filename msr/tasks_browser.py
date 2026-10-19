@@ -456,13 +456,25 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
               });
               if (anchors.length === 0) return null;
               const target = anchors[0];
+              if (target.href.startsWith("ms-search://")) {
+                let q = "";
+                try {
+                  const u = new URL(target.href);
+                  q = u.searchParams.get("q") || "";
+                } catch(e) {
+                  const m = target.href.match(/[?&]q=([^&]+)/);
+                  if (m) q = decodeURIComponent(m[1]);
+                }
+                target.href = "https://www.bing.com/search?q=" + encodeURIComponent(q || "today news");
+                target.target = "_blank";
+              }
               let hasQ = false;
               try {
                 const u = new URL(target.href, location.href);
                 hasQ = !!u.searchParams.get("q");
               } catch(e) {}
               return {
-                text: target.innerText.replace(/\\n/g, ' ').trim(),
+                text: target.innerText.replace(/\n/g, ' ').trim(),
                 href: target.href,
                 hasQuery: hasQ
               };
@@ -482,7 +494,7 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             log('执行步骤: %s -> %s' % (step_text[:30], step_href[:60]))
 
             click_selector = """(() => {
-              return Array.from(document.querySelectorAll("main a[href]")).find(a => {
+              const el = Array.from(document.querySelectorAll("main a[href]")).find(a => {
                 const p = a.closest("div[class*=flex-col], div[class*=rounded]") || a.parentElement;
                 if (p && p.innerHTML.includes("bg-statusSuccess")) return false;
                 const t = a.innerText || "";
@@ -490,6 +502,19 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                        t.includes("分") || t.includes("搜索") || t.includes("尝试") ||
                        t.includes("定义") || t.includes("查找") || t.includes("试用");
               });
+              if (el && el.href.startsWith("ms-search://")) {
+                let q = "";
+                try {
+                  const u = new URL(el.href);
+                  q = u.searchParams.get("q") || "";
+                } catch(e) {
+                  const m = el.href.match(/[?&]q=([^&]+)/);
+                  if (m) q = decodeURIComponent(m[1]);
+                }
+                el.href = "https://www.bing.com/search?q=" + encodeURIComponent(q || "today news");
+                el.target = "_blank";
+              }
+              return el;
             })()"""
 
             new_tabs = human_click(cdp, click_selector, label=step_text[:15], close_new=False)
