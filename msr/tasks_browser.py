@@ -162,6 +162,7 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
     searches_done = 0
     stall_count = 0
     last_prog = current_prog
+    consecutive_errors = 0
 
     while (time.time() - t0 < budget_seconds) and (searches_done < hard_cap):
         if current_prog >= target_max:
@@ -175,6 +176,7 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
             href = typed_search(cdp, q, domain)
             scroll_human(cdp)
             log('搜索[%d] %s -> %s' % (searches_done, q, str(href)[:60]))
+            consecutive_errors = 0
 
             # 模拟真人点击任意搜索结果并停留浏览
             if random.random() < click_prob:
@@ -190,7 +192,20 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
                 except Exception:
                     pass
         except Exception as ex:
-            log('搜索[%d] 异常: %s' % (searches_done, str(ex)[:60]))
+            consecutive_errors += 1
+            log('搜索[%d] 异常: %s' % (searches_done, str(ex)[:80]))
+            if consecutive_errors >= 3:
+                log('搜索连续 %d 次异常，尝试重置浏览器至 Bing 首页...' % consecutive_errors)
+                try:
+                    navigate(cdp, f'https://{domain}')
+                    time.sleep(3)
+                except Exception:
+                    pass
+            if consecutive_errors >= 6:
+                log('搜索连续 %d 次异常未恢复，提前终止搜索阶段' % consecutive_errors)
+                break
+            time.sleep(random.uniform(3, 6))
+            continue
 
         # 核心节奏等待: 3-5 分钟 (等待微软冷却计数器刷新)
         dwell = random.uniform(dwell_min, dwell_max)

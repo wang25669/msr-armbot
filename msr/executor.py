@@ -187,13 +187,15 @@ def run_browser_session(name, phases, token, pr, profile_path, config, proxy=Non
                 results[phase] = '失败(%s)' % str(ex)[:60]
                 logger('!!! 浏览器阶段 %s 异常: %s' % (phase, str(ex)[:120]))
             finally:
-                # 每个阶段完成后，立即关闭所有可能产生的子标签，及时释放 ARM 内存
-                ch.cleanup_extra_tabs(keep_tab_id=tab.get('id'))
+                # 每个阶段完成后，立即关闭所有可能产生的子标签，及时释放 ARM 内存并保护当前活跃标签
+                cur_tid = cdp.path.split('/')[-1].split('?')[0] if (hasattr(cdp, 'path') and cdp.path) else tab.get('id')
+                ch.cleanup_extra_tabs(keep_tab_id=cur_tid)
 
         return results
     finally:
         try:
-            ch.close_tab(tab.get('id'))
+            cur_tid = cdp.path.split('/')[-1].split('?')[0] if (hasattr(cdp, 'path') and cdp.path) else tab.get('id')
+            ch.close_tab(cur_tid)
         except Exception:
             pass
         # 彻底终结 Chromium 整个进程树并释放 profile 锁与系统内存

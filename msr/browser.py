@@ -48,6 +48,8 @@ class CDP:
         self.sock = None
         self._rest = b''
         self.event_handler = None
+        self.fingerprint = None
+        self.log = None
 
     def __enter__(self):
         self.connect()
@@ -84,7 +86,8 @@ class CDP:
 
     def _reconnect(self):
         self.close()
-        for attempt in range(3):
+        # 1. 尝试直接重连原 path (最多 2 次)
+        for attempt in range(2):
             try:
                 self.connect()
                 for m in ('Page.enable', 'Runtime.enable'):
@@ -94,10 +97,44 @@ class CDP:
                         pass
                 return True
             except Exception:
-                time.sleep(2)
+                self.close()
+                time.sleep(1)
+
+        # 2. 若原 tab 已失效/被关闭，查询 Chromium targets 找寻活跃 page 或创建新 page 兜底恢复
+        try:
+            targets = _http_json(f'http://{self.host}:{self.port}/json/list', timeout=3)
+            # 仅寻找真实的普通网页标签 (type == 'page')
+            page_tab = next((t for t in targets if t.get('type') == 'page' and t.get('webSocketDebuggerUrl')), None)
+            if not page_tab:
+                # 没有任何普通 page，自动开一个新 page 兜底
+                page_tab = _http_json(f'http://{self.host}:{self.port}/json/new?about:blank', method='PUT', timeout=5)
+
+            if page_tab and page_tab.get('webSocketDebuggerUrl'):
+                new_ws = page_tab['webSocketDebuggerUrl']
+                self.ws_url = new_ws
+                u = urllib.parse.urlparse(new_ws)
+                self.path = u.path + (('?' + u.query) if u.query else '')
+                self.connect()
+                for m in ('Page.enable', 'Runtime.enable'):
+                    try:
+                        self._call_once(m, timeout=15)
+                    except Exception:
+                        pass
+                if self.fingerprint and self.log:
+                    try:
+                        from msr import fingerprint
+                        fingerprint.apply_to_cdp(self, self.fingerprint, self.log)
+                    except Exception:
+                        pass
+                return True
+        except Exception:
+            pass
+
         return False
 
     def _send_frame(self, payload):
+        if not self.sock:
+            raise StepError('CDP 套接字未连接')
         mask = os.urandom(4)
         masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
         n = len(payload)
@@ -111,6 +148,8 @@ class CDP:
         self.sock.sendall(hdr + mask + masked)
 
     def _recv_exact(self, n):
+        if not self.sock:
+            raise StepError('CDP 套接字未连接')
         out = self._rest[:n]
         self._rest = self._rest[n:]
         while len(out) < n:
@@ -160,9 +199,12 @@ class CDP:
         raise StepError(f'CDP {method} 超时')
 
     def call(self, method, params=None, timeout=WS_TIMEOUT):
+        if not self.sock:
+            if not self._reconnect():
+                raise StepError(f'CDP 连接已断开且重连失败: {method}')
         try:
             return self._call_once(method, params, timeout)
-        except (BrokenPipeError, ConnectionResetError, OSError, socket.error) as e:
+        except (BrokenPipeError, ConnectionResetError, OSError, socket.error, AttributeError) as e:
             if not self._reconnect():
                 raise StepError(f'CDP 调用失败且重连无效: {method}: {e}')
             try:
@@ -170,7 +212,8 @@ class CDP:
             except Exception as e2:
                 raise StepError(f'CDP {method} 重连后仍失败: {e2}')
         except StepError as e:
-            if '连接被关闭' in str(e) and self._reconnect():
+            err_str = str(e)
+            if any(k in err_str for k in ('连接被关闭', '握手', '中断', '未连接')) and self._reconnect():
                 return self._call_once(method, params, timeout)
             raise
 
@@ -323,13 +366,19 @@ def _base_url(cdp):
 
 def tab_ids(cdp):
     try:
-        return [t['id'] for t in _http_json(_base_url(cdp) + '/json/list', timeout=5)]
+        targets = _http_json(_base_url(cdp) + '/json/list', timeout=5)
+        # 严密过滤：只统计真正的普通页面(type == 'page')，绝不将 iframe、worker 或 browser_ui 误作为新标签
+        return [t['id'] for t in targets if t.get('type') == 'page']
     except Exception:
         return []
 
 
 def close_tab(cdp, tid):
     try:
+        targets = _http_json(_base_url(cdp) + '/json/list', timeout=3)
+        t = next((x for x in targets if x.get('id') == tid), None)
+        if t and t.get('type') != 'page':
+            return
         _http_json(_base_url(cdp) + '/json/close/' + tid, timeout=5)
     except Exception:
         pass
@@ -499,6 +548,10 @@ class Chromium:
 
     def close_tab(self, tid):
         try:
+            targets = _http_json(f'http://127.0.0.1:{self.port}/json/list', timeout=3)
+            t = next((x for x in targets if x.get('id') == tid), None)
+            if t and t.get('type') != 'page':
+                return
             _http_json(f'http://127.0.0.1:{self.port}/json/close/{tid}', method='GET')
         except Exception:
             pass
@@ -508,6 +561,8 @@ class Chromium:
         try:
             tabs = _http_json(f'http://127.0.0.1:{self.port}/json/list', timeout=3)
             for t in tabs:
+                if t.get('type') != 'page':
+                    continue
                 tid = t.get('id')
                 if tid and (keep_tab_id is None or tid != keep_tab_id):
                     self.close_tab(tid)
@@ -516,6 +571,8 @@ class Chromium:
 
     def attach(self, tab):
         cdp = CDP(tab['webSocketDebuggerUrl'])
+        cdp.fingerprint = self.fingerprint
+        cdp.log = self.log
         cdp.connect()
         cdp.call('Page.enable')
         cdp.call('Runtime.enable')
