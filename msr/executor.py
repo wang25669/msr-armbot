@@ -133,7 +133,7 @@ def browser_cfg(config):
     }
 
 
-def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger):
+def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger, token=None, proxy=None):
     """在现有 CDP 会话中分发具体浏览器任务。"""
     from msr import tasks_browser as tb
     p = phase.lower()
@@ -152,7 +152,7 @@ def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger):
     if p in ('search', 'pcsearch'):
         return tb.phase_search(name, cdp, pr, ch=ch,
                                budget_seconds=bc['search_budget_min'] * 60,
-                               log=logger)
+                               log=logger, token=token, proxy=proxy)
     if p in ('visual', 'visualsearch'):
         from msr import tasks_visual
         return tasks_visual.run(name, cdp, pr, log=logger,
@@ -197,7 +197,8 @@ def run_browser_session(name, phases, token, pr, profile_path, config, proxy=Non
         for phase in phases:
             logger('>>> 开始浏览器阶段: %s' % phase)
             try:
-                r = execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger)
+                r = execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger,
+                                                 token=token, proxy=proxy)
                 results[phase] = r
                 logger('<<< 浏览器阶段 %s 完成: %s' % (phase, r))
             except Exception as ex:

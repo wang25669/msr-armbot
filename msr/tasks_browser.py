@@ -96,7 +96,7 @@ def search_counters_dom(cdp):
         return None
 
 
-def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=print):
+def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=print, token=None, proxy=None):
     """必应 PC 搜索打卡 (按账户等级读动态上限，自适应冷板停留与防卡死熔断)。"""
     from msr import settings
     st = settings.load_settings()
@@ -116,28 +116,14 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
 
     # 优先检查是否已满额
     c_api = search_counters_api(pr)
-    if c_api and c_api.get('complete'):
-        log('PC搜索已满额: %d/%d (根据促销属性)' % (c_api['progress'], c_api['max']))
-        return '%d/%d' % (c_api['progress'], c_api['max'])
-
-    # 检查 dashboard streaks
     target_max = (c_api or {}).get('max', 60)
     current_prog = (c_api or {}).get('progress', 0)
-    try:
-        navigate(cdp, 'https://rewards.bing.com/dashboard')
-        time.sleep(2)
-        c_dom = search_counters_dom(cdp)
-        if c_dom:
-            target_max = c_dom.get('max') or target_max
-            current_prog = c_dom.get('progress') or current_prog
-            if c_dom.get('complete') or current_prog >= target_max:
-                log('PC搜索已满额: %d/%d (根据仪表板)' % (current_prog, target_max))
-                return '%d/%d' % (current_prog, target_max)
-    except Exception:
-        pass
+    if c_api and (c_api.get('complete') or current_prog >= target_max):
+        log('PC搜索已满额: %d/%d (根据促销属性)' % (current_prog, target_max))
+        return '%d/%d' % (current_prog, target_max)
 
-    log('PC搜索启动: 当前进度 %d/%d (单次停留 %.1f-%.1f 分钟/词)' % (
-        current_prog, target_max, dwell_min / 60, dwell_max / 60))
+    log('PC搜索启动: 当前进度 %d/%d (单次停留 %.1f-%.1f 秒/词)' % (
+        current_prog, target_max, dwell_min, dwell_max))
 
     queries_en = [
         'weather forecast', 'world news today', 'python tutorial for beginners',
@@ -207,34 +193,42 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
             time.sleep(random.uniform(3, 6))
             continue
 
-        # 核心节奏等待: 3-5 分钟 (等待微软冷却计数器刷新)
+        # 核心节奏等待: 3-5 分钟 (等待微软冷却计数器刷新，fast_mode 3-6 秒)
         dwell = random.uniform(dwell_min, dwell_max)
-        log('搜索[%d] 模拟真人阅读停留 %.1f 分钟...' % (searches_done, dwell / 60))
+        log('搜索[%d] 模拟真人阅读停留 %.1f 秒...' % (searches_done, dwell))
         time.sleep(dwell)
 
         # 回读积分进度
-        new_c = None
-        try:
-            navigate(cdp, 'https://rewards.bing.com/dashboard')
-            time.sleep(2)
-            new_c = search_counters_dom(cdp)
-        except Exception:
-            pass
+        if token:
+            try:
+                from msr import api
+                new_pr = api.get_me(name, token, pr, proxy=proxy)
+                new_c = search_counters_api(new_pr)
+                if new_c:
+                    current_prog = new_c.get('progress', current_prog)
+                    target_max = new_c.get('max', target_max)
+                    log('进度回读(API): %d/%d (已完成=%s)' % (current_prog, target_max, new_c.get('complete', False)))
+                    if new_c.get('complete') or current_prog >= target_max:
+                        log('PC搜索达成上限: %d/%d (尝试%d次)' % (current_prog, target_max, searches_done))
+                        break
+            except Exception as ex:
+                log('API进度回读容忍: %s' % str(ex)[:60])
+        else:
+            current_prog = min(current_prog + 3, target_max)
+            log('进度推算: %d/%d' % (current_prog, target_max))
+            if current_prog >= target_max:
+                log('PC搜索达成上限: %d/%d (尝试%d次)' % (current_prog, target_max, searches_done))
+                break
 
-        if new_c:
-            current_prog = new_c.get('progress', current_prog)
-            target_max = new_c.get('max', target_max)
-            log('进度回读: %d/%d' % (current_prog, target_max))
-
-            if current_prog > last_prog:
-                stall_count = 0
-                last_prog = current_prog
-            else:
-                stall_count += 1
-                log('搜索计数未推进(%d/%d)，连续 %d/%d 次' % (current_prog, target_max, stall_count, stall_max))
-                if stall_count >= stall_max:
-                    log('搜索计数连续 %d 次停滞，提前收尾(避免死磕风控)' % stall_max)
-                    break
+        if current_prog > last_prog:
+            stall_count = 0
+            last_prog = current_prog
+        else:
+            stall_count += 1
+            log('搜索计数未推进(%d/%d)，连续 %d/%d 次' % (current_prog, target_max, stall_count, stall_max))
+            if stall_count >= stall_max:
+                log('搜索计数连续 %d 次停滞，提前收尾(避免死磕风控)' % stall_max)
+                break
 
     return '%d/%d (尝试%d次)' % (current_prog, target_max, searches_done)
 
