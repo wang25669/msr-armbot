@@ -478,21 +478,19 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             # 检测可点击的活跃步骤
             step_info = ev(cdp, """(() => {
               const anchors = Array.from(document.querySelectorAll("main a[href], main button")).filter(a => {
-                const p = a.closest("div[class*=flex-col], div[class*=rounded]") || a.parentElement;
-                if (p && (p.innerHTML.includes("bg-statusSuccess") || p.innerHTML.includes("已完成") || p.querySelector("svg[class*=success]"))) return false;
+                const row = a.closest("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]") || a.parentElement;
+                if (row && row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess]")) {
+                  return false;
+                }
 
                 const t = a.innerText || "";
                 const h = a.href || "";
                 if (h.includes("/dashboard") || h.includes("/earn") || h.includes("/redeem") || h.includes("/pointsbreakdown") || h.includes("terms") || h.includes("privacy")) return false;
-                return h.includes("bing.com/search") || h.includes("ms-search://") || h.includes("bing.com/create") ||
-                       h.includes("REWARDSQUIZ") || h.includes("microsoft.com") ||
-                       t.includes("分") || t.includes("搜索") || t.includes("尝试") ||
-                       t.includes("定义") || t.includes("查找") || t.includes("试用") ||
-                       t.includes("探索") || t.includes("下载") || t.includes("开始") || t.includes("+");
+                return true;
               });
               if (anchors.length === 0) return null;
               const target = anchors[0];
-              const p = target.closest("div[class*=flex-col], div[class*=rounded]") || target.parentElement;
+              const p = target.closest("div.flex.flex-col.gap-3, div.flex.flex-row") || target.parentElement;
               const pTitle = p?.querySelector("h2, h3, h4, [class*=title]")?.innerText?.replace(/\\n/g, ' ')?.trim() || "";
               const pText = p?.innerText?.replace(/\\n/g, ' ')?.trim() || "";
 
@@ -550,16 +548,14 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
 
             click_selector = """(() => {
               const el = Array.from(document.querySelectorAll("main a[href], main button")).find(a => {
-                const p = a.closest("div[class*=flex-col], div[class*=rounded]") || a.parentElement;
-                if (p && (p.innerHTML.includes("bg-statusSuccess") || p.innerHTML.includes("已完成") || p.querySelector("svg[class*=success]"))) return false;
+                const row = a.closest("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]") || a.parentElement;
+                if (row && row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess]")) {
+                  return false;
+                }
                 const t = a.innerText || "";
                 const h = a.href || "";
                 if (h.includes("/dashboard") || h.includes("/earn") || h.includes("/redeem") || h.includes("/pointsbreakdown") || h.includes("terms") || h.includes("privacy")) return false;
-                return h.includes("bing.com/search") || h.includes("ms-search://") || h.includes("bing.com/create") ||
-                       h.includes("REWARDSQUIZ") || h.includes("microsoft.com") ||
-                       t.includes("分") || t.includes("搜索") || t.includes("尝试") ||
-                       t.includes("定义") || t.includes("查找") || t.includes("试用") ||
-                       t.includes("探索") || t.includes("下载") || t.includes("开始") || t.includes("+");
+                return true;
               });
               if (el && el.href && el.href.startsWith("ms-search://")) {
                 let q = "";
