@@ -196,7 +196,7 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
     bad = []
     for r in results:
         ph, _, val = r.partition(':')
-        if val.startswith('失败') or '未complete' in val or '未出现' in val:
+        if val.startswith('失败') or '未complete' in val or '未出现' in val or '未发现每日活动' in val:
             bad.append(ph)
     if bad and not args.dry_run:
         from msr import settings as S

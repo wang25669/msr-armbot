@@ -372,24 +372,49 @@ def interact_quiz(ch, tab_id, label='', log=print):
 def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     """Daily Set 3张每日活动卡。"""
     navigate(cdp, 'https://rewards.bing.com/dashboard')
-    time.sleep(random.uniform(3, 5))
+    time.sleep(random.uniform(2, 4))
 
-    # 获取 dailyset 卡片列表
-    cards = ev(cdp, """(() => {
-      const ds = document.getElementById("dailyset");
-      if (!ds) return [];
-      return Array.from(ds.querySelectorAll("a[href]")).map((a, idx) => ({
-        idx: idx,
-        href: a.href,
-        text: a.innerText.replace(/\\n/g, ' '),
-        title: a.querySelector("h3")?.innerText || a.innerText.split("\\n")[0].slice(0, 30),
-        isDone: a.innerText.includes("已完成") || a.innerHTML.includes("bg-statusSuccess")
-      }));
-    })()""") or []
+    # 智能轮询等待 #dailyset 容器及卡片渲染完成 (应对 Next.js SPA 水合与网络延迟，最多等待 25 秒)
+    cards = []
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        cards = ev(cdp, """(() => {
+          const ds = document.getElementById("dailyset");
+          if (!ds) return [];
+          const links = Array.from(ds.querySelectorAll("a[href]"));
+          if (links.length === 0) return [];
+          return links.map((a, idx) => ({
+            idx: idx,
+            href: a.href,
+            text: a.innerText.replace(/\\n/g, ' '),
+            title: a.querySelector("h3")?.innerText || a.innerText.split("\\n")[0].slice(0, 30),
+            isDone: a.innerText.includes("已完成") || a.innerHTML.includes("bg-statusSuccess")
+          }));
+        })()""") or []
+        if cards:
+            break
+        time.sleep(1.0)
+
+    if not cards:
+        # 如果超时仍未出现，尝试重新导航刷新一次作为兜底
+        log('未发现每日活动区域 (#dailyset)，尝试重新导航刷新二次探测...')
+        navigate(cdp, 'https://rewards.bing.com/dashboard')
+        time.sleep(random.uniform(3, 5))
+        cards = ev(cdp, """(() => {
+          const ds = document.getElementById("dailyset");
+          if (!ds) return [];
+          return Array.from(ds.querySelectorAll("a[href]")).map((a, idx) => ({
+            idx: idx,
+            href: a.href,
+            text: a.innerText.replace(/\\n/g, ' '),
+            title: a.querySelector("h3")?.innerText || a.innerText.split("\\n")[0].slice(0, 30),
+            isDone: a.innerText.includes("已完成") || a.innerHTML.includes("bg-statusSuccess")
+          }));
+        })()""") or []
 
     if not cards:
         log('未发现每日活动区域 (#dailyset)')
-        return '未发现每日活动'
+        return '失败:未发现每日活动区域'
 
     todo = [c for c in cards if not c.get('isDone')]
     if not todo:
@@ -491,20 +516,28 @@ def resolve_quest_subtask_action(step_info, q_name):
 def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     """任务打卡(Quests / Punchcards，含桌面专属打卡)。"""
     navigate(cdp, 'https://rewards.bing.com/earn')
-    time.sleep(random.uniform(3, 5))
+    time.sleep(random.uniform(2, 4))
 
-    quests = ev(cdp, """(() => {
-      const qs = document.getElementById("quests");
-      if (!qs) return [];
-      return Array.from(qs.querySelectorAll("a[href*='/earn/quest/']")).map(a => {
-        const text = a.innerText.replace(/\\n/g, ' ');
-        return {
-          href: a.href,
-          text: text,
-          isDone: text.includes("已完成") || /\\b(\\d+)\\s*\\/\\s*\\1\\s*个任务/.test(text)
-        };
-      });
-    })()""") or []
+    # 智能轮询等待 #quests 容器及链接渲染完成 (最多等待 20 秒)
+    quests = []
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        quests = ev(cdp, """(() => {
+          const qs = document.getElementById("quests");
+          if (!qs) return [];
+          const links = Array.from(qs.querySelectorAll("a[href*='/earn/quest/']"));
+          return links.map(a => {
+            const text = a.innerText.replace(/\\n/g, ' ');
+            return {
+              href: a.href,
+              text: text,
+              isDone: text.includes("已完成") || /\\b(\\d+)\\s*\\/\\s*\\1\\s*个任务/.test(text)
+            };
+          });
+        })()""") or []
+        if quests:
+            break
+        time.sleep(1.0)
 
     if not quests:
         log('今日未发现打卡任务 (#quests)')
@@ -696,7 +729,15 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
 def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     """日常任务(More Activities 更多活动卡)。"""
     navigate(cdp, 'https://rewards.bing.com/earn')
-    time.sleep(random.uniform(3, 5))
+    time.sleep(random.uniform(2, 4))
+
+    # 智能轮询等待 #moreactivities 容器渲染 (最多等待 20 秒)
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        has_ma = ev(cdp, 'document.getElementById("moreactivities") !== null')
+        if has_ma:
+            break
+        time.sleep(1.0)
 
     cards = ev(cdp, """(() => {
       const ma = document.getElementById("moreactivities");
