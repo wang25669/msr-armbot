@@ -284,14 +284,10 @@ def inspect_login_page(cdp):
             return { type: 'otp_input', prompt: prompt };
         }
 
-        // 6. 优先检测是否提供“使用密码”切换选项 (针对默认推 Authenticator 或发邮件验证码的账号)
-        const switchPwdEl = Array.from(document.querySelectorAll('*')).find(x => {
-            const t = (x.innerText || '').trim().toLowerCase();
-            return (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead' || (t.includes('password') && t.length < 25) || (t.includes('密码') && t.length < 15)) && x.children.length === 0;
-        });
-        if (switchPwdEl) {
-            const r = switchPwdEl.getBoundingClientRect();
-            return { type: 'switch_to_password', x: r.x + r.width/2, y: r.y + r.height/2 };
+        // 6. 密码输入页 (若密码输入框已可见，优先进入填密阶段)
+        const pwdInput = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
+        if (pwdInput && pwdInput.offsetParent !== null) {
+            return { type: 'password_entry' };
         }
 
         // 7. 用户名输入页 (确保仅在尚未输入用户名时匹配)
@@ -300,10 +296,19 @@ def inspect_login_page(cdp):
             return { type: 'username_entry' };
         }
 
-        // 8. 密码输入页
-        const pwdInput = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
-        if (pwdInput && pwdInput.offsetParent !== null) {
-            return { type: 'password_entry' };
+        // 8. 检测是否提供“使用密码”切换选项 (针对默认推 Authenticator 或发邮件验证码的账号)
+        if (document.body) {
+            const switchPwdEl = Array.from(document.body.querySelectorAll('*')).find(x => {
+                const t = (x.innerText || '').trim().toLowerCase();
+                const isMatch = (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead' || t === 'use a password instead');
+                if (!isMatch || x.children.length > 0) return false;
+                const r = x.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            });
+            if (switchPwdEl) {
+                const r = switchPwdEl.getBoundingClientRect();
+                return { type: 'switch_to_password', x: r.x + r.width/2, y: r.y + r.height/2 };
+            }
         }
 
         // 9. 验证方式选择列表 / 辅助邮箱确认 (Proof Selection)
@@ -580,22 +585,21 @@ class LoginSession:
                     self.log('检测到非密码默认选项，自动切换至“使用密码”模式')
                     x = state.get('x')
                     y = state.get('y')
-                    if x is not None and y is not None:
+                    if x is not None and y is not None and (x > 0 or y > 0):
                         browser.mouse_click(self.cdp, x, y)
                     else:
                         browser.ev(self.cdp, '''(() => {
-                            const leaf = Array.from(document.querySelectorAll('*')).find(x => {
+                            const leaf = Array.from(document.body ? document.body.querySelectorAll('*') : []).find(x => {
                                 const t = (x.innerText || '').trim().toLowerCase();
-                                return (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password') && x.children.length === 0;
+                                return (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead') && x.children.length === 0;
                             });
                             if (leaf) {
-                                const target = leaf.closest('a, button, [role=button], .fui-Link') || leaf;
-                                target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
-                                target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
-                                target.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                                leaf.click();
+                                const target = leaf.closest('a, button, [role=button], .fui-Link');
+                                if (target) target.click();
                             }
                         })()''')
-                    time.sleep(2.5)
+                    time.sleep(3)
 
                 elif st_type == 'password_entry':
                     if not password_injected or (time.time() - password_injected_at > 8):
