@@ -8,5 +8,5 @@ logs/
 data/
 docker-test/
 .env
-accountest.md
+tests/
 
