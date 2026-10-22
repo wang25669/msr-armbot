@@ -41,6 +41,15 @@ LIVE_LOGS = []
 LIVE_LOGS_LOCK = threading.Lock()
 MAX_LIVE_LOGS = 1000
 
+RUNNER_STATE = {
+    'running': False,
+    'target': '',
+    'started_at': 0,
+    'last_line': '',
+    'exit_code': None,
+}
+RUNNER_STATE_LOCK = threading.Lock()
+
 
 def append_live_log(msg):
     ts = time.strftime('%H:%M:%S')
@@ -112,6 +121,317 @@ HTML_CONTENT = """<!DOCTYPE html>
     .toast { position: fixed; bottom: 24px; right: 24px; background: #1e293b; border: 1px solid var(--primary); color: #fff; padding: 12px 22px; border-radius: 8px; font-size: 14px; display: none; z-index: 1000; box-shadow: 0 10px 25px rgba(0,0,0,0.6); }
     .pipeline-step { display: flex; align-items: flex-start; gap: 12px; padding: 12px; background: rgba(15, 23, 42, 0.6); border-radius: 8px; margin-bottom: 10px; border-left: 3px solid var(--primary); }
     .pipeline-badge { background: #0284c7; color: #fff; font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+
+    /* 现代化实时日志控制台增强样式 */
+    .log-container-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 24px;
+      box-shadow: 0 4px 6px -1px rgba(0,0,0,0.2);
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 220px);
+      min-height: 580px;
+      transition: all 0.2s ease;
+      position: relative;
+    }
+    .log-container-card.fullscreen {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      width: 100vw;
+      height: 100vh;
+      border-radius: 0;
+      margin: 0;
+      padding: 16px 20px;
+      background: #070c18;
+      border: none;
+    }
+    .btn-primary-sub {
+      background: rgba(56, 189, 248, 0.2);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.4);
+    }
+    .btn-primary-sub:hover {
+      background: rgba(56, 189, 248, 0.35);
+      color: #fff;
+    }
+    .btn-warning-sub {
+      background: rgba(245, 158, 11, 0.2);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.4);
+    }
+    .btn-warning-sub:hover {
+      background: rgba(245, 158, 11, 0.35);
+      color: #fff;
+    }
+
+    /* 指标卡片网格 */
+    .log-metrics-grid {
+      display: grid;
+      grid-template-columns: 1.4fr 1.1fr 1fr;
+      gap: 12px;
+      margin-bottom: 12px;
+      flex-shrink: 0;
+    }
+    @media (max-width: 900px) {
+      .log-metrics-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 580px) {
+      .log-metrics-grid { grid-template-columns: 1fr; }
+    }
+    .log-metric-card {
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      transition: border-color 0.15s, transform 0.15s;
+    }
+    .log-metric-card:hover {
+      border-color: #475569;
+    }
+    .log-metric-label {
+      font-size: 11px;
+      color: var(--text-sub);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .log-metric-val {
+      font-size: 13.5px;
+      font-weight: 700;
+      color: #f1f5f9;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* 控制与过滤工具栏 */
+    .log-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(15, 23, 42, 0.65);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      margin-bottom: 12px;
+      flex-shrink: 0;
+    }
+    .log-tool-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .log-search-wrapper {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      min-width: 170px;
+    }
+    .log-search-wrapper input {
+      padding: 6px 28px 6px 10px;
+      font-size: 12px;
+      background: #090d18;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: #fff;
+      height: 30px;
+    }
+    .log-search-clear {
+      position: absolute;
+      right: 8px;
+      color: #64748b;
+      cursor: pointer;
+      font-size: 13px;
+      display: none;
+    }
+    .log-search-clear:hover { color: #f1f5f9; }
+
+    /* 终端视窗 */
+    .terminal-window {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: #050811;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+      min-height: 380px;
+    }
+    .terminal-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 14px;
+      background: #0d1527;
+      border-bottom: 1px solid #1e293b;
+      font-size: 12px;
+      color: var(--text-sub);
+      user-select: none;
+      flex-shrink: 0;
+    }
+    .terminal-dots {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .dot-red { background: #ef4444; }
+    .dot-yellow { background: #f59e0b; }
+    .dot-green { background: #10b981; }
+
+    #log-box {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: auto;
+      padding: 10px 14px;
+      font-family: "JetBrains Mono", Menlo, Consolas, Monaco, monospace;
+      font-size: 12.5px;
+      line-height: 1.65;
+      color: #cbd5e1;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      max-height: none;
+      margin: 0;
+      white-space: pre;
+    }
+    #log-box.wrap-mode {
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* 单条日志行样式 */
+    .l-row {
+      display: flex;
+      align-items: flex-start;
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-bottom: 1px;
+      transition: background 0.1s;
+    }
+    .l-row:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .l-num {
+      user-select: none;
+      width: 44px;
+      flex-shrink: 0;
+      color: #475569;
+      font-size: 11px;
+      text-align: right;
+      padding-right: 12px;
+    }
+    .l-content {
+      flex: 1;
+      word-break: break-all;
+    }
+    .l-ts {
+      color: #64748b;
+      margin-right: 6px;
+    }
+    .l-acc-badge {
+      background: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-right: 6px;
+      display: inline-block;
+    }
+
+    /* 日志行色彩高亮 */
+    .l-err {
+      background: rgba(239, 68, 68, 0.13) !important;
+      border-left: 3px solid #ef4444;
+      color: #fca5a5 !important;
+    }
+    .l-warn {
+      background: rgba(245, 158, 11, 0.1) !important;
+      border-left: 3px solid #f59e0b;
+      color: #fde68a !important;
+    }
+    .l-succ {
+      background: rgba(34, 197, 94, 0.08);
+      border-left: 3px solid #22c55e;
+      color: #86efac;
+    }
+    .l-banner {
+      background: rgba(99, 102, 241, 0.12);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      color: #c7d2fe !important;
+      font-weight: 600;
+      border-radius: 4px;
+      margin: 4px 0;
+    }
+    .l-mark {
+      background: #eab308;
+      color: #0f172a;
+      padding: 0 2px;
+      border-radius: 2px;
+      font-weight: 700;
+    }
+
+    /* 悬浮提示新日志药丸 */
+    .new-logs-pill {
+      position: absolute;
+      bottom: 18px;
+      right: 24px;
+      background: linear-gradient(135deg, #0284c7, #0ea5e9);
+      color: #fff;
+      padding: 8px 18px;
+      border-radius: 30px;
+      font-size: 12.5px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.6), 0 0 10px rgba(14,165,233,0.5);
+      display: none;
+      align-items: center;
+      gap: 6px;
+      z-index: 20;
+      transition: transform 0.15s, background 0.15s;
+    }
+    .new-logs-pill:hover {
+      transform: translateY(-2px);
+      background: linear-gradient(135deg, #0369a1, #0284c7);
+    }
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #22c55e;
+      display: inline-block;
+      box-shadow: 0 0 8px #22c55e;
+      animation: pulseAnim 1.8s infinite;
+    }
+    @keyframes pulseAnim {
+      0% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+      100% { opacity: 1; transform: scale(1); }
+    }
   </style>
 </head>
 <body>
@@ -162,10 +482,6 @@ HTML_CONTENT = """<!DOCTYPE html>
               <input type="text" id="acc-proxy-input" placeholder="http://user:pass@127.0.0.1:7890">
               <button class="btn btn-secondary btn-sm" style="white-space:nowrap;" onclick="testProxyInForm()">⚡ 测试</button>
             </div>
-          </div>
-          <div class="form-group">
-            <label>调度偏移 (分钟)</label>
-            <input type="number" id="acc-offset-input" value="0">
           </div>
           <div class="form-group">
             <button class="btn" onclick="saveNewAccount()">保存账号</button>
@@ -445,14 +761,145 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     <!-- 实时日志 -->
     <div id="tab-logs" class="tab-content">
-      <div class="card">
-        <div class="card-title">
-          <span>实时日志输出 (每 3 秒自动轮询)</span>
-          <div class="flex-row">
-            <button class="btn btn-secondary btn-sm" onclick="loadLogsNow()">立即刷新</button>
+      <div class="log-container-card" id="log-card">
+        <!-- 顶部核心价值指标卡片 -->
+        <div class="log-metrics-grid">
+          <!-- 1. 当前任务状态 -->
+          <div class="log-metric-card">
+            <div class="log-metric-label">
+              <span>⚡ 当前运行状态</span>
+              <span id="metric-state-badge" class="badge badge-info" style="font-size:10px; padding:1px 6px;">空闲</span>
+            </div>
+            <div class="log-metric-val" id="metric-state-text" title="当前执行状态">
+              <span class="pulse-dot" style="background:#64748b; box-shadow:none;" id="metric-pulse"></span>
+              <span style="font-size:13px; font-weight:normal; color:var(--text-sub);">暂无运行中的任务</span>
+            </div>
+          </div>
+
+          <!-- 2. 异常与风控诊断 -->
+          <div class="log-metric-card" onclick="quickFilterError()" style="cursor:pointer;" title="点击一键筛选全部异常与告警日志">
+            <div class="log-metric-label">
+              <span>🛡️ 异常与风控诊断</span>
+              <span style="font-size:10px; color:var(--primary);">点击过滤 ↗</span>
+            </div>
+            <div class="log-metric-val" id="metric-error-text">
+              <span style="color:var(--success); font-size:13px;">🟢 全部正常 (0 异常)</span>
+            </div>
+          </div>
+
+          <!-- 3. 轮询与日志流健康度 -->
+          <div class="log-metric-card">
+            <div class="log-metric-label">
+              <span>📊 轮询流状态</span>
+              <span id="metric-poll-status" style="font-size:10px; color:var(--success);">● 自动同步</span>
+            </div>
+            <div class="log-metric-val" style="font-size:13px; font-weight:normal; color:var(--text-sub);">
+              已载入 <strong id="metric-lines-count" style="color:#fff;">0</strong> 行 · 同步于 <span id="log-last-sync" style="color:#38bdf8;">--:--:--</span>
+            </div>
           </div>
         </div>
-        <pre id="log-box">正在加载日志...</pre>
+
+        <!-- 操作与过滤工具栏 -->
+        <div class="log-toolbar">
+          <div class="log-tool-group">
+            <!-- 轮询控制 -->
+            <button id="btn-poll-toggle" class="btn btn-secondary btn-sm" onclick="toggleLogPoll()" title="暂停或恢复每3秒自动拉取">
+              ⏸️ 暂停自动拉取
+            </button>
+            <div style="display:flex; align-items:center; gap:4px; font-size:12px; color:var(--text-sub);">
+              <span>频率:</span>
+              <select id="log-interval-select" onchange="changePollInterval(this.value)" style="width:auto; padding:4px 8px; font-size:12px; height:30px;">
+                <option value="3000" selected>3 秒</option>
+                <option value="5000">5 秒</option>
+                <option value="10000">10 秒</option>
+                <option value="manual">手动刷新</option>
+              </select>
+            </div>
+            <button class="btn btn-secondary btn-sm" onclick="loadLogsNow(true)" title="强制拉取最新日志">
+              🔄 立即刷新
+            </button>
+
+            <span style="color:var(--border);">|</span>
+
+            <!-- 账号过滤 -->
+            <div style="display:flex; align-items:center; gap:4px; font-size:12px; color:var(--text-sub);">
+              <span>账号:</span>
+              <select id="log-acc-filter" onchange="onAccountFilterChange(this.value)" style="width:auto; max-width:130px; padding:4px 8px; font-size:12px; height:30px;">
+                <option value="all">全部账号</option>
+                <option value="__system__">仅系统/调度</option>
+              </select>
+            </div>
+
+            <!-- 日志级别过滤 -->
+            <div style="display:flex; align-items:center; gap:4px; font-size:12px; color:var(--text-sub);">
+              <span>级别:</span>
+              <select id="log-level-filter" onchange="onLevelFilterChange(this.value)" style="width:auto; padding:4px 8px; font-size:12px; height:30px;">
+                <option value="all">全部日志</option>
+                <option value="error">🔴 仅错误/告警</option>
+                <option value="milestone">🟢 仅关键阶段/结果</option>
+                <option value="search">🔍 仅搜索/答题明细</option>
+              </select>
+            </div>
+
+            <!-- 搜索框 -->
+            <div class="log-search-wrapper">
+              <input type="text" id="log-search-input" placeholder="🔍 检索关键词..." oninput="onSearchInput(this.value)">
+              <span id="log-search-clear" class="log-search-clear" onclick="clearSearch()">✕</span>
+            </div>
+          </div>
+
+          <div class="log-tool-group">
+            <!-- 自动滚屏开关 -->
+            <button id="btn-autoscroll" class="btn btn-primary-sub btn-sm" onclick="toggleAutoScroll()" title="开关自动跟踪滚动到底部">
+              📌 自动贴底: 开
+            </button>
+            <!-- 换行切换 -->
+            <button id="btn-wrap-toggle" class="btn btn-primary-sub btn-sm" onclick="toggleWordWrap()" title="切换长日志自动折行">
+              ↩ 折行: 开
+            </button>
+            <!-- 复制 -->
+            <button class="btn btn-secondary btn-sm" onclick="copyDisplayedLogs()" title="复制当前视图显示的全部日志">
+              📋 复制
+            </button>
+            <!-- 导出文件 -->
+            <button class="btn btn-secondary btn-sm" onclick="downloadLogsFile()" title="下载日志为文本文件">
+              💾 导出
+            </button>
+            <!-- 清屏 -->
+            <button class="btn btn-secondary btn-sm" onclick="clearLogView()" title="清空当前页面显示(不影响后端落盘)">
+              🧹 清屏
+            </button>
+            <!-- 全屏 -->
+            <button id="btn-fullscreen" class="btn btn-secondary btn-sm" onclick="toggleFullscreen()" title="全屏沉浸式展开控制台">
+              ⛶ 全屏
+            </button>
+          </div>
+        </div>
+
+        <!-- 终端主体视窗 -->
+        <div class="terminal-window">
+          <div class="terminal-bar">
+            <div class="terminal-dots">
+              <span class="dot dot-red"></span>
+              <span class="dot dot-yellow"></span>
+              <span class="dot dot-green"></span>
+              <span style="font-family:monospace; margin-left:6px; color:#94a3b8; font-weight:600;">terminal@msr-armbot:~</span>
+            </div>
+            <div id="terminal-stats" style="font-family:monospace; font-size:11px; color:#64748b;">
+              正在连接控制台日志流...
+            </div>
+          </div>
+
+          <!-- 日志滚动容器 (默认开启 wrap-mode) -->
+          <div id="log-box" class="wrap-mode">正在加载日志...</div>
+
+          <!-- 悬浮提示：新日志未读浮标 (用户向上翻阅时出现) -->
+          <div id="new-logs-pill" class="new-logs-pill" onclick="scrollToBottom(true)">
+            <span>⬇ 有新日志</span>
+            <span id="pill-count-badge" style="background:rgba(255,255,255,0.25); padding:1px 6px; border-radius:10px; font-size:11px;">0</span>
+            <span style="font-weight:normal; font-size:11px;">(点击直达最新)</span>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -742,6 +1189,48 @@ HTML_CONTENT = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- 独立弹窗 5: 账号修改代理与调度配置 -->
+  <div id="edit-proxy-modal" class="modal-overlay">
+    <div class="modal">
+      <div class="card-title">
+        <span id="edit-proxy-title">✏️ 修改账号代理配置</span>
+        <button class="btn btn-secondary btn-sm" onclick="closeEditProxyModal()">关闭</button>
+      </div>
+
+      <p style="font-size:13px; color:var(--text-sub); margin-bottom:14px; line-height:1.5;">
+        为该账号单独指定出口代理（支持 HTTP / SOCKS5，留空即为直连）。修改代理后可直接现场测试连通性，保存后旧出口缓存将自动失效刷新。
+      </p>
+
+      <div class="form-group">
+        <label>账号名称 (唯一标识)</label>
+        <input type="text" id="edit-proxy-name" readonly style="background:#0f172a; color:#94a3b8; cursor:not-allowed;">
+      </div>
+
+      <div class="form-group">
+        <label>独立出口代理配置 (支持 HTTP / SOCKS5，留空为直连)</label>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="edit-proxy-val" placeholder="例如: http://user:pass@127.0.0.1:7890 或留空直连">
+          <button class="btn btn-secondary btn-sm" style="white-space:nowrap;" onclick="testProxyInModal()">⚡ 测试代理</button>
+          <button class="btn btn-secondary btn-sm" style="white-space:nowrap;" onclick="clearProxyInModal()">设为直连</button>
+        </div>
+      </div>
+
+      <div id="modal-proxy-test-box" style="display:none; margin-bottom:14px; padding:10px 14px; border-radius:6px; font-size:12.5px; line-height:1.6;"></div>
+
+      <div class="form-group" style="margin-top:10px;">
+        <label style="display:inline-flex; align-items:center; gap:8px; cursor:pointer; color:#f1f5f9; font-size:13px;">
+          <input type="checkbox" id="edit-proxy-align-fp" checked style="width:auto;">
+          <span>同时将该账号的<strong>硬件指纹时区与语言自动对齐至新代理出口</strong>（推荐，防时区风控）</span>
+        </label>
+      </div>
+
+      <div style="margin-top:20px; display:flex; justify-content:flex-end; gap:10px;">
+        <button class="btn btn-secondary" onclick="closeEditProxyModal()">取消</button>
+        <button class="btn" id="btn-submit-proxy" onclick="submitEditProxy()">保存代理配置</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast"></div>
 
   <script>
@@ -749,6 +1238,53 @@ HTML_CONTENT = """<!DOCTYPE html>
     let dcPollTimer = null;
     let logPollTimer = null;
     let currentFpData = null;
+
+    // 实时日志控制台交互状态
+    let isAutoScroll = true;
+    let isWordWrap = true;
+    let isPollPaused = false;
+    let pollIntervalMs = '3000';
+    let rawLogLines = [];
+    let lastLogRawText = '';
+    let unreadNewLogsCount = 0;
+    let activeLevelFilter = 'all';
+    let activeAccountFilter = 'all';
+    let activeSearchKeyword = '';
+    let isFullscreen = false;
+    let knownAccounts = [];
+
+    function updateAccountFilterOptions(accounts) {
+      if (!Array.isArray(accounts)) return;
+      knownAccounts = accounts.map(a => (typeof a === 'string' ? a : a.name)).filter(Boolean);
+      const sel = document.getElementById('log-acc-filter');
+      if (!sel) return;
+
+      const currentVal = sel.value;
+      sel.innerHTML = '';
+
+      const optAll = document.createElement('option');
+      optAll.value = 'all';
+      optAll.textContent = '全部日志 (所有账号)';
+      sel.appendChild(optAll);
+
+      const optSys = document.createElement('option');
+      optSys.value = '__system__';
+      optSys.textContent = '🌐 仅系统与调度日志';
+      sel.appendChild(optSys);
+
+      knownAccounts.forEach(name => {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = `👤 账号: ${name}`;
+        sel.appendChild(opt);
+      });
+
+      if (currentVal && (currentVal === 'all' || currentVal === '__system__' || knownAccounts.includes(currentVal))) {
+        sel.value = currentVal;
+      } else {
+        sel.value = 'all';
+      }
+    }
 
     function toast(msg) {
       const t = document.getElementById('toast');
@@ -767,8 +1303,8 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       if (logPollTimer) clearInterval(logPollTimer);
       if (tabName === 'logs') {
-        loadLogsNow();
-        logPollTimer = setInterval(loadLogsNow, 3000);
+        loadLogsNow(true);
+        startLogPolling();
       } else if (tabName === 'settings') {
         loadSettingsForm();
       }
@@ -780,6 +1316,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         const data = await res.json();
         renderDashboard(data.accounts || []);
         renderManageList(data.accounts || []);
+        updateAccountFilterOptions(data.accounts || []);
         document.getElementById('stat-summary').innerText = `总账号数: ${data.accounts?.length || 0} | 服务器时间: ${data.time || ''}`;
         if (data.scheduler) {
           const sch = data.scheduler;
@@ -856,6 +1393,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         // 按钮组: 移除了单一无用的排期预览，依据有效性提供导出或重登
         let actionButtons = `
           <button class="btn btn-sm" onclick="runSingle('${a.name}')">立即运行</button>
+          <button class="btn btn-secondary btn-sm" onclick="openEditProxyModal('${a.name}', '${a.proxy || ''}')">✏️ 改代理</button>
           <button class="btn btn-secondary btn-sm" onclick="openFingerprintModal('${a.name}')">专属指纹</button>
         `;
         if (isAuthValid) {
@@ -981,6 +1519,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             </div>
           </div>
           <div class="flex-row">
+            <button class="btn btn-primary-sub btn-sm" onclick="openEditProxyModal('${a.name}', '${a.proxy || ''}')">✏️ 修改代理</button>
             ${a.proxy ? `<button class="btn btn-secondary btn-sm" onclick="testAccountProxy('${a.name}', '${a.proxy}')">⚡ 测代理</button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="openFingerprintModal('${a.name}')">专属指纹</button>
             ${authBtns}
@@ -995,18 +1534,136 @@ HTML_CONTENT = """<!DOCTYPE html>
     async function saveNewAccount() {
       const name = document.getElementById('acc-name-input').value.trim();
       const proxy = document.getElementById('acc-proxy-input').value.trim() || null;
-      const offset = parseInt(document.getElementById('acc-offset-input').value || 0);
       if (!name) return toast('请输入账号标识名称');
 
       await fetch('/api/accounts', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name, proxy, offset_minutes: offset, enabled: true})
+        body: JSON.stringify({name, proxy, enabled: true})
       });
       toast(`账号 ${name} 已保存`);
       document.getElementById('acc-name-input').value = '';
       document.getElementById('acc-proxy-input').value = '';
       fetchStatus();
+    }
+
+    let editingAccountName = '';
+
+    function openEditProxyModal(name, currentProxy) {
+      editingAccountName = name;
+      document.getElementById('edit-proxy-title').innerText = `✏️ 修改账号代理: [${name}]`;
+      document.getElementById('edit-proxy-name').value = name;
+      const cleanProxy = (currentProxy && currentProxy !== 'null' && currentProxy !== 'undefined') ? currentProxy : '';
+      document.getElementById('edit-proxy-val').value = cleanProxy;
+      document.getElementById('edit-proxy-align-fp').checked = true;
+
+      const box = document.getElementById('modal-proxy-test-box');
+      box.style.display = 'none';
+      box.innerHTML = '';
+
+      document.getElementById('edit-proxy-modal').style.display = 'flex';
+    }
+
+    function closeEditProxyModal() {
+      document.getElementById('edit-proxy-modal').style.display = 'none';
+    }
+
+    async function testProxyInModal() {
+      const proxy = document.getElementById('edit-proxy-val').value.trim();
+      const box = document.getElementById('modal-proxy-test-box');
+      if (!proxy) {
+        box.style.display = 'block';
+        box.style.background = 'rgba(56,189,248,0.1)';
+        box.style.border = '1px solid rgba(56,189,248,0.3)';
+        box.style.color = '#38bdf8';
+        box.innerHTML = 'ℹ️ 当前代理配置为空，账号将采用直连方式运行。';
+        return;
+      }
+      box.style.display = 'block';
+      box.style.background = 'rgba(56,189,248,0.1)';
+      box.style.border = '1px solid rgba(56,189,248,0.3)';
+      box.style.color = '#38bdf8';
+      box.innerHTML = '⚡ 正在连接代理服务器测试出口与延迟...';
+
+      try {
+        const res = await fetch('/api/accounts/proxy-test', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({proxy, name: editingAccountName})
+        });
+        const d = await res.json();
+        if (d.status === 'ok') {
+          const g = d.data;
+          box.style.background = 'rgba(16,185,129,0.1)';
+          box.style.border = '1px solid rgba(16,185,129,0.3)';
+          box.style.color = '#10b981';
+          box.innerHTML = `🟢 <b>代理连通正常!</b> 出口 IP: <code>${g.ip}</code> | 地区: <b>${g.country_name || g.country} · ${g.city || ''}</b> | 时区: <b>${g.timezone}</b> | 延迟: <b>${g.latency_ms}ms</b>`;
+        } else {
+          box.style.background = 'rgba(239,68,68,0.1)';
+          box.style.border = '1px solid rgba(239,68,68,0.3)';
+          box.style.color = '#ef4444';
+          box.innerHTML = `🔴 <b>代理连接失败:</b> ${d.message}`;
+        }
+      } catch(e) {
+        box.style.background = 'rgba(239,68,68,0.1)';
+        box.style.border = '1px solid rgba(239,68,68,0.3)';
+        box.style.color = '#ef4444';
+        box.innerText = '测试请求异常: ' + e;
+      }
+    }
+
+    function clearProxyInModal() {
+      document.getElementById('edit-proxy-val').value = '';
+      const box = document.getElementById('modal-proxy-test-box');
+      box.style.display = 'block';
+      box.style.background = 'rgba(56,189,248,0.1)';
+      box.style.border = '1px solid rgba(56,189,248,0.3)';
+      box.style.color = '#38bdf8';
+      box.innerHTML = 'ℹ️ 已清空输入。点击【保存代理配置】后该账号将恢复为直连模式。';
+    }
+
+    async function submitEditProxy() {
+      const name = editingAccountName;
+      const proxy = document.getElementById('edit-proxy-val').value.trim() || null;
+      const autoAlign = document.getElementById('edit-proxy-align-fp').checked;
+      const btn = document.getElementById('btn-submit-proxy');
+
+      btn.disabled = true;
+      btn.innerText = '正在保存...';
+
+      try {
+        const res = await fetch('/api/accounts', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            name,
+            proxy,
+            auto_align_proxy: autoAlign
+          })
+        });
+        const d = await res.json();
+        if (d.status === 'ok') {
+          if (autoAlign && proxy) {
+            try {
+              await fetch('/api/accounts/fingerprint/align-proxy', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name})
+              });
+            } catch(e) {}
+          }
+          toast(`账号 [${name}] 的代理配置已成功更新！`);
+          closeEditProxyModal();
+          fetchStatus();
+        } else {
+          toast('保存失败: ' + (d.message || '未知错误'));
+        }
+      } catch(e) {
+        toast('请求失败: ' + e);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '保存代理配置';
+      }
     }
 
     async function toggleAcc(name, enabled) {
@@ -1410,15 +2067,500 @@ HTML_CONTENT = """<!DOCTYPE html>
       toast(d.message || '请求已发送');
     }
 
-    async function loadLogsNow() {
-      try {
-        const res = await fetch('/api/logs');
-        const text = await res.text();
-        const box = document.getElementById('log-box');
-        box.innerText = text || '暂无日志记录';
-        box.scrollTop = box.scrollHeight;
-      } catch(e) {}
+    /* 现代化轻量级实时日志控制台引擎 */
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
     }
+
+    function startLogPolling() {
+      if (logPollTimer) clearInterval(logPollTimer);
+      if (isPollPaused || pollIntervalMs === 'manual') return;
+      const ms = parseInt(pollIntervalMs, 10) || 3000;
+      logPollTimer = setInterval(() => loadLogsNow(false), ms);
+    }
+
+    function toggleLogPoll() {
+      isPollPaused = !isPollPaused;
+      const btn = document.getElementById('btn-poll-toggle');
+      const statusEl = document.getElementById('metric-poll-status');
+      if (isPollPaused) {
+        if (logPollTimer) clearInterval(logPollTimer);
+        btn.innerHTML = '▶️ 恢复自动拉取';
+        btn.classList.add('btn-warning-sub');
+        btn.classList.remove('btn-secondary');
+        if (statusEl) statusEl.innerHTML = '<span style="color:var(--warning);">⏸ 已暂停拉取</span>';
+        toast('已暂停实时日志自动拉取，可安心向上翻看');
+      } else {
+        btn.innerHTML = '⏸️ 暂停自动拉取';
+        btn.classList.remove('btn-warning-sub');
+        btn.classList.add('btn-secondary');
+        if (statusEl) statusEl.innerHTML = `<span style="color:var(--success);">● 每 ${parseInt(pollIntervalMs)/1000}s 同步</span>`;
+        startLogPolling();
+        loadLogsNow(true);
+        toast('已恢复实时日志自动拉取');
+      }
+    }
+
+    function changePollInterval(val) {
+      pollIntervalMs = val;
+      const statusEl = document.getElementById('metric-poll-status');
+      if (val === 'manual') {
+        if (logPollTimer) clearInterval(logPollTimer);
+        if (statusEl) statusEl.innerHTML = '<span style="color:var(--text-sub);">✋ 仅手动刷新</span>';
+        toast('已切换为手动刷新模式');
+      } else {
+        const sec = parseInt(val, 10) / 1000;
+        if (statusEl) statusEl.innerHTML = `<span style="color:var(--success);">● 每 ${sec}s 同步</span>`;
+        if (!isPollPaused) startLogPolling();
+        toast(`已调整刷新频率为每 ${sec} 秒`);
+      }
+    }
+
+    function setupLogScrollListener() {
+      const box = document.getElementById('log-box');
+      const pill = document.getElementById('new-logs-pill');
+      if (!box) return;
+      box.addEventListener('scroll', () => {
+        const distanceToBottom = box.scrollHeight - box.scrollTop - box.clientHeight;
+        if (distanceToBottom <= 45) {
+          if (!isAutoScroll) {
+            isAutoScroll = true;
+            updateAutoScrollUI();
+          }
+          unreadNewLogsCount = 0;
+          if (pill) pill.style.display = 'none';
+        } else {
+          if (isAutoScroll) {
+            isAutoScroll = false;
+            updateAutoScrollUI();
+          }
+        }
+      });
+    }
+
+    function scrollToBottom(smooth = true) {
+      const box = document.getElementById('log-box');
+      const pill = document.getElementById('new-logs-pill');
+      if (!box) return;
+      isAutoScroll = true;
+      updateAutoScrollUI();
+      unreadNewLogsCount = 0;
+      if (pill) pill.style.display = 'none';
+      box.scrollTo({
+        top: box.scrollHeight,
+        behavior: smooth ? 'smooth' : 'auto'
+      });
+    }
+
+    function toggleAutoScroll() {
+      if (isAutoScroll) {
+        isAutoScroll = false;
+        updateAutoScrollUI();
+        toast('已关闭自动贴底，自由翻阅历史中');
+      } else {
+        scrollToBottom(true);
+        toast('已锁定最底部');
+      }
+    }
+
+    function updateAutoScrollUI() {
+      const btn = document.getElementById('btn-autoscroll');
+      if (!btn) return;
+      if (isAutoScroll) {
+        btn.innerHTML = '📌 自动贴底: 开';
+        btn.className = 'btn btn-primary-sub btn-sm';
+      } else {
+        btn.innerHTML = '📌 自由翻看 (未贴底)';
+        btn.className = 'btn btn-secondary btn-sm';
+      }
+    }
+
+    function extractLogInsights(lines, runnerState) {
+      let errorCount = 0;
+      let warnCount = 0;
+      let activeState = '空闲中 (待机就绪)';
+      let isRunning = false;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line.trim()) continue;
+        const l = line.toLowerCase();
+
+        if (l.includes('error') || l.includes('exception') || l.includes('失败') || l.includes('失效') || l.includes('熔断') || l.includes('timed out') || l.includes('failed')) {
+          errorCount++;
+        } else if (l.includes('warn') || l.includes('警告') || l.includes('未推进') || l.includes('重试') || l.includes('未达标')) {
+          warnCount++;
+        }
+      }
+
+      // 1. 若后端 runnerState 明确处于运行状态
+      if (runnerState && runnerState.running === true) {
+        isRunning = true;
+        let hint = (runnerState.last_line || '').trim();
+        if (hint) {
+          hint = hint.replace(/^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*/, '').replace(/^.*?>>>\s*/, '').replace(/^.*?⏰\s*/, '');
+          activeState = hint;
+        } else {
+          activeState = '任务流水线执行中...';
+        }
+      } else {
+        // 后端 runner 为空闲或未提供 runnerState：逆序扫描日志末尾关键事件
+        let foundFinalStatus = false;
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const line = lines[i].trim();
+          if (!line) continue;
+
+          // 优先匹配任务终态/完成/退出事件（一旦检测到最新的标志为结束，立即判定为空闲）
+          if (line.includes('=== 运行结束') ||
+              line.includes('<<< 任务执行完毕') ||
+              line.includes('已完全关闭浏览器') ||
+              line.includes('全账号任务已完成') ||
+              line.includes('单账号任务已完成') ||
+              line.includes('所有账号自动化任务执行完毕') ||
+              line.includes('今日任务已全部完成') ||
+              line.includes('今日暂无执行日志') ||
+              line.includes('等待下一次定时任务')) {
+            isRunning = false;
+            activeState = '空闲中 (任务已执行完毕)';
+            foundFinalStatus = true;
+            break;
+          }
+
+          // 仅当后端 runner 未明确声明 false 时，才允许通过日志启动标识别为运行中（防止旧的阶段性日志造成状态卡死）
+          if ((!runnerState || runnerState.running !== false) &&
+              (line.includes('>>> 开始执行任务') ||
+               line.includes('正在自动唤醒') ||
+               line.includes('开始微软账号全自动登录') ||
+               line.includes('=== 运行开始') ||
+               line.includes('>>> 开始浏览器阶段') ||
+               (line.includes('搜索') && (line.includes('停留') || line.includes('计数'))))) {
+            isRunning = true;
+            let clean = line.replace(/^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*/, '').replace(/^.*?>>>\s*/, '').replace(/^.*?⏰\s*/, '');
+            activeState = clean;
+            foundFinalStatus = true;
+            break;
+          }
+        }
+
+        if (!foundFinalStatus) {
+          isRunning = false;
+          activeState = '空闲中 (待机就绪)';
+        }
+      }
+
+      // 状态卡片
+      const pulseEl = document.getElementById('metric-pulse');
+      const stateTextEl = document.getElementById('metric-state-text');
+      const stateBadgeEl = document.getElementById('metric-state-badge');
+      if (pulseEl && stateTextEl && stateBadgeEl) {
+        if (isRunning) {
+          pulseEl.style.background = '#22c55e';
+          pulseEl.style.boxShadow = '0 0 8px #22c55e';
+          stateBadgeEl.className = 'badge badge-success';
+          stateBadgeEl.innerText = '运行中';
+          stateTextEl.innerHTML = `<span class="pulse-dot"></span><span style="font-size:13px; font-weight:600; color:#fff;" title="${escapeHtml(activeState)}">${escapeHtml(activeState)}</span>`;
+        } else {
+          pulseEl.style.background = '#64748b';
+          pulseEl.style.boxShadow = 'none';
+          stateBadgeEl.className = 'badge badge-info';
+          stateBadgeEl.innerText = '空闲';
+          stateTextEl.innerHTML = `<span class="pulse-dot" style="background:#64748b; box-shadow:none;"></span><span style="font-size:13px; font-weight:normal; color:var(--text-sub);">${escapeHtml(activeState)}</span>`;
+        }
+      }
+
+      // 异常卡片
+      const errTextEl = document.getElementById('metric-error-text');
+      if (errTextEl) {
+        if (errorCount > 0) {
+          errTextEl.innerHTML = `<span style="color:var(--danger); font-size:13px; font-weight:700;">🔴 检出 ${errorCount} 项异常 ${warnCount ? `(${warnCount}项警告)` : ''}</span>`;
+        } else if (warnCount > 0) {
+          errTextEl.innerHTML = `<span style="color:var(--warning); font-size:13px; font-weight:600;">🟡 0 异常 · ${warnCount} 项警告</span>`;
+        } else {
+          errTextEl.innerHTML = `<span style="color:var(--success); font-size:13px;">🟢 全部正常 (0 异常)</span>`;
+        }
+      }
+
+      // 总行数
+      const countEl = document.getElementById('metric-lines-count');
+      if (countEl) countEl.innerText = lines.length;
+    }
+
+    function renderLogRows() {
+      const box = document.getElementById('log-box');
+      if (!box) return;
+      if (!rawLogLines || rawLogLines.length === 0) {
+        box.innerHTML = '<div style="color:var(--text-sub); padding:16px;">暂无日志记录。</div>';
+        const st = document.getElementById('terminal-stats');
+        if (st) st.innerText = '0 行日志';
+        return;
+      }
+
+      let html = '';
+      let matchedCount = 0;
+      const kw = activeSearchKeyword.trim().toLowerCase();
+      let currentSectionAccount = null;
+
+      for (let i = 0; i < rawLogLines.length; i++) {
+        const line = rawLogLines[i];
+        if (!line.trim()) continue;
+
+        // 识别段落所属账号 (例如: === 账号 [gkerswang] 今日落盘日志 ===)
+        const accHeaderMatch = line.match(/=== 账号 \[([a-zA-Z0-9_\-]+)\] 今日落盘日志 ===/);
+        if (accHeaderMatch) {
+          currentSectionAccount = accHeaderMatch[1];
+        } else if (line.startsWith('=== 实时内存日志') || line.startsWith('=== 系统')) {
+          currentSectionAccount = null;
+        }
+
+        // 1. 账号过滤
+        if (activeAccountFilter !== 'all') {
+          if (activeAccountFilter === '__system__') {
+            if (currentSectionAccount) continue;
+            const hasAcc = knownAccounts.some(acc => line.includes(`[${acc}]`) || line.includes(`账号 [${acc}]`));
+            if (hasAcc) continue;
+          } else {
+            // 当前处于特定账号视图
+            const isMatch = (currentSectionAccount === activeAccountFilter) ||
+                            line.includes(`[${activeAccountFilter}]`) ||
+                            line.includes(`[${activeAccountFilter} `) ||
+                            line.includes(`账号 [${activeAccountFilter}]`) ||
+                            line.includes(`任务: ${activeAccountFilter}`) ||
+                            line.includes(`=== 账号 [${activeAccountFilter}]`);
+            if (!isMatch) continue;
+          }
+        }
+
+        const l = line.toLowerCase();
+        const isErr = l.includes('error') || l.includes('exception') || l.includes('失败') || l.includes('失效') || l.includes('熔断') || l.includes('timed out') || l.includes('failed');
+        const isWarn = l.includes('warn') || l.includes('警告') || l.includes('未推进') || l.includes('重试') || l.includes('未达标');
+        const isSucc = l.includes('成功') || l.includes('完成') || l.includes('[ok]') || l.includes('all_ok') || l.includes('入账') || l.includes('有效') || l.includes('自适应对齐至');
+        const isBanner = line.startsWith('===') || line.startsWith('>>>') || line.startsWith('<<<');
+        const isSearch = l.includes('搜索') || l.includes('热搜') || l.includes('打卡') || l.includes('答题') || l.includes('资讯') || l.includes('阅读');
+
+        // 2. 级别过滤
+        if (activeLevelFilter === 'error' && !isErr && !isWarn) continue;
+        if (activeLevelFilter === 'milestone' && !isBanner && !isSucc) continue;
+        if (activeLevelFilter === 'search' && !isSearch) continue;
+
+        // 3. 搜索关键词过滤
+        if (kw && !l.includes(kw)) continue;
+
+        matchedCount++;
+
+        let rowClass = 'l-row';
+        if (isErr) rowClass += ' l-err';
+        else if (isWarn) rowClass += ' l-warn';
+        else if (isBanner) rowClass += ' l-banner';
+        else if (isSucc) rowClass += ' l-succ';
+
+        let escaped = escapeHtml(line);
+
+        // 高亮时间戳
+        escaped = escaped.replace(/^(\[\d{2}:\d{2}:\d{2}\]|\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/g, '<span class="l-ts">$1</span>');
+
+        // 仅当方括号内的名字确实是系统配置的真实账号时，才渲染为账号徽标！
+        // 绝不误伤 [1]、[2]、[1/10篇]、[后台并行]、[search_direct]
+        escaped = escaped.replace(/\[([a-zA-Z0-9_\-]+)\]/g, (match, p1) => {
+          if (knownAccounts.includes(p1)) {
+            return `<span class="l-acc-badge">${p1}</span>`;
+          }
+          return match;
+        });
+
+        // 高亮关键词 (安全无正则异常匹配)
+        if (kw) {
+          const lowerEsc = escaped.toLowerCase();
+          const kLen = kw.length;
+          let sIdx = 0;
+          let resHtml = '';
+          while (true) {
+            const fIdx = lowerEsc.indexOf(kw, sIdx);
+            if (fIdx === -1) {
+              resHtml += escaped.slice(sIdx);
+              break;
+            }
+            resHtml += escaped.slice(sIdx, fIdx);
+            resHtml += '<mark class="l-mark">' + escaped.slice(fIdx, fIdx + kLen) + '</mark>';
+            sIdx = fIdx + kLen;
+          }
+          escaped = resHtml;
+        }
+
+        html += `<div class="${rowClass}"><span class="l-num">${matchedCount}</span><span class="l-content">${escaped}</span></div>`;
+      }
+
+      box.innerHTML = html || '<div style="color:var(--text-sub); padding:16px;">无符合当前筛选条件的日志行。</div>';
+      const st = document.getElementById('terminal-stats');
+      if (st) st.innerText = `共 ${rawLogLines.length} 行 · 当前显示 ${matchedCount} 行`;
+    }
+
+    function onSearchInput(val) {
+      activeSearchKeyword = val;
+      const clearBtn = document.getElementById('log-search-clear');
+      if (clearBtn) clearBtn.style.display = val ? 'inline' : 'none';
+      renderLogRows();
+      if (isAutoScroll) scrollToBottom(false);
+    }
+
+    function clearSearch() {
+      const input = document.getElementById('log-search-input');
+      if (input) input.value = '';
+      onSearchInput('');
+    }
+
+    function quickFilterError() {
+      activeLevelFilter = activeLevelFilter === 'error' ? 'all' : 'error';
+      const sel = document.getElementById('log-level-filter');
+      if (sel) sel.value = activeLevelFilter;
+      renderLogRows();
+      toast(activeLevelFilter === 'error' ? '已筛选全部异常与告警日志' : '已重置日志级别筛选');
+    }
+
+    async function onAccountFilterChange(val) {
+      activeAccountFilter = val;
+      lastLogRawText = '';
+      toast(val === 'all' ? '已切换为全部日志' : (val === '__system__' ? '已切换为仅系统/调度日志' : `正在切换至账号 [${val}] 的完整日志...`));
+      await loadLogsNow(true);
+      if (isAutoScroll) scrollToBottom(false);
+    }
+
+    function onLevelFilterChange(val) {
+      activeLevelFilter = val;
+      renderLogRows();
+      if (isAutoScroll) scrollToBottom(false);
+    }
+
+    function toggleWordWrap() {
+      isWordWrap = !isWordWrap;
+      const box = document.getElementById('log-box');
+      const btn = document.getElementById('btn-wrap-toggle');
+      if (box && btn) {
+        if (isWordWrap) {
+          box.classList.add('wrap-mode');
+          btn.innerHTML = '↩ 折行: 开';
+          btn.className = 'btn btn-primary-sub btn-sm';
+        } else {
+          box.classList.remove('wrap-mode');
+          btn.innerHTML = '↩ 折行: 关';
+          btn.className = 'btn btn-secondary btn-sm';
+        }
+      }
+    }
+
+    function toggleFullscreen() {
+      isFullscreen = !isFullscreen;
+      const card = document.getElementById('log-card');
+      const btn = document.getElementById('btn-fullscreen');
+      if (card && btn) {
+        if (isFullscreen) {
+          card.classList.add('fullscreen');
+          btn.innerHTML = '⤓ 退出全屏';
+          btn.className = 'btn btn-warning-sub btn-sm';
+        } else {
+          card.classList.remove('fullscreen');
+          btn.innerHTML = '⛶ 全屏';
+          btn.className = 'btn btn-secondary btn-sm';
+        }
+      }
+    }
+
+    function copyDisplayedLogs() {
+      if (!rawLogLines || rawLogLines.length === 0) {
+        toast('暂无日志可复制');
+        return;
+      }
+      const box = document.getElementById('log-box');
+      if (!box) return;
+      const text = box.innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        toast('已复制当前视图显示的全部日志');
+      }).catch(() => {
+        toast('复制失败，请手动选取');
+      });
+    }
+
+    function downloadLogsFile() {
+      if (!rawLogLines || rawLogLines.length === 0) {
+        toast('暂无日志可导出');
+        return;
+      }
+      const text = rawLogLines.join(String.fromCharCode(10));
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const dateStr = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      a.download = `msr_bot_logs_${dateStr}.log`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast('日志文件导出成功');
+    }
+
+    function clearLogView() {
+      rawLogLines = [];
+      lastLogRawText = '';
+      renderLogRows();
+      toast('已清空当前屏幕显示');
+    }
+
+    async function loadLogsNow(force = false) {
+      if (isPollPaused && !force) return;
+      try {
+        let url = '/api/logs?format=json';
+        if (activeAccountFilter && activeAccountFilter !== 'all') {
+          url += `&acc=${encodeURIComponent(activeAccountFilter)}`;
+        }
+        const res = await fetch(url);
+        const data = await res.json();
+        const text = data.text || '';
+        const runner = data.runner || null;
+
+        const syncEl = document.getElementById('log-last-sync');
+        const timeStr = new Date().toLocaleTimeString();
+        if (syncEl) syncEl.innerText = timeStr;
+
+        if (!force && text === lastLogRawText) {
+          extractLogInsights(rawLogLines, runner);
+          return;
+        }
+
+        const oldLinesCount = rawLogLines.length;
+        lastLogRawText = text;
+        rawLogLines = (text || '').split(String.fromCharCode(10));
+        const newLinesCount = rawLogLines.length - oldLinesCount;
+
+        const pill = document.getElementById('new-logs-pill');
+        const countBadge = document.getElementById('pill-count-badge');
+        if (!isAutoScroll && newLinesCount > 0 && oldLinesCount > 0) {
+          unreadNewLogsCount += newLinesCount;
+          if (pill && countBadge) {
+            countBadge.innerText = unreadNewLogsCount;
+            pill.style.display = 'flex';
+          }
+        }
+
+        extractLogInsights(rawLogLines, runner);
+        renderLogRows();
+
+        if (isAutoScroll) {
+          const box = document.getElementById('log-box');
+          if (box) box.scrollTop = box.scrollHeight;
+        }
+      } catch(e) {
+        const syncEl = document.getElementById('log-last-sync');
+        if (syncEl) syncEl.innerText = '连接异常';
+      }
+    }
+
 
     /* 登录弹窗逻辑 (根据当前有效性展示提示) */
     function openLoginModal(name, isReLogin) {
@@ -1667,6 +2809,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     // 页面启动
     window.addEventListener('DOMContentLoaded', () => {
       fetchStatus();
+      setupLogScrollListener();
     });
   </script>
 </body>
@@ -1708,7 +2851,7 @@ class WebHandler(BaseHTTPRequestHandler):
             return
 
         if path == '/api/logs':
-            self._handle_logs()
+            self._handle_logs(u)
             return
 
         if path == '/api/auth/cookies':
@@ -1812,12 +2955,24 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._json_resp({'status': 'error', 'message': '账号名不能为空'}, code=400)
                 return
             target = next((a for a in accs if a['name'] == name), None)
+            old_proxy = target.get('proxy') if target else None
+            new_proxy = payload.get('proxy')
             if target:
                 target.update(payload)
             else:
                 accs.append(payload)
             config.save_accounts(accs)
-            append_live_log(f'保存账号配置: {name}')
+
+            # 代理变更时自动清理旧的地理信息缓存，促使系统重新探测新代理出口
+            if old_proxy != new_proxy:
+                try:
+                    geo_f = config.pfile(name, 'proxy_geo.json')
+                    if os.path.isfile(geo_f):
+                        os.remove(geo_f)
+                except Exception:
+                    pass
+
+            append_live_log(f'保存账号配置: {name} (代理: {new_proxy or "直连"})')
             self._json_resp({'status': 'ok'})
             return
 
@@ -2054,7 +3209,14 @@ class WebHandler(BaseHTTPRequestHandler):
             'daily_time': sch.get('daily_time', '01:30'),
             'status': '运行中' if sch.get('daily_enabled', True) else '已暂停'
         }
-        self._json_resp({'accounts': detailed, 'scheduler': scheduler_info, 'time': time.strftime('%F %T')})
+        with RUNNER_STATE_LOCK:
+            runner_copy = dict(RUNNER_STATE)
+        self._json_resp({
+            'accounts': detailed,
+            'scheduler': scheduler_info,
+            'runner': runner_copy,
+            'time': time.strftime('%F %T')
+        })
 
     def _handle_credential_login(self, payload):
         from msr import auth, config
@@ -2114,15 +3276,27 @@ class WebHandler(BaseHTTPRequestHandler):
             return
 
         def bg_runner():
+            with RUNNER_STATE_LOCK:
+                RUNNER_STATE['running'] = True
+                RUNNER_STATE['target'] = name or '--all'
+                RUNNER_STATE['started_at'] = time.time()
+                RUNNER_STATE['last_line'] = '正在启动任务...'
+                RUNNER_STATE['exit_code'] = None
+
             append_live_log(f'>>> 开始执行任务: {name or "--all"}')
             cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', name or '--all']
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             for line in iter(proc.stdout.readline, ''):
                 line = line.strip()
                 if line:
+                    with RUNNER_STATE_LOCK:
+                        RUNNER_STATE['last_line'] = line
                     append_live_log(line)
             proc.stdout.close()
             proc.wait()
+            with RUNNER_STATE_LOCK:
+                RUNNER_STATE['running'] = False
+                RUNNER_STATE['exit_code'] = proc.returncode
             append_live_log(f'<<< 任务执行完毕 (exit={proc.returncode})')
 
         t = threading.Thread(target=bg_runner)
@@ -2130,29 +3304,83 @@ class WebHandler(BaseHTTPRequestHandler):
         t.start()
         self._json_resp({'status': 'ok', 'message': '后台执行进程已启动'})
 
-    def _handle_logs(self):
+    def _handle_logs(self, u=None):
         from msr import config
         lines = []
+
+        acc_filter = None
+        format_param = 'text'
+        if u and getattr(u, 'query', None):
+            params = urllib.parse.parse_qs(u.query)
+            acc_filter = params.get('acc', [None])[0]
+            format_param = params.get('format', ['text'])[0]
+
+        all_accounts = [a['name'] for a in config.accounts()]
+
+        # 1. 实时内存日志流过滤
         with LIVE_LOGS_LOCK:
             if LIVE_LOGS:
-                lines.append('=== 实时内存日志 (最新) ===')
-                lines.extend(LIVE_LOGS[-200:])
-                lines.append('')
+                if acc_filter == '__system__':
+                    matched = [l for l in LIVE_LOGS if not any(f'[{acc}]' in l or f'账号 [{acc}]' in l for acc in all_accounts)]
+                    if matched:
+                        lines.append('=== 实时内存日志 (系统与调度) ===')
+                        lines.extend(matched[-300:])
+                        lines.append('')
+                elif acc_filter and acc_filter != 'all':
+                    matched = [l for l in LIVE_LOGS if f'[{acc_filter}]' in l or f'[{acc_filter} ' in l or f'账号 [{acc_filter}]' in l or f'任务: {acc_filter}' in l]
+                    if matched:
+                        lines.append(f'=== 实时内存日志 (账号: {acc_filter}) ===')
+                        lines.extend(matched[-300:])
+                        lines.append('')
+                else:
+                    lines.append('=== 实时内存日志 (最新) ===')
+                    lines.extend(LIVE_LOGS[-300:])
+                    lines.append('')
 
+        # 2. 落盘日志提取
         today = time.strftime('%Y-%m-%d')
-        for acc in config.accounts():
-            name = acc['name']
-            log_f = os.path.join(config.pfile(name, 'logs'), f'{today}.log')
-            if os.path.isfile(log_f):
-                lines.append(f'=== 账号 [{name}] 今日落盘日志 ===')
-                try:
-                    with open(log_f, 'r', encoding='utf-8', errors='ignore') as f:
-                        lines.extend(f.readlines()[-60:])
-                except Exception:
-                    pass
-                lines.append('')
+        if acc_filter == '__system__':
+            for cron_p in (os.path.join(getattr(config, 'HOME', '/data'), 'cron.log'), '/data/cron.log', 'cron.log'):
+                if os.path.isfile(cron_p):
+                    lines.append('=== 系统 Cron 执行日志 ===')
+                    try:
+                        with open(cron_p, 'r', encoding='utf-8', errors='ignore') as f:
+                            lines.extend(f.readlines()[-200:])
+                    except Exception:
+                        pass
+                    lines.append('')
+                    break
+        else:
+            accounts = config.accounts()
+            if acc_filter and acc_filter != 'all':
+                accounts = [a for a in accounts if a['name'] == acc_filter]
+
+            for acc in accounts:
+                name = acc['name']
+                log_f = os.path.join(config.pfile(name, 'logs'), f'{today}.log')
+                if os.path.isfile(log_f):
+                    lines.append(f'=== 账号 [{name}] 今日落盘日志 ===')
+                    try:
+                        with open(log_f, 'r', encoding='utf-8', errors='ignore') as f:
+                            lines.extend(f.readlines()[-400:])
+                    except Exception:
+                        pass
+                    lines.append('')
 
         text = '\n'.join(lines) if lines else '今日暂无执行日志。'
+
+        if format_param == 'json':
+            with RUNNER_STATE_LOCK:
+                st_copy = dict(RUNNER_STATE)
+            self._json_resp({
+                'status': 'ok',
+                'runner': st_copy,
+                'text': text,
+                'lines_count': len(lines),
+                'timestamp': time.time(),
+            })
+            return
+
         self.send_response(200)
         self.send_header('Content-Type', 'text/plain; charset=utf-8')
         self.send_cors()
@@ -2193,11 +3421,20 @@ def _start_scheduler_daemon():
 
                 if now_hm == daily_time and last_trigger_date != today_str:
                     last_trigger_date = today_str
+                    with RUNNER_STATE_LOCK:
+                        RUNNER_STATE['running'] = True
+                        RUNNER_STATE['target'] = '--all (每日定时)'
+                        RUNNER_STATE['started_at'] = time.time()
+                        RUNNER_STATE['last_line'] = '到达定时时间，唤醒任务...'
+                        RUNNER_STATE['exit_code'] = None
+
                     append_live_log(f'⏰ [定时调度] 到达每日预定时间 {daily_time}，正在自动唤醒全账号任务流程...')
 
                     jitter_max = int(sch.get('random_start_delay_max', 0))
                     if jitter_max > 0 and not sch.get('fast_mode'):
                         jitter_sec = random.uniform(0, jitter_max * 60)
+                        with RUNNER_STATE_LOCK:
+                            RUNNER_STATE['last_line'] = f'随机抖动等待中 ({jitter_sec / 60:.1f} 分钟)'
                         append_live_log(f'⏰ [定时调度] 开启随机抖动，等待 {jitter_sec / 60:.1f} 分钟后开始执行...')
                         time.sleep(jitter_sec)
 
@@ -2210,9 +3447,14 @@ def _start_scheduler_daemon():
                     for line in iter(proc.stdout.readline, ''):
                         line = line.strip()
                         if line:
+                            with RUNNER_STATE_LOCK:
+                                RUNNER_STATE['last_line'] = line
                             append_live_log(line)
                     proc.stdout.close()
                     proc.wait()
+                    with RUNNER_STATE_LOCK:
+                        RUNNER_STATE['running'] = False
+                        RUNNER_STATE['exit_code'] = proc.returncode
                     append_live_log(f'⏰ [定时调度] 全账号任务已完成 (exit={proc.returncode})，浏览器已完全退出并释放系统内存。下次将在明日 {daily_time} 自动执行。')
             except Exception as ex:
                 append_live_log(f'⏰ [定时调度异常]: {ex}')

@@ -66,7 +66,26 @@ try:
     assert any(a['name'] == 'web_test_acc' for a in accs)
     print('[OK] /api/accounts 添加账号正常')
 
-    # 3.1 测试 POST /api/auth/credential 账号密码自动化登录接口 (Mock 测试)
+    # 3.1 测试 POST /api/accounts 修改现有账号代理并自动清理旧 geo 缓存
+    fake_geo = config.pfile('web_test_acc', 'proxy_geo.json')
+    with open(fake_geo, 'w') as f:
+        f.write('{"cached": true}')
+    assert os.path.isfile(fake_geo)
+
+    req = urllib.request.Request(f'{base_url}/api/accounts',
+                                 data=json.dumps({'name': 'web_test_acc', 'proxy': 'socks5://127.0.0.1:1088'}).encode(),
+                                 headers={'Content-Type': 'application/json'}, method='POST')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        d = json.loads(resp.read().decode())
+        assert d.get('status') == 'ok'
+
+    acc_obj = [a for a in config.accounts() if a['name'] == 'web_test_acc'][0]
+    assert acc_obj['proxy'] == 'socks5://127.0.0.1:1088'
+    assert not os.path.isfile(fake_geo)
+    print('[OK] /api/accounts 修改代理并自动失效旧出口缓存正常')
+
+    # 3.2 测试 POST /api/auth/credential 账号密码自动化登录接口 (Mock 测试)
     from msr import auth
     orig_login = auth.login_with_credential
     auth.login_with_credential = lambda name, username, password, proxy=None, log_cb=None: {
@@ -299,13 +318,22 @@ try:
     assert val_reset == 180
     print('[OK] /api/settings/reset 恢复默认值正常')
 
-    # 6. 测试 GET /api/logs
+    # 6. 测试 GET /api/logs (纯文本与 JSON 结构化元数据)
     req = urllib.request.Request(f'{base_url}/api/logs')
     with urllib.request.urlopen(req, timeout=5) as resp:
         assert resp.status == 200
         text = resp.read().decode()
         assert len(text) > 0
-    print('[OK] /api/logs 正常')
+
+    req_json = urllib.request.Request(f'{base_url}/api/logs?format=json')
+    with urllib.request.urlopen(req_json, timeout=5) as resp:
+        assert resp.status == 200
+        d = json.loads(resp.read().decode())
+        assert d['status'] == 'ok'
+        assert 'runner' in d
+        assert 'running' in d['runner']
+        assert 'text' in d
+    print('[OK] /api/logs (含 format=json 结构化元数据) 正常')
 
     # 7. 测试 DELETE /api/accounts 删除账号
     req = urllib.request.Request(f'{base_url}/api/accounts?name=web_test_acc', method='DELETE')
