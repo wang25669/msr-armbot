@@ -251,14 +251,24 @@ def inspect_login_page(cdp):
         }
         
         // 2. 账号与风控错误拦截
-        if (text.includes('此 Microsoft 帐户不存在') || text.includes("That Microsoft account doesn't exist")) {
+        const lowerText = text.toLowerCase();
+        if (text.includes('此 Microsoft 帐户不存在') || lowerText.includes("that microsoft account doesn't exist") || lowerText.includes("account doesn't exist")) {
             return { type: 'error', error: '此 Microsoft 帐户不存在，请核对用户名' };
         }
-        if (text.includes('密码不正确') || text.includes('Your account or password is incorrect')) {
+        if (text.includes('密码不正确') || text.includes('此密码不正确') || text.includes('该密码不正确') || lowerText.includes('password is incorrect') || lowerText.includes('your account or password is incorrect')) {
             return { type: 'error', error: '密码不正确，请核对密码' };
         }
-        if (text.includes('此帐户已被锁定') || text.includes('Your account has been locked') || text.includes('我们检测到异常活动')) {
+        if (text.includes('此帐户已被锁定') || lowerText.includes('account has been locked') || text.includes('我们检测到异常活动') || lowerText.includes('unusual activity')) {
             return { type: 'error', error: '该微软账户触发了安全风控拦截或已被锁定，需通过官方渠道重置' };
+        }
+
+        // 检查输入字段的验证错误信息 (如 FluentUI field validationMessage)
+        const valMsgEl = document.querySelector('[class*="validationMessage"], [id*="validationMessage"], [role="alert"].error');
+        if (valMsgEl && valMsgEl.innerText.trim()) {
+            const vt = valMsgEl.innerText.trim();
+            if (vt.toLowerCase().includes('incorrect') || vt.includes('不正确')) {
+                return { type: 'error', error: '密码不正确，请核对密码' };
+            }
         }
 
         // 3. 保持登录状态 (KMSI) 弹窗
@@ -507,23 +517,38 @@ class LoginSession:
                     self.log(f'❌ 浏览器网络加载失败: {curr_url}')
                     break
 
-                # A. 优先检查当前是否有有效 Cookie (可能已登录或者在任何步骤后完成)
+                # A. 优先检查当前是否有有效微软登录态并同步激活 Bing
                 try:
-                    res = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com']})
+                    res = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com', 'https://rewards.bing.com']})
                     cks = res.get('cookies', [])
                     diag = cookie_mod.validate_cookies(cks)
-                    if diag.get('has_auth_u') or ('account.microsoft.com' in curr_url) or ('rewards.bing.com' in curr_url) or (password_injected and diag.get('has_muid')):
+                    cookie_names = {c.get('name') for c in cks}
+                    has_ms_auth = bool({'ESTSAUTH', 'ESTSAUTHPERSISTENT', 'WLSSC', 'RPSTAuth'} & cookie_names)
+                    has_post_url = any(u in curr_url for u in ('account.microsoft.com', 'rewards.bing.com', 'myaccount.microsoft.com', 'privacynotice.account.microsoft.com'))
+                    is_authenticated = diag.get('has_auth_u') or has_post_url or (password_injected and has_ms_auth)
+
+                    if is_authenticated:
                         self.status = 'running'
-                        self.message = '检测到已进入微软会话，正在导航至 Bing 提取并固化全量 Cookie...'
-                        self.log('检测到已进入微软会话，正在导航至 Bing 提取并固化全量 Cookie...')
-                        browser.navigate(self.cdp, 'https://www.bing.com/')
+                        self.message = '检测到已进入微软会话，正在同步激活 Bing / Rewards 登录态...'
+                        self.log('检测到已进入微软会话，正在导航至 Bing SSO 激活登录态与固化 Cookie...')
+                        browser.navigate(self.cdp, 'https://www.bing.com/fd/auth/signin?action=interactive&provider=windows_live')
                         time.sleep(3)
-                        res2 = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com']})
-                        final_cks = res2.get('cookies', [])
-                        diag2 = cookie_mod.validate_cookies(final_cks)
-                        if diag2['has_auth_u'] or diag2['has_muid']:
+                        browser.navigate(self.cdp, 'https://rewards.bing.com/')
+                        time.sleep(3)
+
+                        final_cks = []
+                        diag2 = {'has_auth_u': False}
+                        for _ in range(6):
+                            res2 = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com', 'https://rewards.bing.com']})
+                            final_cks = res2.get('cookies', [])
+                            diag2 = cookie_mod.validate_cookies(final_cks)
+                            if diag2['has_auth_u']:
+                                break
+                            time.sleep(1.5)
+
+                        if diag2['has_auth_u']:
                             config.save_json(config.pfile(self.name, 'cookie.json'), final_cks)
-                            self.log(f'✅ 成功捕获并保存全量 Cookie (共 {len(final_cks)} 条, 含 _U={diag2["has_auth_u"]})')
+                            self.log(f'✅ 成功捕获并保存全量 Cookie (共 {len(final_cks)} 条, 含 _U=True)')
                             self.message = '成功捕获全量 Cookie，正在静默换取 OAuth2 Token...'
                             self.log('正在自动通过登录会话静默换取 OAuth2 Token...')
                             tok = exchange_token_from_cookies(self.name, proxy=self.proxy, cdp=self.cdp, ch=self.ch, log_cb=self.log)
@@ -540,6 +565,8 @@ class LoginSession:
                             self.status = 'success'
                             self.message = '🎉 登录成功！所有凭据已自动固化就绪。'
                             break
+                        else:
+                            self.log('⚠️ 微软会话已建立但 Bing 尚未就绪 _U 凭据，继续等待页面完成 SSO 同步...')
                 except Exception:
                     pass
 

@@ -93,9 +93,9 @@ def validate_cookies(cookies):
     has_muid = 'MUID' in names
     has_srch = any('SRCH' in n for n in names)
     
-    # _U 是 Bing 识别已登录微软账户的核心票据
-    valid = has_u or has_muid
-    reason = 'OK' if valid else '缺少关键登录凭据 (_U 或 MUID)'
+    # _U 是 Bing 识别已登录微软账户的核心票据，绝对不可仅凭匿名追踪票据 MUID 误判为已登录
+    valid = bool(has_u)
+    reason = 'OK' if valid else '缺少核心登录凭据 (_U)'
     return {
         'valid': valid,
         'has_auth_u': has_u,

@@ -22,6 +22,13 @@ diag = cookies.validate_cookies(parsed)
 assert diag['valid'] is True
 assert diag['has_auth_u'] is True
 assert diag['has_muid'] is True
+
+# 验证只有 MUID 没有 _U 时应当判定为未登录 (valid=False)
+diag_no_u = cookies.validate_cookies([{"name": "MUID", "value": "123"}])
+assert diag_no_u['valid'] is False
+assert diag_no_u['has_auth_u'] is False
+assert diag_no_u['has_muid'] is True
+
 print('[OK] JSON 数组解析与凭据校验正常')
 
 # 2. 验证 Raw Header 字符串导入
