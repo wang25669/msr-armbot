@@ -323,6 +323,21 @@ def disguise_edge(cdp, version='141', log=print):
         if (window.WebGLRenderingContext) patchWebGL(WebGLRenderingContext.prototype);
         if (window.WebGL2RenderingContext) patchWebGL(WebGL2RenderingContext.prototype);
       } catch(e) {}
+
+      // 禁用/删除 PublicKeyCredential 并拦截 WebAuthn，防止微软将无头浏览器识别为支持 Passkey/设备密钥
+      try {
+        if ('PublicKeyCredential' in window) {
+          try {
+            delete window.PublicKeyCredential;
+          } catch(e) {
+            window.PublicKeyCredential = undefined;
+          }
+        }
+        if (navigator.credentials) {
+          navigator.credentials.get = () => Promise.reject(new DOMException('Not supported', 'NotSupportedError'));
+          navigator.credentials.create = () => Promise.reject(new DOMException('Not supported', 'NotSupportedError'));
+        }
+      } catch(e) {}
     })()''' % json.dumps(fullver))
     try:
         cdp.call('Emulation.setUserAgentOverride', {
@@ -388,10 +403,33 @@ def mouse_move(cdp, x, y):
 
 
 def mouse_click(cdp, x, y):
-    """在指定视口坐标模拟左键点击。"""
-    cdp.call('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': int(x), 'y': int(y), 'button': 'left', 'clickCount': 1})
-    time.sleep(0.05)
-    cdp.call('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': int(x), 'y': int(y), 'button': 'left'})
+    """在指定视口坐标模拟真人左键点击，双重保障：CDP 原生事件分发 + DOM 辅助触发。"""
+    ix, iy = int(x), int(y)
+    try:
+        cdp.call('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': ix, 'y': iy})
+        time.sleep(0.02)
+        cdp.call('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': ix, 'y': iy, 'button': 'left', 'clickCount': 1})
+        time.sleep(0.05)
+        cdp.call('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': ix, 'y': iy, 'button': 'left', 'clickCount': 1})
+    except Exception:
+        pass
+
+    try:
+        click_script = f'''(() => {{
+            const el = document.elementFromPoint({ix}, {iy});
+            if (el) {{
+                if (typeof el.focus === 'function') el.focus();
+                el.click();
+                const clickable = el.closest('button, a, input, [role="button"], [tabindex], .fui-Button, .btn');
+                if (clickable && clickable !== el) {{
+                    if (typeof clickable.focus === 'function') clickable.focus();
+                    clickable.click();
+                }}
+            }}
+        }})()'''
+        ev(cdp, click_script)
+    except Exception:
+        pass
 
 
 def capture_screenshot(cdp, quality=60):
@@ -516,6 +554,7 @@ class Chromium:
             '--disable-blink-features=AutomationControlled',
             '--disable-extensions',
             '--disable-component-update',
+            '--disable-features=WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationPermitEnterpriseAttestation',
             '--disk-cache-size=33554432',          # 限制磁盘缓存为 32MB，保护 ARM 存储介质
             '--media-cache-size=16777216',         # 限制媒体缓存为 16MB
             '--js-flags=--max-old-space-size=256', # 限制 V8 堆内存为 256MB，防止 ARM OOM 崩溃

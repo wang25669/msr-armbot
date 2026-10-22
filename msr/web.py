@@ -1064,14 +1064,15 @@ HTML_CONTENT = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- 实时远程交互窗口 (用于 Arkose 拼图验证码或复杂质询) -->
+        <!-- 实时远程交互窗口 (用于 Arkose 拼图验证码、选项选择或人工接管) -->
         <div id="interactive-canvas-box" style="display:none; background:#070d19; border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:12px;">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
             <span style="font-size:12px; color:#94a3b8;">🖱️ 实时交互画面 (点击图片可直接点击浏览器网页，如旋转拼图、选择选项):</span>
             <button class="btn btn-secondary btn-sm" onclick="refreshLiveScreenshot()">刷新画面</button>
           </div>
-          <div style="text-align:center; overflow:auto; max-height:380px; background:#000; border-radius:6px;">
-            <img id="live-screen-img" src="" alt="远程浏览器画面加载中..." style="max-width:100%; min-height:220px; background:#070d19; cursor:crosshair; display:inline-block; border-radius:6px;" onclick="handleScreenClick(event)">
+          <div style="position:relative; text-align:center; overflow:auto; max-height:420px; background:#000; border-radius:6px;" id="screen-container">
+            <img id="live-screen-img" src="" alt="远程浏览器画面加载中..." style="max-width:100%; height:auto; background:#070d19; cursor:crosshair; display:inline-block; border-radius:6px;" onclick="handleScreenClick(event)">
+            <div id="click-indicator" style="display:none; position:absolute; width:16px; height:16px; border-radius:50%; background:rgba(59,130,246,0.6); border:2px solid #fff; pointer-events:none; transform:translate(-50%, -50%); transition:opacity 0.3s; z-index:10;"></div>
           </div>
         </div>
 
@@ -2617,19 +2618,45 @@ HTML_CONTENT = """<!DOCTYPE html>
       }
     }
 
+    let _cachedViewport = { w: 1280, h: 757 };
+
     function refreshLiveScreenshot() {
       if (!activeAccountName) return;
       const img = document.getElementById('live-screen-img');
-      img.src = `/api/auth/session/screenshot?name=${encodeURIComponent(activeAccountName)}&_t=${Date.now()}`;
+      if (img) {
+        img.src = `/api/auth/session/screenshot?name=${encodeURIComponent(activeAccountName)}&_t=${Date.now()}`;
+      }
     }
 
     async function handleScreenClick(e) {
       if (!activeAccountName) return;
-      const img = e.target;
-      const scaleX = (img.naturalWidth || img.clientWidth) / img.clientWidth;
-      const scaleY = (img.naturalHeight || img.clientHeight) / img.clientHeight;
-      const x = Math.round(e.offsetX * scaleX);
-      const y = Math.round(e.offsetY * scaleY);
+      const img = document.getElementById('live-screen-img');
+      if (!img) return;
+
+      const rect = img.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
+
+      if (clickX < 0 || clickY < 0 || clickX > rect.width || clickY > rect.height) return;
+
+      // 实时交互微动效
+      const indicator = document.getElementById('click-indicator');
+      if (indicator) {
+        indicator.style.left = (img.offsetLeft + clickX) + 'px';
+        indicator.style.top = (img.offsetTop + clickY) + 'px';
+        indicator.style.display = 'block';
+        indicator.style.opacity = '1';
+        setTimeout(() => { indicator.style.opacity = '0'; }, 350);
+      }
+
+      // 计算真实视口缩放坐标
+      const nw = img.naturalWidth || _cachedViewport.w;
+      const nh = img.naturalHeight || _cachedViewport.h;
+      const scaleX = nw / rect.width;
+      const scaleY = nh / rect.height;
+      const x = Math.round(clickX * scaleX);
+      const y = Math.round(clickY * scaleY);
+
       try {
         await fetch('/api/auth/session/mouse', {
           method: 'POST',
@@ -2637,6 +2664,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           body: JSON.stringify({name: activeAccountName, x, y})
         });
         setTimeout(refreshLiveScreenshot, 500);
+        setTimeout(refreshLiveScreenshot, 1500);
       } catch(err) {
         console.error('Click error:', err);
       }
@@ -2719,6 +2747,10 @@ HTML_CONTENT = """<!DOCTYPE html>
           document.getElementById('login-otp-prompt').innerText = s.otp_prompt || '微软要求输入安全验证码';
         } else {
           otpBox.style.display = 'none';
+        }
+
+        if (s.viewport && s.viewport.w && s.viewport.h) {
+          _cachedViewport = s.viewport;
         }
 
         if (s.status === 'wait_interactive' && !isCanvasOpen) {

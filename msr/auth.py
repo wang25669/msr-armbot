@@ -333,7 +333,28 @@ def inspect_login_page(cdp):
             return { type: 'arkose_challenge' };
         }
 
-        // 11. 通用下一步 / 协议同意 (KMSI 等)
+        // 11. 设备密钥 / 通行密钥 / 安全密钥 / 摆脱密码 / 无密码免密拦截与可跳过弹窗
+        const hasPasskeyPrompt = text.includes('设备密钥') || text.includes('通行密钥') || 
+                                 text.includes('安全密钥') || text.includes('无需密码') || 
+                                 text.includes('摆脱密码') || text.includes('加快登录速度') ||
+                                 lowerText.includes('passkey') || lowerText.includes('security key') || 
+                                 lowerText.includes('break free from your passwords') || 
+                                 lowerText.includes('windows hello');
+
+        const hasDismissBtn = document.querySelector('#iCancel, #cancelButton, [data-test-id=cancelButton], #iShowSkip, #skipButton, [data-test-id=skipButton], #idBtn_Back');
+
+        // 检测是否存在可跳过/取消的按钮或链接 (包括以后再说、暂不、跳过、取消等)
+        const skipOrCancelBtn = Array.from(document.querySelectorAll('button, a, input[type=button], input[type=submit], [role=button]')).find(el => {
+            if (el.offsetParent === null) return false;
+            const t = (el.innerText || el.value || '').trim().toLowerCase();
+            return ['取消', '以后再说', '暂不', '跳过', 'cancel', 'skip for now', 'not now', 'no thanks', 'skip'].includes(t);
+        });
+
+        if (hasPasskeyPrompt || hasDismissBtn || (skipOrCancelBtn && (text.includes('保护') || text.includes('安全') || text.includes('体验') || text.includes('应用') || text.includes('关联')))) {
+            return { type: 'dismissible_prompt', has_passkey: hasPasskeyPrompt };
+        }
+
+        // 12. 通用下一步 / 协议同意 (KMSI 等)
         const nextBtn = document.querySelector('#iNext, #iLandingViewAction, #idSIButton9, input[type=submit], button[type=submit]');
         if (nextBtn && (text.includes('下一步') || text.includes('继续') || text.includes('Next') || text.includes('Continue'))) {
             return { type: 'generic_next' };
@@ -455,6 +476,10 @@ class LoginSession:
 
     def to_dict(self):
         with self._lock:
+            vp = {'w': 1280, 'h': 757}
+            if self.ch and hasattr(self.ch, 'fingerprint') and self.ch.fingerprint:
+                vp['w'] = self.ch.fingerprint.get('screen_width', 1280)
+                vp['h'] = self.ch.fingerprint.get('screen_height', 757)
             return {
                 'name': self.name,
                 'status': self.status,
@@ -464,6 +489,7 @@ class LoginSession:
                 'error_msg': self.error_msg,
                 'logs': list(self.logs),
                 'result': self.result,
+                'viewport': vp,
                 'updated_at': self.updated_at
             }
 
@@ -525,7 +551,10 @@ class LoginSession:
                     cookie_names = {c.get('name') for c in cks}
                     has_ms_auth = bool({'ESTSAUTH', 'ESTSAUTHPERSISTENT', 'WLSSC', 'RPSTAuth'} & cookie_names)
                     has_post_url = any(u in curr_url for u in ('account.microsoft.com', 'rewards.bing.com', 'myaccount.microsoft.com', 'privacynotice.account.microsoft.com'))
-                    is_authenticated = diag.get('has_auth_u') or has_post_url or (password_injected and has_ms_auth)
+                    # 只有在确已离开登录网关，或已具备有效 _U，或微软主站已授权且当前页面不再处于输入/风控质询状态时，才导航至 Bing SSO
+                    state_peek = inspect_login_page(self.cdp)
+                    in_challenge = state_peek.get('type') in ('username_entry', 'password_entry', 'auth_push', 'otp_input', 'dismissible_prompt', 'arkose_challenge', 'proof_selection', 'switch_to_password', 'kmsi')
+                    is_authenticated = diag.get('has_auth_u') or has_post_url or (password_injected and has_ms_auth and not in_challenge)
 
                     if is_authenticated:
                         self.status = 'running'
@@ -682,6 +711,45 @@ class LoginSession:
                     else:
                         self.message = '检测到微软身份验证方式选择，请在下方实时交互窗口中点击选择'
                     time.sleep(2)
+
+                elif st_type == 'dismissible_prompt':
+                    self.status = 'running'
+                    self.message = '检测到设备密钥/通行密钥/推广弹窗，正在自动跳过/取消以返回登录流程...'
+                    self.log('检测到设备密钥/安全密钥/免密推广弹窗，正在自动点击取消或跳过...')
+                    dismiss_res = browser.ev(self.cdp, '''(() => {
+                        // 1. 优先点击显式的取消/跳过/使用密码 ID
+                        const directSelectors = [
+                            '#iCancel', '#cancelButton', '[data-test-id="cancelButton"]',
+                            '#iShowSkip', '#skipButton', '[data-test-id="skipButton"]',
+                            '#idBtn_Back', '#idA_PWD_SwitchToPassword', '#signInAnotherWay'
+                        ];
+                        for (const s of directSelectors) {
+                            const el = document.querySelector(s);
+                            if (el && el.offsetParent !== null) {
+                                el.click();
+                                return { success: true, target: s };
+                            }
+                        }
+                        // 2. 文本匹配寻找 取消 / 以后再说 / 暂不 / 跳过 / 使用密码
+                        const btns = Array.from(document.querySelectorAll('button, a, input[type=button], input[type=submit], [role=button]'));
+                        const candidate = btns.find(el => {
+                            if (el.offsetParent === null) return false;
+                            const t = (el.innerText || el.value || '').trim().toLowerCase();
+                            return ['取消', '以后再说', '暂不', '跳过', '使用密码', '使用你的密码', 'cancel', 'skip for now', 'not now', 'no thanks', 'skip', 'use password', 'use your password'].includes(t);
+                        });
+                        if (candidate) {
+                            candidate.click();
+                            return { success: true, target: candidate.innerText || candidate.value };
+                        }
+                        return { success: false };
+                    })()''')
+                    if dismiss_res and dismiss_res.get('success'):
+                        self.log(f'已自动点击跳过/取消目标: {dismiss_res.get("target")}')
+                    else:
+                        self.log('未能自动定位跳过/取消按钮，等待用户实时交互接管')
+                        self.status = 'wait_interactive'
+                        self.message = '检测到设备密钥/验证弹窗，请在下方实时交互画面中点击“取消”或“跳过”'
+                    time.sleep(2.5)
 
                 elif st_type == 'generic_next':
                     browser.ev(self.cdp, 'document.querySelector("#iNext, #iLandingViewAction, #idSIButton9, input[type=submit]")?.click()')
