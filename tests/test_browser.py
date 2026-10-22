@@ -89,6 +89,68 @@ class TestBrowserCDP(unittest.TestCase):
             self.assertEqual(res, {'result': 'ok'})
         print('[OK] cdp.call() 杜绝 NoneType.sendall 崩溃并自动触发自愈')
 
+    def test_inject_cookies_batch(self):
+        """测试 inject_cookies 优先采用 Network.setCookies 批量写入。"""
+        cdp = MagicMock()
+        cdp.call.return_value = {}
+        cookies = [
+            {'name': 'c1', 'value': 'v1', 'domain': '.bing.com'},
+            {'name': 'c2', 'value': 'v2', 'domain': '.bing.com'}
+        ]
+        ok = browser.inject_cookies(cdp, cookies, log=lambda *a: None)
+        self.assertEqual(ok, 2)
+        # 验证 Network.setCookies 被单次调用且包含两枚 cookie
+        set_cookies_calls = [c for c in cdp.call.call_args_list if c[0][0] == 'Network.setCookies']
+        self.assertEqual(len(set_cookies_calls), 1)
+        self.assertEqual(len(set_cookies_calls[0][0][1]['cookies']), 2)
+        print('[OK] inject_cookies 批量 Network.setCookies 调用正常')
+
+    def test_inject_cookies_fallback(self):
+        """测试 inject_cookies 在 Network.setCookies 失败时自动降级逐条单设。"""
+        cdp = MagicMock()
+        def fake_call(method, params=None, **kw):
+            if method == 'Network.setCookies':
+                raise Exception('CDP method not found')
+            if method == 'Network.setCookie':
+                return {'success': True}
+            return {}
+        cdp.call.side_effect = fake_call
+        cookies = [
+            {'name': 'c1', 'value': 'v1', 'domain': '.bing.com'},
+            {'name': 'c2', 'value': 'v2', 'domain': '.bing.com'}
+        ]
+        ok = browser.inject_cookies(cdp, cookies, log=lambda *a: None)
+        self.assertEqual(ok, 2)
+        print('[OK] inject_cookies 降级逐条写入自愈正常')
+
+    def test_cdp_pump_events_dispatches(self):
+        """测试 CDP.pump_events 能主动解析缓冲区或接收的 WebSocket 事件帧并触发 event_handler。"""
+        import struct
+        cdp = browser.CDP('ws://127.0.0.1:9222/devtools/page/tab1')
+        cdp.sock = MagicMock()
+        # 构造符合 RFC 6455 标准的 unmasked WebSocket 文本帧
+        event_obj = {'method': 'Network.requestWillBeSent', 'params': {'request': {'url': 'https://login.live.com/oauth20_desktop.srf?code=TEST_OAUTH_CODE'}}}
+        payload = json.dumps(event_obj).encode()
+        n = len(payload)
+        hdr = b'\x81'
+        if n < 126:
+            hdr += bytes([n])
+        elif n < (1 << 16):
+            hdr += bytes([126]) + struct.pack('>H', n)
+        else:
+            hdr += bytes([127]) + struct.pack('>Q', n)
+        frame_bytes = hdr + payload
+        cdp._rest = frame_bytes
+
+        dispatched = []
+        cdp.event_handler = lambda ev: dispatched.append(ev)
+
+        count = cdp.pump_events(timeout=0.05)
+        self.assertEqual(count, 1)
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(dispatched[0]['method'], 'Network.requestWillBeSent')
+        print('[OK] CDP.pump_events 异步帧主动排空与事件分发正常')
+
 
 if __name__ == '__main__':
     unittest.main()

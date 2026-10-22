@@ -82,14 +82,18 @@ def exchange_token_from_cookies(name, proxy=None, cdp=None, ch=None, log_cb=None
         own_ch = True
 
     try:
+        # 若是复用已有登录会话的 cdp，浏览器已持有全量 Cookie，批量同步仅需数毫秒
         browser.inject_cookies(cdp, cookies, log=log)
-        cdp.call('Network.enable')
+        try:
+            cdp.call('Network.enable')
+        except Exception:
+            pass
 
         code_holder = []
         def on_event(ev):
             if ev.get('method') == 'Network.requestWillBeSent':
                 url = ev.get('params', {}).get('request', {}).get('url', '')
-                if 'code=' in url and 'oauth20_desktop' in url:
+                if 'code=' in url and ('oauth20_desktop' in url or 'login.live.com' in url):
                     parsed = urllib.parse.urlparse(url)
                     qs = urllib.parse.parse_qs(parsed.query)
                     c = qs.get('code', [None])[0]
@@ -111,11 +115,25 @@ def exchange_token_from_cookies(name, proxy=None, cdp=None, ch=None, log_cb=None
         })
         cdp.call('Page.navigate', {'url': auth_url})
 
-        deadline = time.time() + 10
+        deadline = time.time() + 15
         while time.time() < deadline:
+            if hasattr(cdp, 'pump_events'):
+                cdp.pump_events(timeout=0.1)
             if code_holder:
                 break
-            time.sleep(0.3)
+            # 双重冗余保障：主动检查当前页面的 location.href 是否已完成重定向
+            try:
+                curr_url = browser.ev(cdp, 'window.location.href', timeout=1) or ''
+                if 'code=' in curr_url and ('oauth20_desktop' in curr_url or 'login.live.com' in curr_url):
+                    parsed = urllib.parse.urlparse(curr_url)
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    c = qs.get('code', [None])[0]
+                    if c:
+                        code_holder.append(c)
+                        break
+            except Exception:
+                pass
+            time.sleep(0.1)
 
         cdp.event_handler = prev_handler
         if not code_holder:

@@ -152,33 +152,96 @@ class CDP:
             hdr += bytes([0x80 | 127]) + struct.pack('>Q', n)
         self.sock.sendall(hdr + mask + masked)
 
-    def _recv_exact(self, n):
-        if not self.sock:
-            raise StepError('CDP 套接字未连接')
-        out = self._rest[:n]
-        self._rest = self._rest[n:]
-        while len(out) < n:
-            chunk = self.sock.recv(min(65536, n - len(out)))
-            if not chunk:
-                raise StepError('CDP 连接被对端关闭')
-            out += chunk
-        return out
-
-    def _recv_frame(self):
-        b0, b1 = self._recv_exact(2)
+    def _parse_frame_from_buf(self):
+        """尝试从 self._rest 缓冲区解析一条完整的 WebSocket 帧。
+        返回 (has_frame, frame_bytes)。若数据不足则保留缓冲区并返回 (False, None)。
+        """
+        if len(self._rest) < 2:
+            return False, None
+        b0 = self._rest[0]
+        b1 = self._rest[1]
         opcode = b0 & 0x0F
         ln = b1 & 0x7F
+        offset = 2
         if ln == 126:
-            ln = struct.unpack('>H', self._recv_exact(2))[0]
+            if len(self._rest) < 4:
+                return False, None
+            ln = struct.unpack('>H', self._rest[2:4])[0]
+            offset = 4
         elif ln == 127:
-            ln = struct.unpack('>Q', self._recv_exact(8))[0]
-        data = self._recv_exact(ln)
+            if len(self._rest) < 10:
+                return False, None
+            ln = struct.unpack('>Q', self._rest[2:10])[0]
+            offset = 10
+
+        has_mask = bool(b1 & 0x80)
+        if has_mask:
+            if len(self._rest) < offset + 4:
+                return False, None
+            mask = self._rest[offset:offset + 4]
+            offset += 4
+
+        if len(self._rest) < offset + ln:
+            return False, None
+
+        payload = self._rest[offset:offset + ln]
+        self._rest = self._rest[offset + ln:]
+
+        if has_mask:
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+
         if opcode == 0x8:
             raise StepError('CDP 连接被关闭')
         if opcode == 0x9:
-            self.sock.sendall(b'\x8a\x80' + os.urandom(4))
-            return None
-        return data
+            try:
+                self.sock.sendall(b'\x8a\x80' + os.urandom(4))
+            except Exception:
+                pass
+            return True, None
+        return True, payload
+
+    def _recv_frame(self, timeout=None):
+        if not self.sock:
+            raise StepError('CDP 套接字未连接')
+        deadline = (time.time() + timeout) if timeout is not None else None
+        while True:
+            has_frame, frame = self._parse_frame_from_buf()
+            if has_frame:
+                return frame
+            rem = (deadline - time.time()) if deadline is not None else WS_TIMEOUT
+            if timeout is not None and rem <= 0:
+                return None
+            self.sock.settimeout(max(0.02, min(rem, WS_TIMEOUT)))
+            try:
+                chunk = self.sock.recv(65536)
+                if not chunk:
+                    raise StepError('CDP 连接被对端关闭')
+                self._rest += chunk
+            except (socket.timeout, TimeoutError):
+                if timeout is not None:
+                    return None
+                raise StepError('CDP 接收超时')
+
+    def pump_events(self, timeout=0.05):
+        """非阻塞/短超时主动排空并分发 WebSocket 中已到达的所有异步事件帧。"""
+        with self._lock:
+            if not self.sock:
+                return 0
+            count = 0
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                rem = max(0.005, deadline - time.time())
+                try:
+                    frame = self._recv_frame(timeout=rem)
+                    if frame is None:
+                        break
+                    obj = json.loads(frame.decode('utf-8', errors='ignore'))
+                    if obj.get('method') and self.event_handler:
+                        self.event_handler(obj)
+                    count += 1
+                except Exception:
+                    break
+            return count
 
     def _call_once(self, method, params=None, timeout=WS_TIMEOUT):
         self._id += 1
@@ -187,12 +250,11 @@ class CDP:
                                      'params': params or {}}).encode())
         deadline = time.time() + timeout
         while time.time() < deadline:
-            self.sock.settimeout(max(1, deadline - time.time()))
-            frame = self._recv_frame()
+            frame = self._recv_frame(timeout=max(0.1, deadline - time.time()))
             if frame is None:
                 continue
             try:
-                obj = json.loads(frame.decode())
+                obj = json.loads(frame.decode('utf-8', errors='ignore'))
             except Exception:
                 continue
             if obj.get('method') and self.event_handler:
@@ -711,22 +773,50 @@ def inject_cookies(cdp, cookies, log=print):
 
     在导航前调用。注入后首个导航生效; httpOnly cookie 必须由本接口写入
     (JS document.cookie 写不了 httpOnly)。
+    优先使用 CDP Network.setCookies 批量写入 (1 次 IPC，耗时数毫秒)；若异常则降级为单枚逐条写入。
     """
-    ok = 0
+    if not cookies:
+        return 0
+    try:
+        cdp.call('Network.enable')
+    except Exception:
+        pass
+
+    cookie_params = []
     for c in cookies:
-        params = {'name': c['name'], 'value': c.get('value', ''),
-                  'domain': c.get('domain') or '.bing.com',
-                  'path': c.get('path') or '/',
-                  'secure': bool(c.get('secure', True)),
-                  'httpOnly': bool(c.get('httpOnly', False))}
+        if not c.get('name'):
+            continue
+        p = {
+            'name': c['name'],
+            'value': str(c.get('value', '')),
+            'domain': c.get('domain') or '.bing.com',
+            'path': c.get('path') or '/',
+            'secure': bool(c.get('secure', True)),
+            'httpOnly': bool(c.get('httpOnly', False)),
+        }
         if c.get('expirationDate'):
-            params['expires'] = c['expirationDate']
+            try:
+                p['expires'] = float(c['expirationDate'])
+            except Exception:
+                pass
+        cookie_params.append(p)
+
+    # 1. 优先尝试 CDP 批量原子写入 Network.setCookies (1 次交互完成数十/百枚 Cookie 注入)
+    try:
+        cdp.call('Network.setCookies', {'cookies': cookie_params})
+        log(f'cookie 批量注入完成 ({len(cookie_params)} 枚)')
+        return len(cookie_params)
+    except Exception as ex:
+        log(f'批量写入 Network.setCookies 异常，降级逐条写入: {ex}')
+
+    # 2. 降级方案: 逐条写入
+    ok = 0
+    for p in cookie_params:
         try:
-            r = cdp.call('Network.setCookie', params)
+            r = cdp.call('Network.setCookie', p)
             if r.get('success'):
                 ok += 1
         except Exception as ex:
-            log(f'cookie {c["name"]} 注入容忍: {str(ex)[:60]}')
-    cdp.call('Network.enable')
-    log(f'cookie 注入 {ok}/{len(cookies)}')
+            log(f'cookie {p["name"]} 注入容忍: {str(ex)[:60]}')
+    log(f'cookie 逐条注入完成 {ok}/{len(cookie_params)}')
     return ok

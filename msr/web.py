@@ -2919,6 +2919,12 @@ HTML_CONTENT = """<!DOCTYPE html>
 
 
 class WebHandler(BaseHTTPRequestHandler):
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
     def send_cors(self):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
@@ -3004,26 +3010,29 @@ class WebHandler(BaseHTTPRequestHandler):
             name = params.get('name', [None])[0]
             from msr import auth
             img_bytes = auth.get_session_screenshot(name) if name else None
-            if img_bytes:
-                self.send_response(200)
-                self.send_header('Content-Type', 'image/jpeg')
-                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
-                self.send_cors()
-                self.end_headers()
-                self.wfile.write(img_bytes)
-            else:
-                self.send_response(200)
-                self.send_header('Content-Type', 'image/svg+xml; charset=utf-8')
-                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
-                self.send_cors()
-                self.end_headers()
-                svg_data = '''<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
+            try:
+                if img_bytes:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'image/jpeg')
+                    self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+                    self.send_cors()
+                    self.end_headers()
+                    self.wfile.write(img_bytes)
+                else:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'image/svg+xml; charset=utf-8')
+                    self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+                    self.send_cors()
+                    self.end_headers()
+                    svg_data = '''<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
   <rect width="800" height="450" fill="#090d16"/>
   <circle cx="400" cy="180" r="26" fill="none" stroke="#0ea5e9" stroke-width="4" stroke-dasharray="32 8"/>
   <text x="400" y="245" text-anchor="middle" fill="#f8fafc" font-size="16" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-weight="600">正在建立浏览器安全视口...</text>
   <text x="400" y="275" text-anchor="middle" fill="#94a3b8" font-size="13" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">页面就绪后画面将以低延迟实时呈现，支持直接点击交互</text>
 </svg>'''
-                self.wfile.write(svg_data.encode('utf-8'))
+                    self.wfile.write(svg_data.encode('utf-8'))
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
             return
 
         self.send_error(404, 'Not Found')
@@ -3517,18 +3526,24 @@ class WebHandler(BaseHTTPRequestHandler):
             })
             return
 
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain; charset=utf-8')
-        self.send_cors()
-        self.end_headers()
-        self.wfile.write(text.encode('utf-8'))
+        try:
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_cors()
+            self.end_headers()
+            self.wfile.write(text.encode('utf-8'))
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _json_resp(self, data, code=200):
-        self.send_response(code)
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_cors()
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+        try:
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_cors()
+            self.end_headers()
+            self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
 
 def _start_scheduler_daemon():
