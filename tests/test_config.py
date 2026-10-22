@@ -22,5 +22,25 @@ config.save_json(config.pfile('a', 'state.json'), {'balance': 100})
 assert config.load_json(config.pfile('a', 'state.json'))['balance'] == 100
 assert config.load_json(config.pfile('b', 'state.json'), {}) == {}
 
+# 凭据存储与独立清理测试
+config.save_credential('a', 'user_a@outlook.com', 'Pass123!')
+cred_a = config.get_credential('a')
+assert cred_a is not None
+assert cred_a['username'] == 'user_a@outlook.com'
+assert cred_a['password'] == 'Pass123!'
+# 验证 accounts.json 同步保存了 username
+assert any(acc.get('name') == 'a' and acc.get('username') == 'user_a@outlook.com' for acc in config.accounts())
+# 验证账号 b 的凭据为空 (严格隔离)
+assert config.get_credential('b') is None
+
+config.delete_credential('a')
+assert config.get_credential('a') is None
+assert not any(acc.get('name') == 'a' and 'username' in acc for acc in config.accounts())
+
+# 账号彻底清理测试
+config.delete_profile('a')
+assert not os.path.exists(pa)
+assert os.path.exists(pb)
+
 shutil.rmtree(TMP)
 print('ALL_OK')

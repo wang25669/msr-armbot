@@ -1048,6 +1048,14 @@ HTML_CONTENT = """<!DOCTYPE html>
           </div>
         </div>
 
+        <div style="margin-bottom:14px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:12.5px; color:#cbd5e1;">
+            <input type="checkbox" id="login-save-cred" checked style="accent-color:var(--primary); cursor:pointer;">
+            <span>安全保存账号密码凭据 <span style="color:var(--text-sub); font-size:11.5px;">(凭据失效或过期时全自动静默重登自愈)</span></span>
+          </label>
+          <span id="saved-cred-hint" style="font-size:11.5px; color:#38bdf8; display:none;">🔒 已沿用已存凭据</span>
+        </div>
+
         <!-- 手机 Authenticator 匹配数字提示卡片 (条件展示) -->
         <div id="login-auth-push-box" style="display:none; background:rgba(14,165,233,0.15); border:1px solid #0284c7; border-radius:8px; padding:12px; margin-bottom:12px; text-align:center;">
           <div style="font-size:13px; color:#38bdf8; margin-bottom:6px;">📱 微软触发手机 Authenticator 二次验证，请在手机应用上选择数字：</div>
@@ -1236,6 +1244,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
   <script>
     let activeAccountName = '';
+    let currentAccounts = [];
     let dcPollTimer = null;
     let logPollTimer = null;
     let currentFpData = null;
@@ -1315,8 +1324,9 @@ HTML_CONTENT = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/status');
         const data = await res.json();
-        renderDashboard(data.accounts || []);
-        renderManageList(data.accounts || []);
+        currentAccounts = data.accounts || [];
+        renderDashboard(currentAccounts);
+        renderManageList(currentAccounts);
         updateAccountFilterOptions(data.accounts || []);
         document.getElementById('stat-summary').innerText = `总账号数: ${data.accounts?.length || 0} | 服务器时间: ${data.time || ''}`;
         if (data.scheduler) {
@@ -1391,9 +1401,12 @@ HTML_CONTENT = """<!DOCTYPE html>
           </div>
         `;
 
-        // 按钮组: 移除了单一无用的排期预览，依据有效性提供导出或重登
+        const runBtn = a.enabled
+          ? `<button class="btn btn-sm" onclick="runSingle('${a.name}')">立即运行</button>`
+          : `<button class="btn btn-secondary btn-sm" style="opacity:0.65;" onclick="toast('账号 [${a.name}] 当前处于停用状态，请先在“账号管理”中启用')">⏸️ 已停用</button>`;
+
         let actionButtons = `
-          <button class="btn btn-sm" onclick="runSingle('${a.name}')">立即运行</button>
+          ${runBtn}
           <button class="btn btn-secondary btn-sm" onclick="openEditProxyModal('${a.name}', '${a.proxy || ''}')">✏️ 改代理</button>
           <button class="btn btn-secondary btn-sm" onclick="openFingerprintModal('${a.name}')">专属指纹</button>
         `;
@@ -1502,13 +1515,23 @@ HTML_CONTENT = """<!DOCTYPE html>
           `;
         }
 
+        const credBadge = a.has_saved_password
+          ? `<span class="badge badge-info" style="font-size:10.5px;" title="已安全持久化账号密码凭据，支持自动自愈重登">🔑 凭据已存</span>`
+          : '';
+
+        const credClearBtn = a.has_saved_password
+          ? `<button class="btn btn-secondary btn-sm" style="color:#ef4444; font-size:11px;" onclick="clearSavedCred('${a.name}')" title="清除已保存的密码凭据">清除密码</button>`
+          : '';
+
         const row = document.createElement('div');
         row.style = 'display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); padding:12px 0; flex-wrap:wrap; gap:10px;';
         row.innerHTML = `
           <div>
             <div style="display:flex; align-items:center; gap:8px;">
               <strong style="font-size:16px; color:#fff;">${a.name}</strong>
+              ${a.saved_username ? `<span style="font-size:12px; color:var(--text-sub); font-family:monospace;">(${a.saved_username})</span>` : ''}
               ${authBadge}
+              ${credBadge}
               <span class="badge ${diagBadgeClass}" style="font-size:11px;">${diag.text}</span>
               <span class="badge badge-info" style="font-size:11px;">近7天 +${a.history_7d?.total_gained || 0}分</span>
             </div>
@@ -1524,6 +1547,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             ${a.proxy ? `<button class="btn btn-secondary btn-sm" onclick="testAccountProxy('${a.name}', '${a.proxy}')">⚡ 测代理</button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="openFingerprintModal('${a.name}')">专属指纹</button>
             ${authBtns}
+            ${credClearBtn}
             <button class="btn btn-secondary btn-sm" onclick="toggleAcc('${a.name}', ${!a.enabled})">${a.enabled ? '停用' : '启用'}</button>
             <button class="btn btn-danger btn-sm" onclick="deleteAcc('${a.name}')">删除</button>
           </div>
@@ -1680,6 +1704,17 @@ HTML_CONTENT = """<!DOCTYPE html>
       if (!confirm(`确定删除账号 ${name} 及其所有本地状态吗？`)) return;
       await fetch(`/api/accounts?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
       toast(`账号 ${name} 已删除`);
+      fetchStatus();
+    }
+
+    async function clearSavedCred(name) {
+      if (!confirm(`确定清除账号 [${name}] 保存的微软账号密码凭据吗？（清除后凭据过期将无法自动静默重登）`)) return;
+      await fetch('/api/auth/credential/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name})
+      });
+      toast(`账号 ${name} 的保存凭据已清除`);
       fetchStatus();
     }
 
@@ -2577,9 +2612,27 @@ HTML_CONTENT = """<!DOCTYPE html>
         hintEl.innerHTML = `<span style="color:var(--danger)">🔴 该账号尚未登录或凭据失效。</span> 推荐在下方输入微软账号密码一键全自动登录，亦可粘贴 Cookie 激活。`;
       }
 
-      document.getElementById('login-username').value = name.includes('@') ? name : '';
-      document.getElementById('login-password').value = '';
-      document.getElementById('login-pwd-status').innerHTML = '准备就绪。支持账号密码登录、手机 Authenticator 二次验证、安全验证码输入及人机拼图远程交互。';
+      const currentAcc = (currentAccounts || []).find(x => x.name === name) || {};
+      const savedUser = currentAcc.saved_username || (name.includes('@') ? name : '');
+      document.getElementById('login-username').value = savedUser;
+
+      const pwdInput = document.getElementById('login-password');
+      const hintSavedEl = document.getElementById('saved-cred-hint');
+      const saveCredCb = document.getElementById('login-save-cred');
+      if (saveCredCb) saveCredCb.checked = true;
+
+      if (currentAcc.has_saved_password) {
+        pwdInput.value = '';
+        pwdInput.placeholder = '●●●●●●●● (留空沿用已安全保存的密码)';
+        if (hintSavedEl) hintSavedEl.style.display = 'inline';
+        document.getElementById('login-pwd-status').innerHTML = '🔒 已检测到已保存的微软账号密码凭据，可直接点击“🚀 一键全自动登录”直接重登，或输入新密码以覆盖更新。';
+      } else {
+        pwdInput.value = '';
+        pwdInput.placeholder = '请输入微软账号密码';
+        if (hintSavedEl) hintSavedEl.style.display = 'none';
+        document.getElementById('login-pwd-status').innerHTML = '准备就绪。支持账号密码登录、手机 Authenticator 二次验证、安全验证码输入及人机拼图远程交互。';
+      }
+
       document.getElementById('login-pwd-btn').disabled = false;
       document.getElementById('login-cancel-btn').style.display = 'none';
       document.getElementById('login-auth-push-box').style.display = 'none';
@@ -2673,7 +2726,11 @@ HTML_CONTENT = """<!DOCTYPE html>
     async function startLoginSession() {
       const u = document.getElementById('login-username').value.trim();
       const p = document.getElementById('login-password').value;
-      if (!u || !p) return toast('请输入微软账号与密码');
+      const saveCred = document.getElementById('login-save-cred') ? document.getElementById('login-save-cred').checked : true;
+      const currentAcc = (currentAccounts || []).find(x => x.name === activeAccountName) || {};
+
+      if (!u) return toast('请输入微软账号邮箱');
+      if (!p && !currentAcc.has_saved_password) return toast('请输入微软账号密码');
 
       const btn = document.getElementById('login-pwd-btn');
       const cancelBtn = document.getElementById('login-cancel-btn');
@@ -2686,7 +2743,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         const res = await fetch('/api/auth/session/start', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({name: activeAccountName, username: u, password: p})
+          body: JSON.stringify({name: activeAccountName, username: u, password: p, save_cred: saveCred})
         });
         const d = await res.json();
         if (d.status !== 'ok') {
@@ -3068,14 +3125,35 @@ class WebHandler(BaseHTTPRequestHandler):
             name = payload.get('name')
             username = payload.get('username')
             password = payload.get('password')
+            save_cred = bool(payload.get('save_cred', True))
+
+            # 若用户未填密码，尝试从已安全保存的凭据中读取沿用
+            if not password:
+                saved = config.get_credential(name)
+                if saved and saved.get('password'):
+                    password = saved['password']
+                    if not username:
+                        username = saved.get('username')
+
             if not name or not username or not password:
                 self._json_resp({'status': 'error', 'message': '账号、用户名和密码不能为空'}, code=400)
                 return
+
             acc_cfg = config.get_account(name) or {}
             proxy = acc_cfg.get('proxy')
             sess = auth.start_session(name, username, password, proxy=proxy,
-                                      log_cb=lambda m: append_live_log(f'[{name}] {m}'))
+                                      log_cb=lambda m: append_live_log(f'[{name}] {m}'),
+                                      save_credential_flag=save_cred)
             self._json_resp({'status': 'ok', 'message': '登录会话已启动', 'session': sess.to_dict()})
+            return
+
+        if path == '/api/auth/credential/delete':
+            from msr import config
+            name = payload.get('name')
+            if name:
+                config.delete_credential(name)
+                append_live_log(f'[{name}] 已安全清除保存的微软账号密码凭据')
+            self._json_resp({'status': 'ok'})
             return
 
         if path == '/api/auth/session/submit-otp':
@@ -3164,7 +3242,8 @@ class WebHandler(BaseHTTPRequestHandler):
             if name:
                 accs = [a for a in config.accounts() if a['name'] != name]
                 config.save_accounts(accs)
-                append_live_log(f'删除账号: {name}')
+                config.delete_profile(name)
+                append_live_log(f'删除账号及独立 Profile 目录: {name}')
             self._json_resp({'status': 'ok'})
             return
         self.send_error(404, 'Not Found')
@@ -3216,9 +3295,16 @@ class WebHandler(BaseHTTPRequestHandler):
                 diag_text = '🌐 本机直连'
                 diag_desc = '未配置代理，使用本机网络出口'
 
+            # 凭据存储检测
+            cred = config.get_credential(name)
+            saved_username = (cred.get('username') if cred else None) or a.get('username')
+            has_saved_password = bool(cred and cred.get('password'))
+
             detailed.append({
                 'name': name,
                 'enabled': a.get('enabled', True),
+                'saved_username': saved_username,
+                'has_saved_password': has_saved_password,
                 'proxy': a.get('proxy'),
                 'offset_minutes': a.get('offset_minutes', 0),
                 'country': rg.get('country'),

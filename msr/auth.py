@@ -371,12 +371,13 @@ def inspect_login_page(cdp):
 class LoginSession:
     """账号登录多重交互与风控接管会话管理类。"""
 
-    def __init__(self, name, username, password, proxy=None, log_cb=None):
+    def __init__(self, name, username, password, proxy=None, log_cb=None, save_credential_flag=True):
         self.name = name
         self.username = username
         self.password = password
         self.proxy = proxy
         self.log_cb = log_cb
+        self.save_credential_flag = save_credential_flag
         self.status = 'starting'  # starting, running, wait_auth_push, wait_otp, wait_interactive, success, error
         self.message = '正在初始化安全 Chromium 实例...'
         self.auth_code = None
@@ -511,8 +512,15 @@ class LoginSession:
             self.cdp = self.ch.attach(tab)
 
             self.status = 'running'
-            self.message = 'Chromium 已就绪，正在打开微软登录网关...'
+            self.message = 'Chromium 已就绪，正在准备纯净登录环境...'
             self.updated_at = time.time()
+
+            # 启动前主动清理残留 Cookie 与网络缓存，杜绝历史状态或前序失败会话污染
+            try:
+                self.cdp.call('Network.clearBrowserCookies')
+                self.cdp.call('Network.clearBrowserCache')
+            except Exception:
+                pass
 
             self.log('正在打开微软登录网关 (https://login.live.com/)...')
             self.message = '正在加载微软登录网关 (login.live.com)...'
@@ -597,6 +605,13 @@ class LoginSession:
                                 self.log('正在自动通过登录会话静默换取 OAuth2 Token...')
                                 tok = exchange_token_from_cookies(self.name, proxy=self.proxy, cdp=self.cdp, ch=self.ch, log_cb=self.log)
                                 rg = config.load_json(config.pfile(self.name, 'region.json'), {}) or {}
+
+                                if self.save_credential_flag and self.username and self.password:
+                                    try:
+                                        config.save_credential(self.name, self.username, self.password)
+                                        self.log('已安全保存微软账号密码凭据，后续会话失效时将支持全自动静默自愈重登')
+                                    except Exception as ex:
+                                        self.log(f'保存账号密码凭据异常: {ex}')
 
                                 self.result = {
                                     'status': 'ok',
@@ -817,14 +832,14 @@ def get_session(name):
         return _active_sessions.get(name)
 
 
-def start_session(name, username, password, proxy=None, log_cb=None):
+def start_session(name, username, password, proxy=None, log_cb=None, save_credential_flag=True):
     with _sessions_lock:
         if name in _active_sessions:
             try:
                 _active_sessions[name].cancel()
             except Exception:
                 pass
-        sess = LoginSession(name, username, password, proxy=proxy, log_cb=log_cb)
+        sess = LoginSession(name, username, password, proxy=proxy, log_cb=log_cb, save_credential_flag=save_credential_flag)
         _active_sessions[name] = sess
         sess.start()
         return sess
@@ -858,9 +873,9 @@ def get_session_screenshot(name):
     return sess.get_screenshot()
 
 
-def login_with_credential(name, username, password, proxy=None, log_cb=None):
+def login_with_credential(name, username, password, proxy=None, log_cb=None, save_credential_flag=True):
     """现代化微软账号密码全自动登录与多重风控质询接管。"""
-    session = start_session(name, username, password, proxy=proxy, log_cb=log_cb)
+    session = start_session(name, username, password, proxy=proxy, log_cb=log_cb, save_credential_flag=save_credential_flag)
     deadline = time.time() + 180
     prompted_auth_code = None
     prompted_otp = False

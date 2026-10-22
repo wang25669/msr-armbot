@@ -81,6 +81,72 @@ def get_account(name):
     return None
 
 
+def credential_file(name):
+    """账号专属凭据文件路径 (仅本地安全保存)。"""
+    return pfile(name, 'credential.json')
+
+
+def get_credential(name):
+    """读取账号保存的微软账号密码凭据。"""
+    return load_json(credential_file(name), None)
+
+
+def save_credential(name, username, password):
+    """安全持久化账号密码凭据并设置 0600 文件权限，同时同步 accounts.json 的 username。"""
+    cf = credential_file(name)
+    save_json(cf, {
+        'username': username,
+        'password': password,
+        'updated_at': time.strftime('%F %T')
+    })
+    try:
+        os.chmod(cf, 0o600)
+    except Exception:
+        pass
+
+    accs = accounts()
+    changed = False
+    for a in accs:
+        if a.get('name') == name:
+            if a.get('username') != username:
+                a['username'] = username
+                changed = True
+            break
+    if changed:
+        save_accounts(accs)
+
+
+def delete_credential(name):
+    """删除保存的账号密码凭据。"""
+    cf = credential_file(name)
+    if os.path.exists(cf):
+        try:
+            os.remove(cf)
+        except Exception:
+            pass
+    accs = accounts()
+    changed = False
+    for a in accs:
+        if a.get('name') == name:
+            if 'username' in a:
+                del a['username']
+                changed = True
+            break
+    if changed:
+        save_accounts(accs)
+
+
+def delete_profile(name):
+    """彻底清理账号目录，包括 chrome profile、cookie、token、指纹与凭据，防止残留数据。"""
+    import shutil
+    p = os.path.join(HOME, 'profiles', name)
+    if os.path.exists(p):
+        try:
+            shutil.rmtree(p)
+        except Exception:
+            pass
+
+
 def cmd_status():
     accs = accounts()
     if not accs:

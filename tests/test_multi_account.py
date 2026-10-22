@@ -47,5 +47,13 @@ assert 'dailyset' in phases_cn and 'dailyset' in phases_sg
 assert 'search' in phases_cn and 'search' in phases_sg
 print('[OK] 区域任务计划生成包含打卡任务 (quests) 与每日活动 (dailyset)')
 
+# 5. 验证账号停用 (enabled: False) 过滤与生效机制
+accs[0]['enabled'] = False
+config.save_accounts(accs)
+active_accs = [a for a in config.accounts() if a.get('enabled', True)]
+assert len(active_accs) == 1
+assert active_accs[0]['name'] == 'sg_user'
+print('[OK] 账号停用过滤机制生效正常')
+
 shutil.rmtree(TMP)
 print('ALL_OK')

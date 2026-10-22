@@ -40,15 +40,25 @@ def cmd_run(args):
     if getattr(args, 'fast', False):
         sch_cfg['fast_mode'] = True
 
-    accs = [a for a in config.accounts() if a.get('enabled', True)]
-    if not accs:
+    all_accs = config.accounts()
+    if not all_accs:
         print('无账号。先 msr login <name>')
         return 1
+
     if args.name and args.name != '--all' and not getattr(args, 'all', False):
-        accs = [a for a in accs if a['name'] == args.name]
-        if not accs:
+        target_acc = next((a for a in all_accs if a['name'] == args.name), None)
+        if not target_acc:
             print('账号不存在: %s' % args.name)
             return 1
+        if not target_acc.get('enabled', True) and not getattr(args, 'force', False):
+            print(f'账号 [{args.name}] 当前处于停用状态。如需手动执行，请先在控制台启用该账号。')
+            return 0
+        accs = [target_acc]
+    else:
+        accs = [a for a in all_accs if a.get('enabled', True)]
+        if not accs:
+            print('当前所有账号均处于停用状态，跳过本次批量执行。')
+            return 0
 
     if not getattr(args, 'dry_run', False):
         lock = acquire_runner_lock(config)
@@ -104,6 +114,27 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
 
     has_token = bool(tok.get('refresh_token') or tok.get('access_token'))
     if not has_token and not has_cookie:
+        # 尝试检查是否有已保存的微软账号密码进行后台静默重登自愈
+        cred = config.get_credential(name)
+        if cred and cred.get('username') and cred.get('password'):
+            config.log(name, '检测到 Token 与 Cookie 均不可用，正在使用保存的微软凭据尝试后台全自动登录自愈...')
+            try:
+                res = auth.login_with_credential(name, cred['username'], cred['password'], proxy=proxy,
+                                                 log_cb=lambda m: config.log(name, m))
+                if res.get('status') == 'success':
+                    config.log(name, '全自动登录自愈成功！凭据与 Cookie 已刷新就绪。')
+                    tok = config.load_json(config.pfile(name, 'token.json')) or {}
+                    rg = config.load_json(config.pfile(name, 'region.json')) or {}
+                    has_cookie = os.path.isfile(ck_path) and bool(config.load_json(ck_path))
+                    has_token = bool(tok.get('refresh_token') or tok.get('access_token'))
+                else:
+                    config.log(name, f'后台静默重登未完成: {res.get("error")}')
+                    if notify:
+                        notify.notify(f'Rewards 凭据需接管 [{name}]', f'账号 {name} 自动重登需用户配合质询: {res.get("error")}\n请前往 Web 控制台接管登录。', level='warning')
+            except Exception as ex_relogin:
+                config.log(name, f'后台自愈重登异常: {ex_relogin}')
+
+    if not has_token and not has_cookie:
         raise RuntimeError('无可用登录凭据 (未配置账号密码、Cookie 或 Token)，先 msr login %s' % name)
 
     config.log(name, '=== 运行开始 (proxy=%s cdp_port=%s) ===' % (proxy or '直连', cdp_port or '内置'))
@@ -119,7 +150,24 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
             config.log(name, 'region=%s balance=%s' % (pr['country'], pr.get('balance')))
         except Exception as ex:
             config.log(name, f'Token 刷新/探测失败: {ex}')
-            if not has_cookie:
+            cred = config.get_credential(name)
+            if cred and cred.get('username') and cred.get('password'):
+                config.log(name, 'Token 刷新异常，正在使用保存的凭据尝试全自动重新登录并自愈...')
+                try:
+                    res = auth.login_with_credential(name, cred['username'], cred['password'], proxy=proxy,
+                                                     log_cb=lambda m: config.log(name, m))
+                    if res.get('status') == 'success':
+                        tok = config.load_json(config.pfile(name, 'token.json')) or {}
+                        rg = config.load_json(config.pfile(name, 'region.json')) or {}
+                        has_cookie = os.path.isfile(ck_path) and bool(config.load_json(ck_path))
+                        token = api.refresh_access(name, p, rg, proxy=proxy)
+                        pr = probe.probe_account(name, token, proxy=proxy)
+                        pr['probed_at'] = time.strftime('%F %T')
+                        config.save_json(config.pfile(name, 'region.json'), pr)
+                        config.log(name, '自愈重登成功！重新获取 region=%s balance=%s' % (pr['country'], pr.get('balance')))
+                except Exception as ex2:
+                    config.log(name, f'自愈重登尝试未成功: {ex2}')
+            if not has_cookie and not token:
                 raise
 
     if not pr:

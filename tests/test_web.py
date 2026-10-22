@@ -126,7 +126,7 @@ try:
     orig_cancel = auth.cancel_session
     orig_shot = auth.get_session_screenshot
 
-    auth.start_session = lambda name, username, password, proxy=None, log_cb=None: fake_sess
+    auth.start_session = lambda *a, **kw: fake_sess
     auth.get_session = lambda name: fake_sess
     auth.submit_session_otp = lambda name, code: {'status': 'ok'}
     auth.session_mouse_click = lambda name, x, y: {'status': 'ok'}
