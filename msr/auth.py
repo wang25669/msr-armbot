@@ -271,9 +271,8 @@ def inspect_login_page(cdp):
             }
         }
 
-        // 3. 保持登录状态 (KMSI) 弹窗
-        const kmsiBtn = document.querySelector('#acceptButton, input[value=Yes], input[value="是"], #idSIButton9');
-        if (kmsiBtn && (text.includes('保持登录状态') || text.includes('Stay signed in'))) {
+        // 3. 保持登录状态 (KMSI) 弹窗 (涵盖 FluentUI: 保持登录状态? / 无需每次都登录 / Stay signed in?)
+        if (text.includes('保持登录状态') || text.includes('Stay signed in') || text.includes('无需每次都登录') || text.includes('reduce the number of times you are asked to sign in')) {
             return { type: 'kmsi' };
         }
 
@@ -283,30 +282,13 @@ def inspect_login_page(cdp):
             return { type: 'auth_push', code: signEl.innerText.trim() };
         }
 
-        // 5. 二次验证/手机/邮箱 OTC 验证码输入框
-        const otcInput = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #idTxtBx_OTC');
-        if (otcInput) {
-            let prompt = '微软要求输入安全验证码';
-            const pEl = document.querySelector('#idDiv_SAOTCC_Description, .text-body, #idDiv_SAOTCS_Description');
-            if (pEl && pEl.innerText.trim()) {
-                prompt = pEl.innerText.trim();
-            }
-            return { type: 'otp_input', prompt: prompt };
-        }
-
-        // 6. 密码输入页 (若密码输入框已可见，优先进入填密阶段)
+        // 5. 密码输入页 (若密码输入框已可见，优先进入填密阶段)
         const pwdInput = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
         if (pwdInput && pwdInput.offsetParent !== null) {
             return { type: 'password_entry' };
         }
 
-        // 7. 用户名输入页 (确保仅在尚未输入用户名时匹配)
-        const userInput = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
-        if (userInput && userInput.offsetParent !== null) {
-            return { type: 'username_entry' };
-        }
-
-        // 8. 检测是否提供“使用密码”切换选项 (针对默认推 Authenticator 或发邮件验证码的账号)
+        // 6. 检测是否提供“使用密码”切换选项 (针对默认推 Authenticator 或发邮件验证码的账号)
         if (document.body) {
             const switchPwdEl = Array.from(document.body.querySelectorAll('*')).find(x => {
                 const t = (x.innerText || '').trim().toLowerCase();
@@ -321,19 +303,30 @@ def inspect_login_page(cdp):
             }
         }
 
-        // 9. 验证方式选择列表 / 辅助邮箱确认 (Proof Selection)
-        const proofs = document.querySelector('#idDiv_SAOTCS_Proofs, .tile-container, #idDiv_SAOTCS_Proofs_List, #proof-confirmation-email-input');
-        if (proofs || text.includes('验证你的身份') || text.includes('Verify your identity') || text.includes('Verify your email')) {
-            return { type: 'proof_selection' };
+        // 7. 用户名输入页 (确保仅在尚未输入用户名时匹配)
+        const userInput = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
+        if (userInput && userInput.offsetParent !== null) {
+            return { type: 'username_entry' };
         }
 
-        // 10. 人机拼图验证码 (Arkose Labs FunCaptcha)
+        // 8. 二次验证/手机/邮箱 OTC 验证码输入框
+        const otcInput = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #idTxtBx_OTC, #proof-confirmation-email-input');
+        if (otcInput && otcInput.offsetParent !== null) {
+            let prompt = '微软要求输入安全验证码';
+            const pEl = document.querySelector('#idDiv_SAOTCC_Description, .text-body, #idDiv_SAOTCS_Description, [role=heading]');
+            if (pEl && pEl.innerText.trim()) {
+                prompt = pEl.innerText.trim().slice(0, 100);
+            }
+            return { type: 'otp_input', prompt: prompt };
+        }
+
+        // 9. 人机拼图验证码 (Arkose Labs FunCaptcha)
         const arkose = document.querySelector('iframe[src*="arkoselabs"], iframe[src*="arkose"], #enforcementFrame, div[id*="wlspisp"]');
         if (arkose || text.includes('请解决谜题') || text.includes('证明你不是机器人') || text.includes('Please solve the puzzle')) {
             return { type: 'arkose_challenge' };
         }
 
-        // 11. 设备密钥 / 通行密钥 / 安全密钥 / 摆脱密码 / 无密码免密拦截与可跳过弹窗
+        // 10. 设备密钥 / 通行密钥 / 安全密钥 / 摆脱密码 / 无密码免密拦截与可跳过弹窗
         const hasPasskeyPrompt = text.includes('设备密钥') || text.includes('通行密钥') || 
                                  text.includes('安全密钥') || text.includes('无需密码') || 
                                  text.includes('摆脱密码') || text.includes('加快登录速度') ||
@@ -354,7 +347,13 @@ def inspect_login_page(cdp):
             return { type: 'dismissible_prompt', has_passkey: hasPasskeyPrompt };
         }
 
-        // 12. 通用下一步 / 协议同意 (KMSI 等)
+        // 11. 验证方式选择列表 / 辅助邮箱确认 (Proof Selection)
+        const proofs = document.querySelector('#idDiv_SAOTCS_Proofs, .tile-container, #idDiv_SAOTCS_Proofs_List');
+        if (proofs || text.includes('验证你的身份') || text.includes('Verify your identity') || text.includes('选择接收代码的方式')) {
+            return { type: 'proof_selection' };
+        }
+
+        // 12. 通用下一步 / 协议同意
         const nextBtn = document.querySelector('#iNext, #iLandingViewAction, #idSIButton9, input[type=submit], button[type=submit]');
         if (nextBtn && (text.includes('下一步') || text.includes('继续') || text.includes('Next') || text.includes('Continue'))) {
             return { type: 'generic_next' };
@@ -536,229 +535,260 @@ class LoginSession:
                     self.log('❌ Chromium 浏览器进程已退出')
                     break
 
-                curr_url = browser.ev(self.cdp, 'location.href') or ''
-                if curr_url.startswith('chrome-error://') or 'ERR_' in curr_url:
-                    self.status = 'error'
-                    self.message = '网络或代理连接失败，无法加载微软登录页，请核对网络与代理'
-                    self.log(f'❌ 浏览器网络加载失败: {curr_url}')
-                    break
-
-                # A. 优先检查当前是否有有效微软登录态并同步激活 Bing
                 try:
-                    res = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com', 'https://rewards.bing.com']})
-                    cks = res.get('cookies', [])
-                    diag = cookie_mod.validate_cookies(cks)
-                    cookie_names = {c.get('name') for c in cks}
-                    has_ms_auth = bool({'ESTSAUTH', 'ESTSAUTHPERSISTENT', 'WLSSC', 'RPSTAuth'} & cookie_names)
-                    has_post_url = any(u in curr_url for u in ('account.microsoft.com', 'rewards.bing.com', 'myaccount.microsoft.com', 'privacynotice.account.microsoft.com'))
-                    # 只有在确已离开登录网关，或已具备有效 _U，或微软主站已授权且当前页面不再处于输入/风控质询状态时，才导航至 Bing SSO
-                    state_peek = inspect_login_page(self.cdp)
-                    in_challenge = state_peek.get('type') in ('username_entry', 'password_entry', 'auth_push', 'otp_input', 'dismissible_prompt', 'arkose_challenge', 'proof_selection', 'switch_to_password', 'kmsi')
-                    is_authenticated = diag.get('has_auth_u') or has_post_url or (password_injected and has_ms_auth and not in_challenge)
+                    curr_url = browser.ev(self.cdp, 'location.href') or ''
+                    if curr_url.startswith('chrome-error://') or 'ERR_' in curr_url:
+                        self.status = 'error'
+                        self.message = '网络或代理连接失败，无法加载微软登录页，请核对网络与代理'
+                        self.log(f'❌ 浏览器网络加载失败: {curr_url}')
+                        break
 
-                    if is_authenticated:
-                        self.status = 'running'
-                        self.message = '检测到已进入微软会话，正在同步激活 Bing / Rewards 登录态...'
-                        self.log('检测到已进入微软会话，正在导航至 Bing SSO 激活登录态与固化 Cookie...')
-                        browser.navigate(self.cdp, 'https://www.bing.com/fd/auth/signin?action=interactive&provider=windows_live')
-                        time.sleep(3)
-                        browser.navigate(self.cdp, 'https://rewards.bing.com/')
-                        time.sleep(3)
+                    # A. 优先检查当前是否有有效微软登录态并同步激活 Bing
+                    try:
+                        res = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com', 'https://rewards.bing.com']})
+                        cks = res.get('cookies', [])
+                        diag = cookie_mod.validate_cookies(cks)
+                        cookie_names = {c.get('name') for c in cks}
+                        has_ms_auth = bool({'ESTSAUTH', 'ESTSAUTHPERSISTENT', 'WLSSC', 'RPSTAuth'} & cookie_names)
+                        has_post_url = any(u in curr_url for u in ('account.microsoft.com', 'rewards.bing.com', 'myaccount.microsoft.com', 'privacynotice.account.microsoft.com', 'complete-client-signin'))
+                        
+                        # 严防在依然处于账号输入、密码输入、保持登录确认、验证码或人机质询阶段时误判登录完成
+                        state_peek = inspect_login_page(self.cdp)
+                        st_peek_type = state_peek.get('type')
+                        in_challenge = st_peek_type in ('username_entry', 'password_entry', 'auth_push', 'otp_input', 'dismissible_prompt', 'arkose_challenge', 'proof_selection', 'switch_to_password', 'kmsi')
+                        is_authenticated = diag.get('has_auth_u') or has_post_url or (st_peek_type == 'success_url') or (password_injected and has_ms_auth and not in_challenge and 'login.live.com' not in curr_url)
 
-                        final_cks = []
-                        diag2 = {'has_auth_u': False}
-                        for _ in range(6):
-                            res2 = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com', 'https://rewards.bing.com']})
-                            final_cks = res2.get('cookies', [])
-                            diag2 = cookie_mod.validate_cookies(final_cks)
+                        if is_authenticated:
+                            self.status = 'running'
+                            self.message = '检测到已进入微软会话，正在同步激活 Bing / Rewards 登录态...'
+                            self.log('检测到已进入微软授权会话，正在导航至 Bing 激活登录态与固化凭据...')
+                            
+                            # 导航至 Bing 并触发 SSO 认证握手
+                            browser.navigate(self.cdp, 'https://www.bing.com/')
+                            time.sleep(3)
+                            browser.ev(self.cdp, '''(() => {
+                                const el = document.querySelector("#id_l, #id_s, a[href*='fd/auth/signin'], a[href*='windows_live_id']");
+                                if (el) el.click();
+                            })()''')
+                            time.sleep(3)
+                            
+                            curr_u = browser.ev(self.cdp, 'location.href') or ''
+                            if not any(k in curr_u for k in ('wlsso', 'wlexpsignin')):
+                                browser.navigate(self.cdp, 'https://www.bing.com/fd/auth/signin/v2?action=interactive&provider=windows_live_id&return_url=https%3a%2f%2fwww.bing.com%2f')
+                                time.sleep(3)
+
+                            browser.navigate(self.cdp, 'https://rewards.bing.com/')
+                            time.sleep(3)
+
+                            final_cks = []
+                            diag2 = {'has_auth_u': False}
+                            for _ in range(8):
+                                res2 = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com', 'https://rewards.bing.com']})
+                                final_cks = res2.get('cookies', [])
+                                diag2 = cookie_mod.validate_cookies(final_cks)
+                                if diag2['has_auth_u']:
+                                    break
+                                time.sleep(1.5)
+
                             if diag2['has_auth_u']:
+                                config.save_json(config.pfile(self.name, 'cookie.json'), final_cks)
+                                self.log(f'✅ 成功捕获并保存全量 Cookie (共 {len(final_cks)} 条, 含 _U=True)')
+                                self.message = '成功捕获全量 Cookie，正在静默换取 OAuth2 Token...'
+                                self.log('正在自动通过登录会话静默换取 OAuth2 Token...')
+                                tok = exchange_token_from_cookies(self.name, proxy=self.proxy, cdp=self.cdp, ch=self.ch, log_cb=self.log)
+                                rg = config.load_json(config.pfile(self.name, 'region.json'), {}) or {}
+
+                                self.result = {
+                                    'status': 'ok',
+                                    'message': '微软账号自动化登录成功！Cookie 与 Token 双凭据已全部就绪。',
+                                    'cookie_count': len(final_cks),
+                                    'has_token': bool(tok),
+                                    'balance': rg.get('balance', 0),
+                                    'country': rg.get('country', '未知')
+                                }
+                                self.status = 'success'
+                                self.message = f'🎉 登录成功！所有凭据已自动固化就绪（积分: {rg.get("balance", 0)}, 区域: {rg.get("country", "未知")}）。'
                                 break
-                            time.sleep(1.5)
+                            else:
+                                self.log('⚠️ 微软会话已建立但 Bing 尚未就绪 _U 凭据，继续等待页面完成 SSO 同步...')
+                    except Exception:
+                        pass
 
-                        if diag2['has_auth_u']:
-                            config.save_json(config.pfile(self.name, 'cookie.json'), final_cks)
-                            self.log(f'✅ 成功捕获并保存全量 Cookie (共 {len(final_cks)} 条, 含 _U=True)')
-                            self.message = '成功捕获全量 Cookie，正在静默换取 OAuth2 Token...'
-                            self.log('正在自动通过登录会话静默换取 OAuth2 Token...')
-                            tok = exchange_token_from_cookies(self.name, proxy=self.proxy, cdp=self.cdp, ch=self.ch, log_cb=self.log)
-                            rg = config.load_json(config.pfile(self.name, 'region.json'), {}) or {}
+                    # B. 检测页面状态
+                    state = inspect_login_page(self.cdp)
+                    st_type = state.get('type')
 
-                            self.result = {
-                                'status': 'ok',
-                                'message': '微软账号自动化登录成功！Cookie 与 Token 双凭据已全部就绪。',
-                                'cookie_count': len(final_cks),
-                                'has_token': bool(tok),
-                                'balance': rg.get('balance', 0),
-                                'country': rg.get('country', '未知')
-                            }
-                            self.status = 'success'
-                            self.message = '🎉 登录成功！所有凭据已自动固化就绪。'
-                            break
+                    if st_type == 'error':
+                        self.status = 'error'
+                        self.error_msg = state.get('error')
+                        self.message = f'登录异常: {self.error_msg}'
+                        self.log(f'❌ 微软错误提示: {self.error_msg}')
+                        break
+
+                    elif st_type == 'username_entry':
+                        if not username_injected or (time.time() - username_injected_at > 8):
+                            self.status = 'running'
+                            self.message = f'正在自动填入微软账号 ({self.username})...'
+                            self.log(f'正在填入微软账号 ({self.username})...')
+                            user_ok = browser.ev(self.cdp, f'''(() => {{
+                                const input = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
+                                if (input) {{
+                                    input.value = {json.dumps(self.username)};
+                                    input.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                    input.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                    return true;
+                                }}
+                                return false;
+                            }})()''')
+                            if user_ok:
+                                username_injected = True
+                                username_injected_at = time.time()
+                                self.message = '账号已填入，正在提交...'
+                                time.sleep(0.8)
+                                browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
+                                self.message = '账号已提交，正在等待微软响应...'
+                                time.sleep(2.5)
+
+                    elif st_type == 'switch_to_password':
+                        self.status = 'running'
+                        self.message = '检测到非密码默认选项，正在自动切换至“使用密码”模式...'
+                        self.log('检测到非密码默认选项，自动切换至“使用密码”模式')
+                        x = state.get('x')
+                        y = state.get('y')
+                        if x is not None and y is not None and (x > 0 or y > 0):
+                            browser.mouse_click(self.cdp, x, y)
                         else:
-                            self.log('⚠️ 微软会话已建立但 Bing 尚未就绪 _U 凭据，继续等待页面完成 SSO 同步...')
-                except Exception:
-                    pass
+                            browser.ev(self.cdp, '''(() => {
+                                const leaf = Array.from(document.body ? document.body.querySelectorAll('*') : []).find(x => {
+                                    const t = (x.innerText || '').trim().toLowerCase();
+                                    return (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead') && x.children.length === 0;
+                                });
+                                if (leaf) {
+                                    leaf.click();
+                                    const target = leaf.closest('a, button, [role=button], .fui-Link');
+                                    if (target) target.click();
+                                }
+                            })()''')
+                        time.sleep(3)
 
-                # B. 检测页面状态
-                state = inspect_login_page(self.cdp)
-                st_type = state.get('type')
+                    elif st_type == 'password_entry':
+                        if not password_injected or (time.time() - password_injected_at > 8):
+                            self.status = 'running'
+                            self.message = '正在填入密码并提交登录...'
+                            self.log('正在填入密码并提交...')
+                            pwd_ok = browser.ev(self.cdp, f'''(() => {{
+                                const p = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
+                                if (p) {{
+                                    p.value = {json.dumps(self.password)};
+                                    p.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                    p.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                    return true;
+                                }}
+                                return false;
+                            }})()''')
+                            if pwd_ok:
+                                password_injected = True
+                                password_injected_at = time.time()
+                                self.message = '密码已填入，正在提交...'
+                                time.sleep(0.8)
+                                browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
+                                self.message = '密码已提交，正在等待微软校验与凭据固化...'
+                                time.sleep(2.5)
 
-                if st_type == 'error':
-                    self.status = 'error'
-                    self.error_msg = state.get('error')
-                    self.message = f'登录异常: {self.error_msg}'
-                    self.log(f'❌ 微软错误提示: {self.error_msg}')
-                    break
-
-                elif st_type == 'username_entry':
-                    if not username_injected or (time.time() - username_injected_at > 8):
+                    elif st_type == 'kmsi':
                         self.status = 'running'
-                        self.message = f'正在自动填入微软账号 ({self.username})...'
-                        self.log(f'正在填入微软账号 ({self.username})...')
-                        user_ok = browser.ev(self.cdp, f'''(() => {{
-                            const input = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
-                            if (input) {{
-                                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                                setter.call(input, {json.dumps(self.username)});
-                                input.dispatchEvent(new Event('input', {{bubbles: true}}));
-                                input.dispatchEvent(new Event('change', {{bubbles: true}}));
-                                return true;
-                            }}
-                            return false;
-                        }})()''')
-                        if user_ok:
-                            username_injected = True
-                            username_injected_at = time.time()
-                            self.message = '账号已填入，正在提交...'
-                            time.sleep(0.8)
-                            browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
-                            self.message = '账号已提交，正在等待微软响应...'
-                            time.sleep(2.5)
-
-                elif st_type == 'switch_to_password':
-                    self.status = 'running'
-                    self.message = '检测到非密码默认选项，正在自动切换至“使用密码”模式...'
-                    self.log('检测到非密码默认选项，自动切换至“使用密码”模式')
-                    x = state.get('x')
-                    y = state.get('y')
-                    if x is not None and y is not None and (x > 0 or y > 0):
-                        browser.mouse_click(self.cdp, x, y)
-                    else:
+                        self.message = '正在自动确认“保持登录状态” (KMSI)...'
+                        self.log('处理“保持登录状态” (KMSI) 自动确认...')
                         browser.ev(self.cdp, '''(() => {
-                            const leaf = Array.from(document.body ? document.body.querySelectorAll('*') : []).find(x => {
-                                const t = (x.innerText || '').trim().toLowerCase();
-                                return (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead') && x.children.length === 0;
-                            });
-                            if (leaf) {
-                                leaf.click();
-                                const target = leaf.closest('a, button, [role=button], .fui-Link');
-                                if (target) target.click();
-                            }
+                            const btns = Array.from(document.querySelectorAll('button, input[type=submit]'));
+                            const yesBtn = btns.find(b => {
+                                const t = (b.innerText || b.value || '').trim().toLowerCase();
+                                return t === '是' || t === 'yes';
+                            }) || document.querySelector('#acceptButton, #idSIButton9, input[value="是"], input[value="Yes"]');
+                            if (yesBtn) yesBtn.click();
                         })()''')
-                    time.sleep(3)
+                        time.sleep(2.5)
 
-                elif st_type == 'password_entry':
-                    if not password_injected or (time.time() - password_injected_at > 8):
-                        self.status = 'running'
-                        self.message = '正在填入密码并提交登录...'
-                        self.log('正在填入密码并提交...')
-                        pwd_ok = browser.ev(self.cdp, f'''(() => {{
-                            const p = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
-                            if (p) {{
-                                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                                setter.call(p, {json.dumps(self.password)});
-                                p.dispatchEvent(new Event('input', {{bubbles: true}}));
-                                p.dispatchEvent(new Event('change', {{bubbles: true}}));
-                                return true;
-                            }}
-                            return false;
-                        }})()''')
-                        if pwd_ok:
-                            password_injected = True
-                            password_injected_at = time.time()
-                            self.message = '密码已填入，正在提交...'
-                            time.sleep(0.8)
-                            browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
-                            self.message = '密码已提交，正在等待微软校验与凭据固化...'
-                            time.sleep(2.5)
+                    elif st_type == 'auth_push':
+                        code = state.get('code')
+                        self.status = 'wait_auth_push'
+                        self.auth_code = code
+                        self.message = f'微软触发手机 Authenticator 验证，请在手机应用上选择数字：【 {code} 】'
+                        self.log(f'>>> [安全提示] 微软触发手机 Authenticator 二次验证，匹配数字: 【 {code} 】')
+                        time.sleep(3)
 
-                elif st_type == 'kmsi':
-                    self.status = 'running'
-                    self.message = '正在确认保持登录状态 (KMSI)...'
-                    self.log('处理“保持登录状态”确认...')
-                    browser.ev(self.cdp, 'document.querySelector("#acceptButton, input[value=Yes], input[value=\'是\'], #idSIButton9, button[type=submit]")?.click()')
-                    time.sleep(2.5)
+                    elif st_type == 'otp_input':
+                        prompt = state.get('prompt') or '请输入安全验证码'
+                        self.status = 'wait_otp'
+                        self.otp_prompt = prompt
+                        self.message = f'微软需要输入安全验证码: {prompt}'
+                        time.sleep(2)
 
-                elif st_type == 'auth_push':
-                    code = state.get('code')
-                    self.status = 'wait_auth_push'
-                    self.auth_code = code
-                    self.message = f'微软触发手机 Authenticator 验证，请在手机应用上选择数字：【 {code} 】'
-                    self.log(f'>>> [安全提示] 微软触发手机 Authenticator 二次验证，匹配数字: 【 {code} 】')
-                    time.sleep(3)
-
-                elif st_type == 'otp_input':
-                    prompt = state.get('prompt') or '请输入安全验证码'
-                    self.status = 'wait_otp'
-                    self.otp_prompt = prompt
-                    self.message = f'微软需要输入安全验证码: {prompt}'
-                    time.sleep(2)
-
-                elif st_type in ('arkose_challenge', 'proof_selection'):
-                    self.status = 'wait_interactive'
-                    if st_type == 'arkose_challenge':
-                        self.message = '检测到人机拼图验证码(Arkose)，请在下方实时交互窗口中点击完成验证'
-                    else:
-                        self.message = '检测到微软身份验证方式选择，请在下方实时交互窗口中点击选择'
-                    time.sleep(2)
-
-                elif st_type == 'dismissible_prompt':
-                    self.status = 'running'
-                    self.message = '检测到设备密钥/通行密钥/推广弹窗，正在自动跳过/取消以返回登录流程...'
-                    self.log('检测到设备密钥/安全密钥/免密推广弹窗，正在自动点击取消或跳过...')
-                    dismiss_res = browser.ev(self.cdp, '''(() => {
-                        // 1. 优先点击显式的取消/跳过/使用密码 ID
-                        const directSelectors = [
-                            '#iCancel', '#cancelButton', '[data-test-id="cancelButton"]',
-                            '#iShowSkip', '#skipButton', '[data-test-id="skipButton"]',
-                            '#idBtn_Back', '#idA_PWD_SwitchToPassword', '#signInAnotherWay'
-                        ];
-                        for (const s of directSelectors) {
-                            const el = document.querySelector(s);
-                            if (el && el.offsetParent !== null) {
-                                el.click();
-                                return { success: true, target: s };
-                            }
-                        }
-                        // 2. 文本匹配寻找 取消 / 以后再说 / 暂不 / 跳过 / 使用密码
-                        const btns = Array.from(document.querySelectorAll('button, a, input[type=button], input[type=submit], [role=button]'));
-                        const candidate = btns.find(el => {
-                            if (el.offsetParent === null) return false;
-                            const t = (el.innerText || el.value || '').trim().toLowerCase();
-                            return ['取消', '以后再说', '暂不', '跳过', '使用密码', '使用你的密码', 'cancel', 'skip for now', 'not now', 'no thanks', 'skip', 'use password', 'use your password'].includes(t);
-                        });
-                        if (candidate) {
-                            candidate.click();
-                            return { success: true, target: candidate.innerText || candidate.value };
-                        }
-                        return { success: false };
-                    })()''')
-                    if dismiss_res and dismiss_res.get('success'):
-                        self.log(f'已自动点击跳过/取消目标: {dismiss_res.get("target")}')
-                    else:
-                        self.log('未能自动定位跳过/取消按钮，等待用户实时交互接管')
+                    elif st_type in ('arkose_challenge', 'proof_selection'):
                         self.status = 'wait_interactive'
-                        self.message = '检测到设备密钥/验证弹窗，请在下方实时交互画面中点击“取消”或“跳过”'
-                    time.sleep(2.5)
+                        if st_type == 'arkose_challenge':
+                            self.message = '检测到人机拼图验证码(Arkose)，请在下方实时交互窗口中点击完成验证'
+                        else:
+                            self.message = '检测到微软身份验证方式选择，请在下方实时交互窗口中点击选择'
+                        time.sleep(2)
 
-                elif st_type == 'generic_next':
-                    browser.ev(self.cdp, 'document.querySelector("#iNext, #iLandingViewAction, #idSIButton9, input[type=submit]")?.click()')
-                    time.sleep(2)
+                    elif st_type == 'dismissible_prompt':
+                        self.status = 'running'
+                        self.message = '检测到设备密钥/通行密钥/推广弹窗，正在自动跳过/取消以返回登录流程...'
+                        self.log('检测到设备密钥/安全密钥/免密推广弹窗，正在自动点击取消或跳过...')
+                        dismiss_res = browser.ev(self.cdp, '''(() => {
+                            const directSelectors = [
+                                '#iCancel', '#cancelButton', '[data-test-id="cancelButton"]',
+                                '#iShowSkip', '#skipButton', '[data-test-id="skipButton"]',
+                                '#idBtn_Back', '#idA_PWD_SwitchToPassword', '#signInAnotherWay'
+                            ];
+                            for (const s of directSelectors) {
+                                const el = document.querySelector(s);
+                                if (el && el.offsetParent !== null) {
+                                    el.click();
+                                    return { success: true, target: s };
+                                }
+                            }
+                            const btns = Array.from(document.querySelectorAll('button, a, input[type=button], input[type=submit], [role=button]'));
+                            const candidate = btns.find(el => {
+                                if (el.offsetParent === null) return false;
+                                const t = (el.innerText || el.value || '').trim().toLowerCase();
+                                return ['取消', '以后再说', '暂不', '跳过', '使用密码', '使用你的密码', 'cancel', 'skip for now', 'not now', 'no thanks', 'skip', 'use password', 'use your password'].includes(t);
+                            });
+                            if (candidate) {
+                                candidate.click();
+                                return { success: true, target: candidate.innerText || candidate.value };
+                            }
+                            return { success: false };
+                        })()''')
+                        if dismiss_res and dismiss_res.get('success'):
+                            self.log(f'已自动点击跳过/取消目标: {dismiss_res.get("target")}')
+                        else:
+                            self.log('未能自动定位跳过/取消按钮，等待用户实时交互接管')
+                            self.status = 'wait_interactive'
+                            self.message = '检测到设备密钥/验证弹窗，请在下方实时交互画面中点击“取消”或“跳过”'
+                        time.sleep(2.5)
 
-                else:
-                    title = browser.ev(self.cdp, 'document.title') or ''
-                    self.status = 'running'
-                    self.message = f'正在等待微软页面加载 ({title or curr_url[:40]})...'
+                    elif st_type == 'generic_next':
+                        browser.ev(self.cdp, 'document.querySelector("#iNext, #iLandingViewAction, #idSIButton9, input[type=submit]")?.click()')
+                        time.sleep(2)
+
+                    else:
+                        title = browser.ev(self.cdp, 'document.title') or ''
+                        self.status = 'running'
+                        self.message = f'正在等待微软页面加载 ({title or curr_url[:40]})...'
+                        time.sleep(1.5)
+
+                except browser.StepError as cdp_err:
+                    self.log(f'CDP 通信瞬态恢复中: {cdp_err}')
+                    try:
+                        if self.cdp:
+                            self.cdp._reconnect()
+                    except Exception:
+                        pass
+                    time.sleep(1.5)
+                except Exception as loop_ex:
+                    self.log(f'登录循环暂态容错: {loop_ex}')
                     time.sleep(1.5)
 
             if not self.result and self.status != 'error':
