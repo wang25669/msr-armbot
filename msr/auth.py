@@ -284,37 +284,38 @@ def inspect_login_page(cdp):
             return { type: 'otp_input', prompt: prompt };
         }
 
-        // 6. 验证方式选择列表 (Proof Selection)
-        const proofs = document.querySelector('#idDiv_SAOTCS_Proofs, .tile-container, #idDiv_SAOTCS_Proofs_List');
-        if (proofs && (text.includes('验证你的身份') || text.includes('Verify your identity'))) {
-            return { type: 'proof_selection' };
+        // 6. 优先检测是否提供“使用密码”切换选项 (针对默认推 Authenticator 或发邮件验证码的账号)
+        const switchPwdEl = Array.from(document.querySelectorAll('*')).find(x => {
+            const t = (x.innerText || '').trim().toLowerCase();
+            return (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead' || (t.includes('password') && t.length < 25) || (t.includes('密码') && t.length < 15)) && x.children.length === 0;
+        });
+        if (switchPwdEl) {
+            const r = switchPwdEl.getBoundingClientRect();
+            return { type: 'switch_to_password', x: r.x + r.width/2, y: r.y + r.height/2 };
         }
 
-        // 7. 人机拼图验证码 (Arkose Labs FunCaptcha)
-        const arkose = document.querySelector('iframe[src*="arkoselabs"], iframe[src*="arkose"], #enforcementFrame, div[id*="wlspisp"]');
-        if (arkose || text.includes('请解决谜题') || text.includes('证明你不是机器人') || text.includes('Please solve the puzzle')) {
-            return { type: 'arkose_challenge' };
+        // 7. 用户名输入页 (确保仅在尚未输入用户名时匹配)
+        const userInput = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
+        if (userInput && userInput.offsetParent !== null) {
+            return { type: 'username_entry' };
         }
 
         // 8. 密码输入页
         const pwdInput = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
-        if (pwdInput) {
+        if (pwdInput && pwdInput.offsetParent !== null) {
             return { type: 'password_entry' };
         }
 
-        // 9. 智能识别并切换至“使用密码”模式
-        const leaf = Array.from(document.querySelectorAll('*')).find(x => {
-            const t = (x.innerText || '').trim();
-            return (t === '使用密码' || t === 'Use password') && x.children.length === 0;
-        });
-        if (leaf) {
-            return { type: 'switch_to_password' };
+        // 9. 验证方式选择列表 / 辅助邮箱确认 (Proof Selection)
+        const proofs = document.querySelector('#idDiv_SAOTCS_Proofs, .tile-container, #idDiv_SAOTCS_Proofs_List, #proof-confirmation-email-input');
+        if (proofs || text.includes('验证你的身份') || text.includes('Verify your identity') || text.includes('Verify your email')) {
+            return { type: 'proof_selection' };
         }
 
-        // 10. 用户名输入页
-        const userInput = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
-        if (userInput) {
-            return { type: 'username_entry' };
+        // 10. 人机拼图验证码 (Arkose Labs FunCaptcha)
+        const arkose = document.querySelector('iframe[src*="arkoselabs"], iframe[src*="arkose"], #enforcementFrame, div[id*="wlspisp"]');
+        if (arkose || text.includes('请解决谜题') || text.includes('证明你不是机器人') || text.includes('Please solve the puzzle')) {
+            return { type: 'arkose_challenge' };
         }
 
         // 11. 通用下一步 / 协议同意 (KMSI 等)
@@ -404,12 +405,13 @@ class LoginSession:
         if not self.cdp:
             return {'status': 'error', 'message': '浏览器未就绪'}
         from msr import browser
-        self.log(f'正在向微软页面填入安全验证码: {code} ...')
+        import json
+        self.log(f'正在向微软页面填入安全验证码/确认信息: {code} ...')
         script = f'''(() => {{
-            const inp = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #idTxtBx_OTC');
+            const inp = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #idTxtBx_OTC, #proof-confirmation-email-input');
             if (inp) {{
                 const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                setter.call(inp, "{code}");
+                setter.call(inp, {json.dumps(code)});
                 inp.dispatchEvent(new Event('input', {{bubbles: true}}));
                 inp.dispatchEvent(new Event('change', {{bubbles: true}}));
                 const btn = document.querySelector('#idSubmit_SAOTCC_Continue, #idSIButton9, button[type=submit], input[type=submit]');
@@ -451,6 +453,7 @@ class LoginSession:
             }
 
     def _run(self):
+        import json
         from msr import config, browser, cookies as cookie_mod
         profile_path = config.profile(self.name)
         chrome_dir = os.path.join(profile_path, 'chrome')
@@ -467,24 +470,46 @@ class LoginSession:
             tab = page_tabs[0] if page_tabs else self.ch.new_tab('about:blank')
             self.cdp = self.ch.attach(tab)
 
+            self.status = 'running'
+            self.message = 'Chromium 已就绪，正在打开微软登录网关...'
+            self.updated_at = time.time()
+
             self.log('正在打开微软登录网关 (https://login.live.com/)...')
+            self.message = '正在加载微软登录网关 (login.live.com)...'
             browser.navigate(self.cdp, 'https://login.live.com/')
-            time.sleep(3)
+            time.sleep(2)
 
             username_injected = False
+            username_injected_at = 0
             password_injected = False
+            password_injected_at = 0
 
             deadline = time.time() + 180
             while time.time() < deadline and not self.stop_requested:
                 self.updated_at = time.time()
+
+                # 检查浏览器进程健康状态
+                if self.ch and self.ch.proc and self.ch.proc.poll() is not None:
+                    self.status = 'error'
+                    self.message = 'Chromium 浏览器进程异常终止'
+                    self.log('❌ Chromium 浏览器进程已退出')
+                    break
+
+                curr_url = browser.ev(self.cdp, 'location.href') or ''
+                if curr_url.startswith('chrome-error://') or 'ERR_' in curr_url:
+                    self.status = 'error'
+                    self.message = '网络或代理连接失败，无法加载微软登录页，请核对网络与代理'
+                    self.log(f'❌ 浏览器网络加载失败: {curr_url}')
+                    break
 
                 # A. 优先检查当前是否有有效 Cookie (可能已登录或者在任何步骤后完成)
                 try:
                     res = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com']})
                     cks = res.get('cookies', [])
                     diag = cookie_mod.validate_cookies(cks)
-                    curr_url = browser.ev(self.cdp, 'location.href') or ''
-                    if diag.get('has_auth_u') or ('bing.com' in curr_url and diag.get('has_muid')) or ('account.microsoft.com' in curr_url):
+                    if diag.get('has_auth_u') or ('account.microsoft.com' in curr_url) or ('rewards.bing.com' in curr_url) or (password_injected and diag.get('has_muid')):
+                        self.status = 'running'
+                        self.message = '检测到已进入微软会话，正在导航至 Bing 提取并固化全量 Cookie...'
                         self.log('检测到已进入微软会话，正在导航至 Bing 提取并固化全量 Cookie...')
                         browser.navigate(self.cdp, 'https://www.bing.com/')
                         time.sleep(3)
@@ -494,6 +519,7 @@ class LoginSession:
                         if diag2['has_auth_u'] or diag2['has_muid']:
                             config.save_json(config.pfile(self.name, 'cookie.json'), final_cks)
                             self.log(f'✅ 成功捕获并保存全量 Cookie (共 {len(final_cks)} 条, 含 _U={diag2["has_auth_u"]})')
+                            self.message = '成功捕获全量 Cookie，正在静默换取 OAuth2 Token...'
                             self.log('正在自动通过登录会话静默换取 OAuth2 Token...')
                             tok = exchange_token_from_cookies(self.name, proxy=self.proxy, cdp=self.cdp, ch=self.ch, log_cb=self.log)
                             rg = config.load_json(config.pfile(self.name, 'region.json'), {}) or {}
@@ -523,67 +549,82 @@ class LoginSession:
                     self.log(f'❌ 微软错误提示: {self.error_msg}')
                     break
 
-                elif st_type == 'username_entry' and not username_injected:
-                    self.status = 'running'
-                    self.message = '正在填入微软账号...'
-                    self.log('正在填入微软账号...')
-                    user_ok = browser.ev(self.cdp, f'''(() => {{
-                        const input = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
-                        if (input) {{
-                            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                            setter.call(input, "{self.username}");
-                            input.dispatchEvent(new Event('input', {{bubbles: true}}));
-                            input.dispatchEvent(new Event('change', {{bubbles: true}}));
-                            return true;
-                        }}
-                        return false;
-                    }})()''')
-                    if user_ok:
-                        username_injected = True
-                        time.sleep(0.8)
-                        browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
-                        time.sleep(3)
+                elif st_type == 'username_entry':
+                    if not username_injected or (time.time() - username_injected_at > 8):
+                        self.status = 'running'
+                        self.message = f'正在自动填入微软账号 ({self.username})...'
+                        self.log(f'正在填入微软账号 ({self.username})...')
+                        user_ok = browser.ev(self.cdp, f'''(() => {{
+                            const input = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
+                            if (input) {{
+                                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                setter.call(input, {json.dumps(self.username)});
+                                input.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                input.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                return true;
+                            }}
+                            return false;
+                        }})()''')
+                        if user_ok:
+                            username_injected = True
+                            username_injected_at = time.time()
+                            self.message = '账号已填入，正在提交...'
+                            time.sleep(0.8)
+                            browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
+                            self.message = '账号已提交，正在等待微软响应...'
+                            time.sleep(2.5)
 
                 elif st_type == 'switch_to_password':
                     self.status = 'running'
-                    self.message = '检测到默认非密码选项，自动切换至“使用密码”模式...'
-                    self.log('检测到默认非密码选项，自动切换至“使用密码”模式')
-                    browser.ev(self.cdp, '''(() => {
-                        const leaf = Array.from(document.querySelectorAll('*')).find(x => {
-                            const t = (x.innerText || '').trim();
-                            return (t === '使用密码' || t === 'Use password') && x.children.length === 0;
-                        });
-                        if (leaf) {
-                            const target = leaf.closest('a, button, [role=button], .fui-Link') || leaf;
-                            target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
-                            target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
-                            target.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                        }
-                    })()''')
+                    self.message = '检测到非密码默认选项，正在自动切换至“使用密码”模式...'
+                    self.log('检测到非密码默认选项，自动切换至“使用密码”模式')
+                    x = state.get('x')
+                    y = state.get('y')
+                    if x is not None and y is not None:
+                        browser.mouse_click(self.cdp, x, y)
+                    else:
+                        browser.ev(self.cdp, '''(() => {
+                            const leaf = Array.from(document.querySelectorAll('*')).find(x => {
+                                const t = (x.innerText || '').trim().toLowerCase();
+                                return (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password') && x.children.length === 0;
+                            });
+                            if (leaf) {
+                                const target = leaf.closest('a, button, [role=button], .fui-Link') || leaf;
+                                target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                                target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                                target.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                            }
+                        })()''')
                     time.sleep(2.5)
 
-                elif st_type == 'password_entry' and not password_injected:
-                    self.status = 'running'
-                    self.message = '正在填入密码并提交...'
-                    self.log('正在填入密码并提交...')
-                    pwd_ok = browser.ev(self.cdp, f'''(() => {{
-                        const p = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
-                        if (p) {{
-                            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                            setter.call(p, "{self.password}");
-                            p.dispatchEvent(new Event('input', {{bubbles: true}}));
-                            p.dispatchEvent(new Event('change', {{bubbles: true}}));
-                            return true;
-                        }}
-                        return false;
-                    }})()''')
-                    if pwd_ok:
-                        password_injected = True
-                        time.sleep(0.8)
-                        browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
-                        time.sleep(3)
+                elif st_type == 'password_entry':
+                    if not password_injected or (time.time() - password_injected_at > 8):
+                        self.status = 'running'
+                        self.message = '正在填入密码并提交登录...'
+                        self.log('正在填入密码并提交...')
+                        pwd_ok = browser.ev(self.cdp, f'''(() => {{
+                            const p = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
+                            if (p) {{
+                                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                setter.call(p, {json.dumps(self.password)});
+                                p.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                p.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                return true;
+                            }}
+                            return false;
+                        }})()''')
+                        if pwd_ok:
+                            password_injected = True
+                            password_injected_at = time.time()
+                            self.message = '密码已填入，正在提交...'
+                            time.sleep(0.8)
+                            browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
+                            self.message = '密码已提交，正在等待微软校验与凭据固化...'
+                            time.sleep(2.5)
 
                 elif st_type == 'kmsi':
+                    self.status = 'running'
+                    self.message = '正在确认保持登录状态 (KMSI)...'
                     self.log('处理“保持登录状态”确认...')
                     browser.ev(self.cdp, 'document.querySelector("#acceptButton, input[value=Yes], input[value=\'是\'], #idSIButton9, button[type=submit]")?.click()')
                     time.sleep(2.5)
@@ -616,6 +657,9 @@ class LoginSession:
                     time.sleep(2)
 
                 else:
+                    title = browser.ev(self.cdp, 'document.title') or ''
+                    self.status = 'running'
+                    self.message = f'正在等待微软页面加载 ({title or curr_url[:40]})...'
                     time.sleep(1.5)
 
             if not self.result and self.status != 'error':

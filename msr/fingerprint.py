@@ -310,9 +310,7 @@ def apply_to_cdp(cdp, fp, log=print):
     try:
         cdp.call('Network.enable')
         cdp.call('Network.setExtraHTTPHeaders', {'headers': {
-            'x-rewards-source': 'msrewards-desktop',
-            'x-msrewards-app': '1',
             'Accept-Language': loc
         }})
     except Exception as ex:
-        log(f'Rewards专属头容忍: {ex}')
+        log(f'专属语言头容忍: {ex}')

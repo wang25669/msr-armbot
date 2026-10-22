@@ -77,6 +77,10 @@ def test_fingerprint():
     assert 'Page.addScriptToEvaluateOnNewDocument' in called_methods
     assert 'Network.enable' in called_methods
     assert 'Network.setExtraHTTPHeaders' in called_methods
+    extra_headers = [call[1] for call in mock_cdp.calls if call[0] == 'Network.setExtraHTTPHeaders'][0]['headers']
+    assert 'x-rewards-source' not in extra_headers
+    assert 'x-msrewards-app' not in extra_headers
+    assert 'Accept-Language' in extra_headers
 
     print('[OK] 账号独立指纹生成、确定性派生、持久化及CDP注入测试通过')
     print('ALL_OK')

@@ -1071,7 +1071,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             <button class="btn btn-secondary btn-sm" onclick="refreshLiveScreenshot()">刷新画面</button>
           </div>
           <div style="text-align:center; overflow:auto; max-height:380px; background:#000; border-radius:6px;">
-            <img id="live-screen-img" src="" alt="远程浏览器画面加载中..." style="max-width:100%; cursor:crosshair; display:inline-block;" onclick="handleScreenClick(event)">
+            <img id="live-screen-img" src="" alt="远程浏览器画面加载中..." style="max-width:100%; min-height:220px; background:#070d19; cursor:crosshair; display:inline-block; border-radius:6px;" onclick="handleScreenClick(event)">
           </div>
         </div>
 
@@ -2912,11 +2912,17 @@ class WebHandler(BaseHTTPRequestHandler):
                 self.wfile.write(img_bytes)
             else:
                 self.send_response(200)
-                self.send_header('Content-Type', 'image/gif')
-                self.send_header('Cache-Control', 'no-store, no-cache')
+                self.send_header('Content-Type', 'image/svg+xml; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
                 self.send_cors()
                 self.end_headers()
-                self.wfile.write(b'GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;')
+                svg_data = '''<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
+  <rect width="800" height="450" fill="#090d16"/>
+  <circle cx="400" cy="180" r="26" fill="none" stroke="#0ea5e9" stroke-width="4" stroke-dasharray="32 8"/>
+  <text x="400" y="245" text-anchor="middle" fill="#f8fafc" font-size="16" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-weight="600">正在建立浏览器安全视口...</text>
+  <text x="400" y="275" text-anchor="middle" fill="#94a3b8" font-size="13" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">页面就绪后画面将以低延迟实时呈现，支持直接点击交互</text>
+</svg>'''
+                self.wfile.write(svg_data.encode('utf-8'))
             return
 
         self.send_error(404, 'Not Found')
@@ -3463,8 +3469,26 @@ def _start_scheduler_daemon():
     t.start()
 
 
+def _init_reaper():
+    """在 Linux / Docker (PID 1) 环境自动回收孤儿子进程，防止 Chromium/Crashpad 僵尸进程。"""
+    try:
+        import signal
+        def _sigchld_handler(signum, frame):
+            while True:
+                try:
+                    pid, _ = os.waitpid(-1, os.WNOHANG)
+                    if pid <= 0:
+                        break
+                except (ChildProcessError, OSError):
+                    break
+        signal.signal(signal.SIGCHLD, _sigchld_handler)
+    except Exception:
+        pass
+
+
 def run_web(host='0.0.0.0', port=8080):
     """启动轻量级 Web 控制台服务器。"""
+    _init_reaper()
     addr = (host, int(port))
     server = HTTPServer(addr, WebHandler)
     _start_scheduler_daemon()

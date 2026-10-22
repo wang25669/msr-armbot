@@ -339,11 +339,10 @@ def disguise_edge(cdp, version='141', log=print):
     try:
         cdp.call('Network.enable')
         cdp.call('Network.setExtraHTTPHeaders', {'headers': {
-            'x-rewards-source': 'msrewards-desktop',
-            'x-msrewards-app': '1'
+            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7'
         }})
     except Exception as ex:
-        log(f'Rewards专属头注入容忍: {ex}')
+        log(f'默认语言头容忍: {ex}')
 
 
 def verify_disguise(cdp):
@@ -622,7 +621,12 @@ class Chromium:
                     break
                 time.sleep(0.1)
 
-            if self.proc.poll() is None:
+            if self.proc.poll() is not None:
+                try:
+                    self.proc.wait(timeout=1)
+                except Exception:
+                    pass
+            else:
                 try:
                     if hasattr(os, 'getpgid') and hasattr(os, 'killpg'):
                         pgid = os.getpgid(pid)
