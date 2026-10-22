@@ -11,6 +11,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -50,6 +51,7 @@ class CDP:
         self.event_handler = None
         self.fingerprint = None
         self.log = None
+        self._lock = threading.RLock()
 
     def __enter__(self):
         self.connect()
@@ -59,78 +61,81 @@ class CDP:
         self.close()
 
     def connect(self):
-        s = socket.create_connection((self.host, self.port), timeout=WS_TIMEOUT)
-        key = base64.b64encode(os.urandom(16)).decode()
-        req = (f'GET {self.path} HTTP/1.1\r\nHost: {self.host}:{self.port}\r\n'
-               'Upgrade: websocket\r\nConnection: Upgrade\r\n'
-               f'Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n')
-        s.sendall(req.encode())
-        buf = b''
-        while b'\r\n\r\n' not in buf:
-            chunk = s.recv(4096)
-            if not chunk:
-                raise StepError('CDP WebSocket 握手中断')
-            buf += chunk
-        if b'101' not in buf.split(b'\r\n')[0]:
-            raise StepError('CDP 握手失败')
-        self.sock = s
-        self._rest = buf.split(b'\r\n\r\n', 1)[1]
+        with self._lock:
+            s = socket.create_connection((self.host, self.port), timeout=WS_TIMEOUT)
+            key = base64.b64encode(os.urandom(16)).decode()
+            req = (f'GET {self.path} HTTP/1.1\r\nHost: {self.host}:{self.port}\r\n'
+                   'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+                   f'Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n')
+            s.sendall(req.encode())
+            buf = b''
+            while b'\r\n\r\n' not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    raise StepError('CDP WebSocket 握手中断')
+                buf += chunk
+            if b'101' not in buf.split(b'\r\n')[0]:
+                raise StepError('CDP 握手失败')
+            self.sock = s
+            self._rest = buf.split(b'\r\n\r\n', 1)[1]
 
     def close(self):
-        if self.sock:
-            try:
-                self.sock.close()
-            except Exception:
-                pass
-            self.sock = None
+        with self._lock:
+            if self.sock:
+                try:
+                    self.sock.close()
+                except Exception:
+                    pass
+                self.sock = None
 
     def _reconnect(self):
-        self.close()
-        # 1. 尝试直接重连原 path (最多 2 次)
-        for attempt in range(2):
+        with self._lock:
+            self.close()
+            # 1. 尝试直接重连原 path (最多 2 次)
+            for attempt in range(2):
+                try:
+                    self.connect()
+                    for m in ('Page.enable', 'Runtime.enable'):
+                        try:
+                            self._call_once(m, timeout=15)
+                        except Exception:
+                            pass
+                    return True
+                except Exception:
+                    self.close()
+                    time.sleep(1)
+
+            # 2. 若原 tab 已失效/被关闭，查询 Chromium targets 找寻活跃 page 或创建新 page 兜底恢复
             try:
-                self.connect()
-                for m in ('Page.enable', 'Runtime.enable'):
-                    try:
-                        self._call_once(m, timeout=15)
-                    except Exception:
-                        pass
-                return True
+                targets = _http_json(f'http://{self.host}:{self.port}/json/list', timeout=3)
+                # 仅寻找真实的普通网页标签 (type == 'page')
+                page_tab = next((t for t in targets if t.get('type') == 'page' and t.get('webSocketDebuggerUrl')), None)
+                if not page_tab:
+                    # 没有任何普通 page，自动开一个新 page 兜底
+                    page_tab = _http_json(f'http://{self.host}:{self.port}/json/new?about:blank', method='PUT', timeout=5)
+
+                if page_tab and page_tab.get('webSocketDebuggerUrl'):
+                    new_ws = page_tab['webSocketDebuggerUrl']
+                    self.ws_url = new_ws
+                    u = urllib.parse.urlparse(new_ws)
+                    self.path = u.path + (('?' + u.query) if u.query else '')
+                    self.connect()
+                    for m in ('Page.enable', 'Runtime.enable'):
+                        try:
+                            self._call_once(m, timeout=15)
+                        except Exception:
+                            pass
+                    if self.fingerprint and self.log:
+                        try:
+                            from msr import fingerprint
+                            fingerprint.apply_to_cdp(self, self.fingerprint, self.log)
+                        except Exception:
+                            pass
+                    return True
             except Exception:
-                self.close()
-                time.sleep(1)
+                pass
 
-        # 2. 若原 tab 已失效/被关闭，查询 Chromium targets 找寻活跃 page 或创建新 page 兜底恢复
-        try:
-            targets = _http_json(f'http://{self.host}:{self.port}/json/list', timeout=3)
-            # 仅寻找真实的普通网页标签 (type == 'page')
-            page_tab = next((t for t in targets if t.get('type') == 'page' and t.get('webSocketDebuggerUrl')), None)
-            if not page_tab:
-                # 没有任何普通 page，自动开一个新 page 兜底
-                page_tab = _http_json(f'http://{self.host}:{self.port}/json/new?about:blank', method='PUT', timeout=5)
-
-            if page_tab and page_tab.get('webSocketDebuggerUrl'):
-                new_ws = page_tab['webSocketDebuggerUrl']
-                self.ws_url = new_ws
-                u = urllib.parse.urlparse(new_ws)
-                self.path = u.path + (('?' + u.query) if u.query else '')
-                self.connect()
-                for m in ('Page.enable', 'Runtime.enable'):
-                    try:
-                        self._call_once(m, timeout=15)
-                    except Exception:
-                        pass
-                if self.fingerprint and self.log:
-                    try:
-                        from msr import fingerprint
-                        fingerprint.apply_to_cdp(self, self.fingerprint, self.log)
-                    except Exception:
-                        pass
-                return True
-        except Exception:
-            pass
-
-        return False
+            return False
 
     def _send_frame(self, payload):
         if not self.sock:
@@ -199,23 +204,24 @@ class CDP:
         raise StepError(f'CDP {method} 超时')
 
     def call(self, method, params=None, timeout=WS_TIMEOUT):
-        if not self.sock:
-            if not self._reconnect():
-                raise StepError(f'CDP 连接已断开且重连失败: {method}')
-        try:
-            return self._call_once(method, params, timeout)
-        except (BrokenPipeError, ConnectionResetError, OSError, socket.error, AttributeError) as e:
-            if not self._reconnect():
-                raise StepError(f'CDP 调用失败且重连无效: {method}: {e}')
+        with self._lock:
+            if not self.sock:
+                if not self._reconnect():
+                    raise StepError(f'CDP 连接已断开且重连失败: {method}')
             try:
                 return self._call_once(method, params, timeout)
-            except Exception as e2:
-                raise StepError(f'CDP {method} 重连后仍失败: {e2}')
-        except StepError as e:
-            err_str = str(e)
-            if any(k in err_str for k in ('连接被关闭', '握手', '中断', '未连接')) and self._reconnect():
-                return self._call_once(method, params, timeout)
-            raise
+            except (BrokenPipeError, ConnectionResetError, OSError, socket.error, AttributeError) as e:
+                if not self._reconnect():
+                    raise StepError(f'CDP 调用失败且重连无效: {method}: {e}')
+                try:
+                    return self._call_once(method, params, timeout)
+                except Exception as e2:
+                    raise StepError(f'CDP {method} 重连后仍失败: {e2}')
+            except StepError as e:
+                err_str = str(e)
+                if any(k in err_str for k in ('连接被关闭', '握手', '中断', '未连接')) and self._reconnect():
+                    return self._call_once(method, params, timeout)
+                raise
 
 
 def ev(cdp, expr, timeout=WS_TIMEOUT):

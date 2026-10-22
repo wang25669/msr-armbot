@@ -392,6 +392,9 @@ class LoginSession:
         self.stop_requested = False
         self.result = None
         self._lock = threading.Lock()
+        self._last_screenshot = None
+        self._last_screenshot_at = 0
+        self._screenshot_lock = threading.Lock()
 
     def log(self, msg):
         ts = time.strftime('%H:%M:%S')
@@ -428,14 +431,24 @@ class LoginSession:
     def get_screenshot(self):
         if not self.cdp:
             return None
-        from msr import browser
-        b64 = browser.capture_screenshot(self.cdp, quality=65)
-        if b64:
-            try:
-                return base64.b64decode(b64)
-            except Exception:
-                return None
-        return None
+        now = time.time()
+        if self._last_screenshot and (now - self._last_screenshot_at < 0.3):
+            return self._last_screenshot
+        if not self._screenshot_lock.acquire(blocking=False):
+            return self._last_screenshot
+        try:
+            from msr import browser
+            b64 = browser.capture_screenshot(self.cdp, quality=65)
+            if b64:
+                try:
+                    self._last_screenshot = base64.b64decode(b64)
+                    self._last_screenshot_at = time.time()
+                    return self._last_screenshot
+                except Exception:
+                    pass
+            return self._last_screenshot
+        finally:
+            self._screenshot_lock.release()
 
     def submit_otp(self, code):
         if not self.cdp:
@@ -648,7 +661,12 @@ class LoginSession:
                             user_ok = browser.ev(self.cdp, f'''(() => {{
                                 const input = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
                                 if (input) {{
-                                    input.value = {json.dumps(self.username)};
+                                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                                    if (setter) {{
+                                        setter.call(input, {json.dumps(self.username)});
+                                    }} else {{
+                                        input.value = {json.dumps(self.username)};
+                                    }}
                                     input.dispatchEvent(new Event('input', {{bubbles: true}}));
                                     input.dispatchEvent(new Event('change', {{bubbles: true}}));
                                     return true;
@@ -660,7 +678,18 @@ class LoginSession:
                                 username_injected_at = time.time()
                                 self.message = '账号已填入，正在提交...'
                                 time.sleep(0.8)
-                                browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
+                                browser.ev(self.cdp, '''(() => {
+                                    const btn = document.querySelector('#idSIButton9, button[type=submit], input[type=submit], #iNext');
+                                    if (btn) {
+                                        btn.removeAttribute('disabled');
+                                        btn.click();
+                                    }
+                                    const inp = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
+                                    if (inp) {
+                                        inp.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+                                        inp.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+                                    }
+                                })()''')
                                 self.message = '账号已提交，正在等待微软响应...'
                                 time.sleep(2.5)
 
@@ -694,7 +723,12 @@ class LoginSession:
                             pwd_ok = browser.ev(self.cdp, f'''(() => {{
                                 const p = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
                                 if (p) {{
-                                    p.value = {json.dumps(self.password)};
+                                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                                    if (setter) {{
+                                        setter.call(p, {json.dumps(self.password)});
+                                    }} else {{
+                                        p.value = {json.dumps(self.password)};
+                                    }}
                                     p.dispatchEvent(new Event('input', {{bubbles: true}}));
                                     p.dispatchEvent(new Event('change', {{bubbles: true}}));
                                     return true;
@@ -706,7 +740,18 @@ class LoginSession:
                                 password_injected_at = time.time()
                                 self.message = '密码已填入，正在提交...'
                                 time.sleep(0.8)
-                                browser.ev(self.cdp, 'document.querySelector("button[type=submit], input[type=submit], #idSIButton9")?.click()')
+                                browser.ev(self.cdp, '''(() => {
+                                    const btn = document.querySelector('#idSIButton9, button[type=submit], input[type=submit]');
+                                    if (btn) {
+                                        btn.removeAttribute('disabled');
+                                        btn.click();
+                                    }
+                                    const p = document.querySelector('#passwordEntry, input[name=passwd], input[type=password], #i0118');
+                                    if (p) {
+                                        p.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+                                        p.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+                                    }
+                                })()''')
                                 self.message = '密码已提交，正在等待微软校验与凭据固化...'
                                 time.sleep(2.5)
 

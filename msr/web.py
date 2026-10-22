@@ -35,7 +35,7 @@ import sys
 import threading
 import time
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, ThreadingHTTPServer as HTTPServer
 
 LIVE_LOGS = []
 LIVE_LOGS_LOCK = threading.Lock()
@@ -2745,14 +2745,20 @@ HTML_CONTENT = """<!DOCTYPE html>
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({name: activeAccountName, username: u, password: p, save_cred: saveCred})
         });
-        const d = await res.json();
+        const text = await res.text();
+        let d;
+        try {
+          d = JSON.parse(text);
+        } catch(parseErr) {
+          throw new Error(`服务网关响应异常 (HTTP ${res.status}): ${text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100) || text.slice(0, 80)}`);
+        }
         if (d.status !== 'ok') {
           throw new Error(d.message || '启动失败');
         }
         if (loginPollTimer) clearInterval(loginPollTimer);
         loginPollTimer = setInterval(pollLoginSession, 1200);
       } catch(err) {
-        statusEl.innerHTML = `<span style="color:var(--danger)">❌ 启动失败: ${err}</span>`;
+        statusEl.innerHTML = `<span style="color:var(--danger)">❌ 启动失败: ${err.message || err}</span>`;
         btn.disabled = false;
         cancelBtn.style.display = 'none';
       }
@@ -2762,7 +2768,13 @@ HTML_CONTENT = """<!DOCTYPE html>
       if (!activeAccountName) return;
       try {
         const res = await fetch(`/api/auth/session/status?name=${encodeURIComponent(activeAccountName)}`);
-        const s = await res.json();
+        const text = await res.text();
+        let s;
+        try {
+          s = JSON.parse(text);
+        } catch(e) {
+          return;
+        }
         const statusEl = document.getElementById('login-pwd-status');
         const authPushBox = document.getElementById('login-auth-push-box');
         const otpBox = document.getElementById('login-otp-box');
@@ -3608,7 +3620,7 @@ def run_web(host='0.0.0.0', port=8080):
     """启动轻量级 Web 控制台服务器。"""
     _init_reaper()
     addr = (host, int(port))
-    server = HTTPServer(addr, WebHandler)
+    server = ThreadingHTTPServer(addr, WebHandler)
     _start_scheduler_daemon()
     print(f'MSR-ArmBot Web 控制台已启动: http://{host}:{port}', flush=True)
     append_live_log(f'Web 控制台服务已启动于 http://{host}:{port}')
