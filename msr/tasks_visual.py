@@ -51,17 +51,68 @@ PANEL_JS = '''(() => {
  return null;
 })()'''
 
-LENS_PICK = '''(() => {const vis=x=>x&&x.getBoundingClientRect().width>0;
-  const byLabel=[...document.querySelectorAll('[aria-label="使用图像搜索"]')].find(vis);
-  if (byLabel) return byLabel;
-  const b=document.querySelector('#sbi_b'); if (vis(b)) return b;
-  const s=document.querySelector('#sb_sbi'); return vis(s)?s:null;})()'''
+LENS_PICK = '''(() => {
+  const vis = x => x && x.getBoundingClientRect().width > 0 && x.getBoundingClientRect().height > 0;
 
-BOX_READY = '''(() => {const e=document.querySelector('#sb_imgpst');
-  const p=document.querySelector('.sbipane');
-  return !!(e && e.getBoundingClientRect().width>0 && p && p.getBoundingClientRect().width>0);})()'''
+  // 1. 结构化入口 (Bing 首页镜头与搜索页镜头)
+  const structural = [
+    document.querySelector('#sb_cam_island'),
+    document.querySelector('#sb_cam_island .b_icon'),
+    document.querySelector('[data-island="cam"]'),
+    document.querySelector('#sb_sbi'),
+    document.querySelector('#sbi_b'),
+    document.querySelector('.hp_island_host.camera'),
+    document.querySelector('#sb_form .camera'),
+    document.querySelector('.sbi_hpicn')
+  ];
+  for (const el of structural) {
+    if (vis(el)) return el;
+  }
 
-LAND = '''(() => {const u=new URL(location.href);return (u.hostname.endsWith('bing.com') && u.pathname==='/search' && u.searchParams.has('bcid'));})()'''
+  // 2. 多语言语义属性入口 (适配新加坡/海外英文环境及多语言 Bing)
+  const isLensAria = s => {
+    if (!s) return false;
+    const l = s.toLowerCase();
+    return (
+      (l.includes('image') && l.includes('search')) ||
+      (l.includes('visual') && l.includes('search')) ||
+      (l.includes('search') && l.includes('by image')) ||
+      l.includes('图像搜索') || l.includes('图片搜索') ||
+      l.includes('视觉搜索') || l.includes('识图') ||
+      l.includes('按图像搜索') || l.includes('使用图像搜索')
+    );
+  };
+
+  const formCandidates = [
+    ...document.querySelectorAll('#sb_form [aria-label], #sb_form [title], #sb_form [data-sbtip], #sb_form [data-tooltip], [role="button"]')
+  ];
+  for (const el of formCandidates) {
+    if (isLensAria(el.getAttribute('aria-label')) ||
+        isLensAria(el.getAttribute('title')) ||
+        isLensAria(el.getAttribute('data-sbtip')) ||
+        isLensAria(el.getAttribute('data-tooltip'))) {
+      if (vis(el)) return el;
+    }
+  }
+
+  return null;
+})()'''
+
+BOX_READY = '''(() => {
+  const vis = x => x && x.getBoundingClientRect().width > 0 && x.getBoundingClientRect().height > 0;
+  const inp = document.querySelector('#sb_imgpst') || document.querySelector('#sb_sbi_ipt') || document.querySelector('input.imgpst');
+  return !!(inp && vis(inp));
+})()'''
+
+LAND = '''(() => {
+  try {
+    const u = new URL(location.href);
+    if (!u.hostname.endsWith('bing.com') || u.pathname !== '/search') return false;
+    return u.searchParams.has('bcid') || (u.searchParams.get('FORM') || '').startsWith('SBI') || (u.searchParams.get('features') || '').includes('vsstreak');
+  } catch(e) {
+    return false;
+  }
+})()'''
 
 
 def wait_js(cdp, expr, seconds=30):
@@ -111,7 +162,7 @@ def get_entry(cdp):
          const a=as.find(a=>{try {const u=new URL(a.href);return u.hostname==='www.bing.com' &&
             (u.searchParams.get('features')||'').split(',').includes('vsstreak');}catch(e){return false;}});
          return a && a.href;})()''')
-        href = wait_js(cdp, expr, 20)
+        href = wait_js(cdp, expr, 5)
         if href:
             return href
     except Exception:
@@ -120,7 +171,7 @@ def get_entry(cdp):
 
 
 def submit_image(cdp, image, entry):
-    """提交图片 URL 并等落页。方式1=真人点框+真实键入+Enter（主），方式2=合成 paste（降级）。"""
+    """提交图片 URL 并等落页。方式1=点输入框+赋值+Enter，方式2=合成 paste（降级）。"""
     navigate(cdp, entry)
     wait_js(cdp, '!!(%s)' % LENS_PICK, 25)
     opened = False
@@ -130,52 +181,87 @@ def submit_image(cdp, image, entry):
         except Exception:
             pass
         try:
-            wait_js(cdp, BOX_READY, 12)
+            wait_js(cdp, BOX_READY, 5)
             opened = True
             break
         except StepError:
-            time.sleep(2)
+            pass
+        # 降级：直接触发镜头元素及父级 click() 事件（应对部分桌面版外层 div 拦截）
+        try:
+            ev(cdp, '(() => { const el = (%s); if (el) { el.click(); if (el.parentElement) el.parentElement.click(); } })()' % LENS_PICK)
+            wait_js(cdp, BOX_READY, 6)
+            opened = True
+            break
+        except Exception:
+            time.sleep(1.5)
+
     if not opened:
         raise StepError('视觉镜头/弹层 3 轮未就绪')
-    time.sleep(2)
+    time.sleep(1.5)
 
-    # 方式1：真人点 URL 框 + 真实键入 + Enter（实战验证过的方式）
+    inp_js = 'document.querySelector("#sb_imgpst") || document.querySelector("#sb_sbi_ipt") || document.querySelector("input.imgpst")'
+
+    # 方式1：真人点 URL 框 + 填入图片地址 + Enter（实战验证最稳定）
     try:
-        human_click(cdp, 'document.querySelector("#sb_imgpst")', label='图片URL框', close_new=False)
-        typed = False
-        for _ in range(2):
-            ev(cdp, 'document.querySelector("#sb_imgpst").select()')
-            cdp.call('Input.insertText', {'text': image})
-            if ev(cdp, 'document.querySelector("#sb_imgpst").value') == image:
-                typed = True
-                break
-        if typed:
-            for t in ('keyDown', 'keyUp'):
-                cdp.call('Input.dispatchKeyEvent',
-                         {'type': t, 'key': 'Enter', 'code': 'Enter',
-                          'windowsVirtualKeyCode': 13, 'nativeVirtualKeyCode': 13,
-                          'text': '\r' if t == 'keyDown' else '',
-                          'unmodifiedText': '\r' if t == 'keyDown' else ''})
-            try:
-                wait_js(cdp, LAND, 25)
-                time.sleep(15)
-                return 'typed'
-            except StepError:
-                pass
+        try:
+            human_click(cdp, inp_js, label='图片URL框', close_new=False)
+        except Exception:
+            pass
+
+        # 填入并触发 input/change 事件
+        ev(cdp, '''((sel, img) => {
+            const inp = eval(sel);
+            if (inp) {
+                inp.focus();
+                inp.value = img;
+                inp.dispatchEvent(new Event('input', {bubbles: true}));
+                inp.dispatchEvent(new Event('change', {bubbles: true}));
+            }
+        })(%s, %s)''' % (json.dumps(inp_js), json.dumps(image)))
+
+        time.sleep(0.8)
+
+        # 派发 Enter 键
+        for t in ('keyDown', 'keyUp'):
+            cdp.call('Input.dispatchKeyEvent', {
+                'type': t, 'key': 'Enter', 'code': 'Enter',
+                'windowsVirtualKeyCode': 13, 'nativeVirtualKeyCode': 13,
+                'text': '\r' if t == 'keyDown' else '',
+                'unmodifiedText': '\r' if t == 'keyDown' else ''
+            })
+
+        try:
+            wait_js(cdp, LAND, 25)
+            time.sleep(15)
+            return 'typed'
+        except StepError:
+            pass
     except Exception:
         pass
 
     # 方式2：合成 paste（降级）
-    js = ('(() => {const el=document.querySelector("#sb_imgpst");'
+    js = ('(() => {const el=%s;'
           'if(!el) return false; const dt=new DataTransfer();'
           'dt.setData("text/plain", %s);'
           'el.dispatchEvent(new ClipboardEvent("paste",{clipboardData:dt,bubbles:true,cancelable:true}));'
-          'return true;})()' % json.dumps(image))
-    if not ev(cdp, js):
-        raise StepError('视觉两种提交方式均失败(弹层不存在)')
-    wait_js(cdp, LAND, 25)
-    time.sleep(15)
-    return 'paste'
+          'return true;})()' % (inp_js, json.dumps(image)))
+    if ev(cdp, js):
+        time.sleep(0.5)
+        for t in ('keyDown', 'keyUp'):
+            cdp.call('Input.dispatchKeyEvent', {
+                'type': t, 'key': 'Enter', 'code': 'Enter',
+                'windowsVirtualKeyCode': 13, 'nativeVirtualKeyCode': 13,
+                'text': '\r' if t == 'keyDown' else '',
+                'unmodifiedText': '\r' if t == 'keyDown' else ''
+            })
+        try:
+            wait_js(cdp, LAND, 25)
+            time.sleep(15)
+            return 'paste'
+        except StepError:
+            pass
+
+    raise StepError('视觉提交完成但落页未确认(LAND超时)')
 
 
 def image_pool(n=8):
