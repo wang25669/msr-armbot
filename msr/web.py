@@ -37,9 +37,143 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, ThreadingHTTPServer as HTTPServer
 
+import re
+
 LIVE_LOGS = []
+LIVE_LOGS_SET = set()
 LIVE_LOGS_LOCK = threading.Lock()
-MAX_LIVE_LOGS = 1000
+MAX_LIVE_LOGS = 2000
+LAST_DISK_SYNC = 0
+
+
+def format_log_line(raw_line, default_acc='系统', known_accounts=None):
+    """标准化单行日志为: [HH:MM:SS] [账号/系统] 正文。保证每行仅有唯一时间标签与账号标签。"""
+    s = str(raw_line or '').strip()
+    if not s:
+        return ''
+
+    # 1. 提取或剥离行首可能存在的重复时间戳
+    ts = None
+    while True:
+        m_ts = re.match(r'^(?:\[?(\d{4}-\d{2}-\d{2}\s+)?(\d{2}:\d{2}:\d{2})\]?\s*)+', s)
+        if m_ts:
+            ts = m_ts.group(2)
+            s = s[m_ts.end():].strip()
+        else:
+            break
+
+    if not ts:
+        ts = time.strftime('%H:%M:%S')
+
+    # 2. 提取或匹配账号标签 [acc] 或裸账号名 acc
+    m_acc = re.match(r'^\[([a-zA-Z0-9_\-\u4e00-\u9fa5]+)\]\s*', s)
+    if m_acc and (not known_accounts or m_acc.group(1) in known_accounts or m_acc.group(1) in ('系统', '定时调度')):
+        acc = m_acc.group(1)
+        content = s[m_acc.end():].strip()
+    else:
+        # 尝试匹配无括号的账号名 (例如 "gkerstnt refresh 第1次失败")
+        m_bare = re.match(r'^([a-zA-Z0-9_\-]+)\s+', s)
+        if m_bare and known_accounts and m_bare.group(1) in known_accounts:
+            acc = m_bare.group(1)
+            content = s[m_bare.end():].strip()
+        else:
+            acc = default_acc or '系统'
+            content = s
+
+    # 消除正文中残留的重复自身标签或账号名，如 [tntker] 或 tntker
+    while content.startswith(f'[{acc}]'):
+        content = content[len(f'[{acc}]'):].strip()
+    if content.startswith(f'{acc} '):
+        content = content[len(f'{acc} '):].strip()
+
+    return f'[{ts}] [{acc}] {content}'
+
+
+def append_live_log(msg, name=None):
+    from msr import config
+    known = None
+    try:
+        known = {a['name'] for a in config.accounts()}
+    except Exception:
+        pass
+    line = format_log_line(msg, default_acc=name or '系统', known_accounts=known)
+    if not line:
+        return
+    with LIVE_LOGS_LOCK:
+        if line not in LIVE_LOGS_SET:
+            LIVE_LOGS_SET.add(line)
+            LIVE_LOGS.append(line)
+            if len(LIVE_LOGS) > MAX_LIVE_LOGS:
+                removed = LIVE_LOGS.pop(0)
+                LIVE_LOGS_SET.discard(removed)
+    print(line, flush=True)
+
+
+def sync_logs_from_disk(force=False):
+    """从落盘日志增量同步，彻底杜绝重复输出，并保证时序一致。"""
+    global LAST_DISK_SYNC
+    now = time.time()
+    if not force and (now - LAST_DISK_SYNC < 2.0):
+        return
+    LAST_DISK_SYNC = now
+
+    from msr import config
+    today = time.strftime('%Y-%m-%d')
+    known = set()
+    try:
+        known = {a['name'] for a in config.accounts()}
+    except Exception:
+        pass
+
+    new_lines = []
+
+    # 1. 扫描各账号今日落盘日志
+    try:
+        for acc in config.accounts():
+            name = acc['name']
+            log_f = os.path.join(config.pfile(name, 'logs'), f'{today}.log')
+            if os.path.isfile(log_f):
+                try:
+                    with open(log_f, 'r', encoding='utf-8', errors='ignore') as f:
+                        for l in f:
+                            fl = format_log_line(l.strip(), default_acc=name, known_accounts=known)
+                            if fl and fl not in LIVE_LOGS_SET:
+                                new_lines.append(fl)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 2. 扫描 cron.log (若存在)
+    try:
+        cron_p = os.path.join(getattr(config, 'HOME', '/data'), 'cron.log')
+        if os.path.isfile(cron_p):
+            with open(cron_p, 'r', encoding='utf-8', errors='ignore') as f:
+                for l in f.readlines()[-100:]:
+                    fl = format_log_line(l.strip(), default_acc='系统', known_accounts=known)
+                    if fl and fl not in LIVE_LOGS_SET:
+                        new_lines.append(fl)
+    except Exception:
+        pass
+
+    if new_lines:
+        def _extract_ts(line):
+            m = re.match(r'^\[(\d{2}:\d{2}:\d{2})\]', line)
+            return m.group(1) if m else '00:00:00'
+
+        with LIVE_LOGS_LOCK:
+            for l in new_lines:
+                if l not in LIVE_LOGS_SET:
+                    LIVE_LOGS_SET.add(l)
+                    LIVE_LOGS.append(l)
+            # 保持全局时间升序
+            LIVE_LOGS.sort(key=_extract_ts)
+            if len(LIVE_LOGS) > MAX_LIVE_LOGS:
+                excess = len(LIVE_LOGS) - MAX_LIVE_LOGS
+                for _ in range(excess):
+                    removed = LIVE_LOGS.pop(0)
+                    LIVE_LOGS_SET.discard(removed)
+
 
 RUNNER_STATE = {
     'running': False,
@@ -49,16 +183,6 @@ RUNNER_STATE = {
     'exit_code': None,
 }
 RUNNER_STATE_LOCK = threading.Lock()
-
-
-def append_live_log(msg):
-    ts = time.strftime('%H:%M:%S')
-    line = f'[{ts}] {msg}'
-    with LIVE_LOGS_LOCK:
-        LIVE_LOGS.append(line)
-        if len(LIVE_LOGS) > MAX_LIVE_LOGS:
-            LIVE_LOGS.pop(0)
-    print(line, flush=True)
 
 
 HTML_CONTENT = """<!DOCTYPE html>
@@ -2349,38 +2473,17 @@ HTML_CONTENT = """<!DOCTYPE html>
       let html = '';
       let matchedCount = 0;
       const kw = activeSearchKeyword.trim().toLowerCase();
-      let currentSectionAccount = null;
 
       for (let i = 0; i < rawLogLines.length; i++) {
         const line = rawLogLines[i];
         if (!line.trim()) continue;
 
-        // 识别段落所属账号 (例如: === 账号 [gkerswang] 今日落盘日志 ===)
-        const accHeaderMatch = line.match(/=== 账号 \[([a-zA-Z0-9_\-]+)\] 今日落盘日志 ===/);
-        const liveAccMatch = line.match(/=== 实时内存日志 \(账号:\s*\[?([a-zA-Z0-9_\-]+)\]?\)\s*===/);
-        if (accHeaderMatch) {
-          currentSectionAccount = accHeaderMatch[1];
-        } else if (liveAccMatch) {
-          currentSectionAccount = liveAccMatch[1];
-        } else if (line.startsWith('=== 实时内存日志') || line.startsWith('=== 系统')) {
-          currentSectionAccount = null;
-        }
-
-        // 1. 账号过滤
+        // 1. 账号过滤 (每行日志必定严格包含 [账号] 或 [系统])
         if (activeAccountFilter !== 'all') {
           if (activeAccountFilter === '__system__') {
-            if (currentSectionAccount) continue;
-            const hasAcc = knownAccounts.some(acc => line.includes(`[${acc}]`) || line.includes(`账号 [${acc}]`));
-            if (hasAcc) continue;
+            if (!line.includes('[系统]') && !line.includes('[定时调度]')) continue;
           } else {
-            // 当前处于特定账号视图
-            const isMatch = (currentSectionAccount === activeAccountFilter) ||
-                            line.includes(`[${activeAccountFilter}]`) ||
-                            line.includes(`[${activeAccountFilter} `) ||
-                            line.includes(`账号 [${activeAccountFilter}]`) ||
-                            line.includes(`任务: ${activeAccountFilter}`) ||
-                            line.includes(`=== 账号 [${activeAccountFilter}]`);
-            if (!isMatch) continue;
+            if (!line.includes(`[${activeAccountFilter}]`)) continue;
           }
         }
 
@@ -2388,7 +2491,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         const isErr = l.includes('error') || l.includes('exception') || l.includes('失败') || l.includes('失效') || l.includes('熔断') || l.includes('timed out') || l.includes('failed');
         const isWarn = l.includes('warn') || l.includes('警告') || l.includes('未推进') || l.includes('重试') || l.includes('未达标');
         const isSucc = l.includes('成功') || l.includes('完成') || l.includes('[ok]') || l.includes('all_ok') || l.includes('入账') || l.includes('有效') || l.includes('自适应对齐至');
-        const isBanner = line.startsWith('===') || line.startsWith('>>>') || line.startsWith('<<<');
+        const isBanner = line.includes('===') || line.includes('>>>') || line.includes('<<<');
         const isSearch = l.includes('搜索') || l.includes('热搜') || l.includes('打卡') || l.includes('答题') || l.includes('资讯') || l.includes('阅读');
 
         // 2. 级别过滤
@@ -2409,16 +2512,15 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         let escaped = escapeHtml(line);
 
-        // 高亮时间戳
-        escaped = escaped.replace(/^(\[\d{2}:\d{2}:\d{2}\]|\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/g, '<span class="l-ts">$1</span>');
+        // 高亮行首时间戳 [HH:MM:SS]
+        escaped = escaped.replace(/^\[(\d{2}:\d{2}:\d{2})\]/g, '<span class="l-ts">[$1]</span>');
 
-        // 仅当方括号内的名字确实是系统配置的真实账号时，才渲染为账号徽标！
-        // 绝不误伤 [1]、[2]、[1/10篇]、[后台并行]、[search_direct]
-        escaped = escaped.replace(/\[([a-zA-Z0-9_\-]+)\]/g, (match, p1) => {
-          if (knownAccounts.includes(p1)) {
-            return `<span class="l-acc-badge">${p1}</span>`;
+        // 高亮行首紧随的账号徽标 [TAG]
+        escaped = escaped.replace(/(<span class="l-ts">\[\d{2}:\d{2}:\d{2}\]<\/span>\s*)\[([a-zA-Z0-9_\-\u4e00-\u9fa5]+)\]/g, (match, tsPart, p1) => {
+          if (p1 === '系统' || p1 === '定时调度') {
+            return `${tsPart}<span class="l-acc-badge" style="background:rgba(148,163,184,0.18); color:#94a3b8;">${p1}</span>`;
           }
-          return match;
+          return `${tsPart}<span class="l-acc-badge">${p1}</span>`;
         });
 
         // 高亮关键词 (安全无正则异常匹配)
@@ -3471,7 +3573,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 RUNNER_STATE['last_line'] = '正在启动任务...'
                 RUNNER_STATE['exit_code'] = None
 
-            append_live_log(f'>>> 开始执行任务: {name or "--all"}')
+            append_live_log(f'>>> 开始执行任务: {name or "--all"}', name='系统')
             cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', name or '--all']
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             for line in iter(proc.stdout.readline, ''):
@@ -3485,7 +3587,7 @@ class WebHandler(BaseHTTPRequestHandler):
             with RUNNER_STATE_LOCK:
                 RUNNER_STATE['running'] = False
                 RUNNER_STATE['exit_code'] = proc.returncode
-            append_live_log(f'<<< 任务执行完毕 (exit={proc.returncode})')
+            append_live_log(f'<<< 任务执行完毕 (exit={proc.returncode})', name='系统')
 
         t = threading.Thread(target=bg_runner)
         t.daemon = True
@@ -3493,9 +3595,6 @@ class WebHandler(BaseHTTPRequestHandler):
         self._json_resp({'status': 'ok', 'message': '后台执行进程已启动'})
 
     def _handle_logs(self, u=None):
-        from msr import config
-        lines = []
-
         acc_filter = None
         format_param = 'text'
         if u and getattr(u, 'query', None):
@@ -3503,65 +3602,21 @@ class WebHandler(BaseHTTPRequestHandler):
             acc_filter = params.get('acc', [None])[0]
             format_param = params.get('format', ['text'])[0]
 
-        all_accounts = [a['name'] for a in config.accounts()]
+        # 增量从磁盘日志同步最新内容到 LIVE_LOGS (去重并保持单一有序数据源)
+        sync_logs_from_disk()
 
-        # 1. 先提取落盘历史日志 (全部模式下按最后修改时间正序排列，旧在上、新在下)
-        today = time.strftime('%Y-%m-%d')
-        if acc_filter == '__system__':
-            for cron_p in (os.path.join(getattr(config, 'HOME', '/data'), 'cron.log'), '/data/cron.log', 'cron.log'):
-                if os.path.isfile(cron_p):
-                    lines.append('=== 系统 Cron 执行日志 ===')
-                    try:
-                        with open(cron_p, 'r', encoding='utf-8', errors='ignore') as f:
-                            lines.extend(f.readlines()[-200:])
-                    except Exception:
-                        pass
-                    lines.append('')
-                    break
-        else:
-            accounts = config.accounts()
-            if acc_filter and acc_filter != 'all':
-                accounts = [a for a in accounts if a['name'] == acc_filter]
-            else:
-                # 全部账号模式：按今日日志最后修改时间升序排列，使今天越晚执行的账号越靠下方
-                def _get_mtime(a):
-                    lf = os.path.join(config.pfile(a['name'], 'logs'), f'{today}.log')
-                    return os.path.getmtime(lf) if os.path.isfile(lf) else 0
-                accounts = sorted(accounts, key=_get_mtime)
-
-            for acc in accounts:
-                name = acc['name']
-                log_f = os.path.join(config.pfile(name, 'logs'), f'{today}.log')
-                if os.path.isfile(log_f):
-                    lines.append(f'=== 账号 [{name}] 今日落盘日志 ===')
-                    try:
-                        with open(log_f, 'r', encoding='utf-8', errors='ignore') as f:
-                            lines.extend(f.readlines()[-400:])
-                    except Exception:
-                        pass
-                    lines.append('')
-
-        # 2. 实时内存日志流放在最底部 (保证自动滚屏始终锚定在最新实时运行流上)
         with LIVE_LOGS_LOCK:
-            if LIVE_LOGS:
-                if acc_filter == '__system__':
-                    matched = [l for l in LIVE_LOGS if not any(f'[{acc}]' in l or f'账号 [{acc}]' in l for acc in all_accounts)]
-                    if matched:
-                        lines.append('=== 实时内存日志 (系统与调度) ===')
-                        lines.extend(matched[-300:])
-                        lines.append('')
-                elif acc_filter and acc_filter != 'all':
-                    matched = [l for l in LIVE_LOGS if f'[{acc_filter}]' in l or f'[{acc_filter} ' in l or f'账号 [{acc_filter}]' in l or f'任务: {acc_filter}' in l]
-                    if matched:
-                        lines.append(f'=== 实时内存日志 (账号: [{acc_filter}]) ===')
-                        lines.extend(matched[-300:])
-                        lines.append('')
-                else:
-                    lines.append('=== 实时内存日志 (最新运行流) ===')
-                    lines.extend(LIVE_LOGS[-300:])
-                    lines.append('')
+            all_lines = list(LIVE_LOGS)
 
-        text = '\n'.join(lines) if lines else '今日暂无执行日志。'
+        if acc_filter == '__system__':
+            filtered_lines = [l for l in all_lines if '[系统]' in l or '[定时调度]' in l]
+        elif acc_filter and acc_filter != 'all':
+            acc_tag = f'[{acc_filter}]'
+            filtered_lines = [l for l in all_lines if acc_tag in l]
+        else:
+            filtered_lines = all_lines
+
+        text = '\n'.join(filtered_lines) if filtered_lines else '今日暂无执行日志。'
 
         if format_param == 'json':
             with RUNNER_STATE_LOCK:
@@ -3570,7 +3625,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 'status': 'ok',
                 'runner': st_copy,
                 'text': text,
-                'lines_count': len(lines),
+                'lines_count': len(filtered_lines),
                 'timestamp': time.time(),
             })
             return
@@ -3628,14 +3683,14 @@ def _start_scheduler_daemon():
                         RUNNER_STATE['last_line'] = '到达定时时间，唤醒任务...'
                         RUNNER_STATE['exit_code'] = None
 
-                    append_live_log(f'⏰ [定时调度] 到达每日预定时间 {daily_time}，正在自动唤醒全账号任务流程...')
+                    append_live_log(f'到达每日预定时间 {daily_time}，正在自动唤醒全账号任务流程...', name='定时调度')
 
                     jitter_max = int(sch.get('random_start_delay_max', 0))
                     if jitter_max > 0 and not sch.get('fast_mode'):
                         jitter_sec = random.uniform(0, jitter_max * 60)
                         with RUNNER_STATE_LOCK:
                             RUNNER_STATE['last_line'] = f'随机抖动等待中 ({jitter_sec / 60:.1f} 分钟)'
-                        append_live_log(f'⏰ [定时调度] 开启随机抖动，等待 {jitter_sec / 60:.1f} 分钟后开始执行...')
+                        append_live_log(f'开启随机抖动，等待 {jitter_sec / 60:.1f} 分钟后开始执行...', name='定时调度')
                         time.sleep(jitter_sec)
 
                     from msr import config
@@ -3655,9 +3710,9 @@ def _start_scheduler_daemon():
                     with RUNNER_STATE_LOCK:
                         RUNNER_STATE['running'] = False
                         RUNNER_STATE['exit_code'] = proc.returncode
-                    append_live_log(f'⏰ [定时调度] 全账号任务已完成 (exit={proc.returncode})，浏览器已完全退出并释放系统内存。下次将在明日 {daily_time} 自动执行。')
+                    append_live_log(f'全账号任务已完成 (exit={proc.returncode})，浏览器已完全退出并释放系统内存。下次将在明日 {daily_time} 自动执行。', name='定时调度')
             except Exception as ex:
-                append_live_log(f'⏰ [定时调度异常]: {ex}')
+                append_live_log(f'定时调度异常: {ex}', name='定时调度')
 
     t = threading.Thread(target=scheduler_loop, daemon=True, name='DailyScheduler')
     t.start()
@@ -3683,11 +3738,12 @@ def _init_reaper():
 def run_web(host='0.0.0.0', port=8080):
     """启动轻量级 Web 控制台服务器。"""
     _init_reaper()
+    sync_logs_from_disk(force=True)
     addr = (host, int(port))
     server = ThreadingHTTPServer(addr, WebHandler)
     _start_scheduler_daemon()
     print(f'MSR-ArmBot Web 控制台已启动: http://{host}:{port}', flush=True)
-    append_live_log(f'Web 控制台服务已启动于 http://{host}:{port}')
+    append_live_log(f'Web 控制台服务已启动于 http://{host}:{port}', name='系统')
     try:
         server.serve_forever()
     except KeyboardInterrupt:

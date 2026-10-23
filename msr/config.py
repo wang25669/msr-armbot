@@ -61,14 +61,15 @@ def save_json(path, data):
 
 
 def log(name, msg):
-    """账号日志(同时打到 stdout)。"""
-    tag = f'[{name}] ' if name else ''
-    line = '%s %s%s' % (time.strftime('%F %T'), tag, msg)
+    """账号日志(同时打到 stdout 与本地落盘)。统一格式: [HH:MM:SS] [账号] 消息内容"""
+    ts = time.strftime('%H:%M:%S')
+    tag = f'[{name}]' if name else '[系统]'
+    line = f'[{ts}] {tag} {msg}'
     print(line, flush=True)
     try:
         d = os.path.join(profile(name), 'logs')
         os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, '%s.log' % time.strftime('%F')), 'a') as f:
+        with open(os.path.join(d, '%s.log' % time.strftime('%F')), 'a', encoding='utf-8') as f:
             f.write(line + '\n')
     except Exception:
         pass
