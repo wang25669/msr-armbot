@@ -36,12 +36,12 @@ PANEL_JS = '''(() => {
    let own = "";
    for (const n of el.childNodes) { if (n.nodeType === 3) own += n.textContent; }
    own = own.replace(/\\s+/g, " ").trim();
-   const m = own.match(/^活动: (\\d+)\\/(\\d+)$/);
+   const m = own.match(/^(?:活动|Activities|Activity|Tasks|Task):\\s*(\\d+)\\/(\\d+)$/i);
    if (!m) continue;
    let box = el.parentElement, hops = 0;
    while (box && hops < 8) {
      const ctx = (box.textContent || "").replace(/\\s+/g, " ");
-     if (ctx.indexOf("视觉搜索") >= 0) {
+     if (/视觉搜索|visual\\s*search/i.test(ctx)) {
        return {progress: Number(m[1]), max: Number(m[2]),
                complete: Number(m[1]) >= Number(m[2]) && Number(m[2]) > 0};
      }

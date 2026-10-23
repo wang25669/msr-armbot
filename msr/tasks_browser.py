@@ -85,7 +85,7 @@ def search_counters_dom(cdp):
           const st = document.getElementById("streaks");
           if (!st) return null;
           const text = st.innerText;
-          const m = text.match(/搜索:\\s*(\\d+)\\s*\\/\\s*(\\d+)/);
+          const m = text.match(/(?:搜索|search|pc\\s*search|pc)\\s*[:：]?\\s*(\\d+)\\s*\\/\\s*(\\d+)/i);
           if (m) {
             return { progress: parseInt(m[1]), max: parseInt(m[2]), complete: parseInt(m[1]) >= parseInt(m[2]) };
           }
@@ -388,7 +388,9 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             href: a.href,
             text: a.innerText.replace(/\\n/g, ' '),
             title: a.querySelector("h3")?.innerText || a.innerText.split("\\n")[0].slice(0, 30),
-            isDone: a.innerText.includes("已完成") || a.innerHTML.includes("bg-statusSuccess")
+            isDone: /已完成|complete|completed/i.test(a.innerText) || 
+                    /bg-statusSuccess|check/i.test(a.innerHTML) || 
+                    /已完成|complete|completed/i.test(a.getAttribute("aria-label") || "")
           }));
         })()""") or []
         if cards:
@@ -408,7 +410,9 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             href: a.href,
             text: a.innerText.replace(/\\n/g, ' '),
             title: a.querySelector("h3")?.innerText || a.innerText.split("\\n")[0].slice(0, 30),
-            isDone: a.innerText.includes("已完成") || a.innerHTML.includes("bg-statusSuccess")
+            isDone: /已完成|complete|completed/i.test(a.innerText) || 
+                    /bg-statusSuccess|check/i.test(a.innerHTML) || 
+                    /已完成|complete|completed/i.test(a.getAttribute("aria-label") || "")
           }));
         })()""") or []
 
@@ -496,15 +500,19 @@ def resolve_quest_subtask_action(step_info, q_name):
             return {'action': 'search_direct', 'search_term': None, 'reason': 'URL已携带官方预置搜索词'}
         # 开放式搜索任务: 从卡片元数据中的 title (标题) 净化提取主题词
         clean_term = title
-        for prefix in ('Bing 有您的', 'Bing有您的', '通过', '使用', '在您的桌面上', '在桌面上', '探索', '查找', '关于'):
-            clean_term = clean_term.replace(prefix, '')
+        for prefix in (
+            'Bing 有您的', 'Bing有您的', '通过', '使用', '在您的桌面上', '在桌面上', '探索', '查找', '关于',
+            'Search with Bing on your desktop', 'Search with Bing', 'Bing has your', 'Use Bing',
+            'Explore', 'Find', 'Discover', 'About'
+        ):
+            clean_term = re.sub(re.escape(prefix), '', clean_term, flags=re.IGNORECASE)
         clean_term = re.sub(r'[^\w\s\u4e00-\u9fa5]', ' ', clean_term).strip()
 
         if 2 <= len(clean_term) <= 30:
             chosen_term = clean_term
         else:
-            matches = re.findall(r'[\u4e00-\u9fa5a-zA-Z0-9]{2,8}', card_text)
-            chosen_term = matches[0] if (matches and len(matches[0]) >= 2) else '今日热点要闻'
+            matches = re.findall(r'[\u4e00-\u9fa5a-zA-Z0-9]{2,12}', card_text)
+            chosen_term = matches[0] if (matches and len(matches[0]) >= 2) else 'trending news'
         return {'action': 'search_semantic', 'search_term': chosen_term, 'reason': f'开放式搜索任务，从卡片元数据提取核心词: "{chosen_term}"'}
 
     # 3. 常规落地页属性 (Landing Page / Wallpaper / Promotion)
@@ -531,7 +539,7 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             return {
               href: a.href,
               text: text,
-              isDone: text.includes("已完成") || /\\b(\\d+)\\s*\\/\\s*\\1\\s*个任务/.test(text)
+              isDone: /已完成|completed?/i.test(text) || /\\b(\\d+)\\s*\\/\\s*\\1\\s*(?:个任务|tasks?)/i.test(text) || /\\b(\\d+)\\s+of\\s+\\1\\s+tasks?\\s+completed/i.test(text)
             };
           });
         })()""") or []
@@ -566,7 +574,7 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             step_info = ev(cdp, """(() => {
               const anchors = Array.from(document.querySelectorAll("main a[href], main button")).filter(a => {
                 const row = a.closest("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]") || a.parentElement;
-                if (row && row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess]")) {
+                if (row && (row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess], svg[aria-label*=complete i], svg[aria-label*=已完成]") || /已完成|completed/i.test(row.innerText))) {
                   return false;
                 }
 
@@ -601,7 +609,7 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                 hasQ = !!u.searchParams.get("q");
               } catch(e) {}
 
-              const multiDayMatch = pText.match(/(\\d+\\s*\\/\\s*\\d+\\s*天已完成)/) || pText.match(/(\\d+\\s*of\\s*\\d+\\s*days)/);
+              const multiDayMatch = pText.match(/(\\d+\\s*\\/\\s*\\d+\\s*(?:天已完成|days?(?:\\s+completed)?))/i) || pText.match(/(\\d+\\s*of\\s*\\d+\\s*days?(?:\\s+completed)?)/i);
 
               return {
                 text: target.innerText.replace(/\\n/g, ' ').trim() || pTitle,
@@ -636,7 +644,7 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             click_selector = """(() => {
               const el = Array.from(document.querySelectorAll("main a[href], main button")).find(a => {
                 const row = a.closest("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]") || a.parentElement;
-                if (row && row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess]")) {
+                if (row && (row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess], svg[aria-label*=complete i], svg[aria-label*=已完成]") || /已完成|completed/i.test(row.innerText))) {
                   return false;
                 }
                 const t = a.innerText || "";
@@ -747,8 +755,10 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
         href: a.href,
         text: a.innerText.replace(/\\n/g, ' '),
         isRedeem: a.href.includes("/redeem/"),
-        isDone: a.innerText.includes("已完成") || a.innerHTML.includes("bg-statusSuccess")
-      })).filter(c => !c.isRedeem && !c.isDone && (c.text.includes("+") || c.text.includes("分")));
+        isDone: /已完成|complete|completed/i.test(a.innerText) || 
+                /bg-statusSuccess|check/i.test(a.innerHTML) || 
+                /已完成|complete|completed/i.test(a.getAttribute("aria-label") || "")
+      })).filter(c => !c.isRedeem && !c.isDone && (c.text.includes("+") || c.text.includes("分") || /\\b\\d+\\s*(?:points|pts)\\b/i.test(c.text)));
     })()""") or []
 
     if not cards:
