@@ -113,11 +113,11 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
             rg = config.load_json(config.pfile(name, 'region.json')) or {}
 
     has_token = bool(tok.get('refresh_token') or tok.get('access_token'))
-    if not has_token and not has_cookie:
-        # 尝试检查是否有已保存的 MSR 账号密码进行后台静默重登自愈
+    if not has_token:
+        # 若仍无有效 Token（无 Cookie 或 Cookie 换取 Token 失败），尝试使用保存的 MSR 账号密码进行后台重登自愈
         cred = config.get_credential(name)
         if cred and cred.get('username') and cred.get('password'):
-            config.log(name, '检测到 Token 与 Cookie 均不可用，正在使用保存的 MSR 凭据尝试后台全自动登录自愈...')
+            config.log(name, '检测到 Token 与可用会话均缺失，正在使用保存的 MSR 凭据尝试后台全自动登录自愈...')
             try:
                 res = auth.login_with_credential(name, cred['username'], cred['password'], proxy=proxy,
                                                  log_cb=lambda m: config.log(name, m))
@@ -150,23 +150,48 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
             config.log(name, 'region=%s balance=%s' % (pr['country'], pr.get('balance')))
         except Exception as ex:
             config.log(name, f'Token 刷新/探测失败: {ex}')
-            cred = config.get_credential(name)
-            if cred and cred.get('username') and cred.get('password'):
-                config.log(name, 'Token 刷新异常，正在使用保存的凭据尝试全自动重新登录并自愈...')
+            repaired = False
+
+            # 第一级自愈：Token 失效时，优先尝试拿本地现有 Cookie 静默换取新 Token
+            if has_cookie:
+                config.log(name, 'Token 失效，优先尝试使用现有 Cookie 静默换取新 Token...')
                 try:
-                    res = auth.login_with_credential(name, cred['username'], cred['password'], proxy=proxy,
-                                                     log_cb=lambda m: config.log(name, m))
-                    if res.get('status') == 'success':
-                        tok = config.load_json(config.pfile(name, 'token.json')) or {}
+                    new_tok = auth.exchange_token_from_cookies(name, proxy=proxy)
+                    if new_tok and (new_tok.get('refresh_token') or new_tok.get('access_token')):
+                        tok = new_tok
                         rg = config.load_json(config.pfile(name, 'region.json')) or {}
-                        has_cookie = os.path.isfile(ck_path) and bool(config.load_json(ck_path))
                         token = api.refresh_access(name, p, rg, proxy=proxy)
                         pr = probe.probe_account(name, token, proxy=proxy)
                         pr['probed_at'] = time.strftime('%F %T')
                         config.save_json(config.pfile(name, 'region.json'), pr)
-                        config.log(name, '自愈重登成功！重新获取 region=%s balance=%s' % (pr['country'], pr.get('balance')))
-                except Exception as ex2:
-                    config.log(name, f'自愈重登尝试未成功: {ex2}')
+                        config.log(name, '通过 Cookie 静默换取 Token 自愈成功！重新获取 region=%s balance=%s' % (pr['country'], pr.get('balance')))
+                        repaired = True
+                    else:
+                        config.log(name, '通过 Cookie 静默换取 Token 未能成功 (可能 Cookie 亦已失效或会话过期)')
+                except Exception as ex_ck:
+                    config.log(name, f'通过 Cookie 静默换取 Token 异常: {ex_ck}')
+
+            # 第二级自愈：若 Cookie 也失效或未能换取成功，再使用保存的账号密码重新登录
+            if not repaired:
+                cred = config.get_credential(name)
+                if cred and cred.get('username') and cred.get('password'):
+                    config.log(name, 'Cookie 亦不可用，正在使用保存的凭据尝试全自动重新登录并自愈...')
+                    try:
+                        res = auth.login_with_credential(name, cred['username'], cred['password'], proxy=proxy,
+                                                         log_cb=lambda m: config.log(name, m))
+                        if res.get('status') == 'success':
+                            tok = config.load_json(config.pfile(name, 'token.json')) or {}
+                            rg = config.load_json(config.pfile(name, 'region.json')) or {}
+                            has_cookie = os.path.isfile(ck_path) and bool(config.load_json(ck_path))
+                            token = api.refresh_access(name, p, rg, proxy=proxy)
+                            pr = probe.probe_account(name, token, proxy=proxy)
+                            pr['probed_at'] = time.strftime('%F %T')
+                            config.save_json(config.pfile(name, 'region.json'), pr)
+                            config.log(name, '自愈重登成功！重新获取 region=%s balance=%s' % (pr['country'], pr.get('balance')))
+                            repaired = True
+                    except Exception as ex2:
+                        config.log(name, f'自愈重登尝试未成功: {ex2}')
+
             if not has_cookie and not token:
                 raise
 

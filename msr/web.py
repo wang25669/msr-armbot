@@ -1720,21 +1720,29 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     async function runSingle(name) {
       toast(`正在启动账号 ${name} 任务...`);
-      await fetch('/api/run', {
+      const res = await fetch('/api/run', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name})
       });
+      if (res.status === 409) {
+        const d = await res.json().catch(() => ({}));
+        toast(`⚠️ ${d.message || '已有任务正在执行中，请等待完成'}`);
+      }
       setTab('logs');
     }
 
     async function triggerRunAll() {
       toast('已提交全部账号执行队列');
-      await fetch('/api/run', {
+      const res = await fetch('/api/run', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: '--all'})
       });
+      if (res.status === 409) {
+        const d = await res.json().catch(() => ({}));
+        toast(`⚠️ ${d.message || '已有任务正在执行中，请等待完成'}`);
+      }
       setTab('logs');
     }
 
@@ -2349,8 +2357,11 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         // 识别段落所属账号 (例如: === 账号 [gkerswang] 今日落盘日志 ===)
         const accHeaderMatch = line.match(/=== 账号 \[([a-zA-Z0-9_\-]+)\] 今日落盘日志 ===/);
+        const liveAccMatch = line.match(/=== 实时内存日志 \(账号:\s*\[?([a-zA-Z0-9_\-]+)\]?\)\s*===/);
         if (accHeaderMatch) {
           currentSectionAccount = accHeaderMatch[1];
+        } else if (liveAccMatch) {
+          currentSectionAccount = liveAccMatch[1];
         } else if (line.startsWith('=== 实时内存日志') || line.startsWith('=== 系统')) {
           currentSectionAccount = null;
         }
@@ -3430,6 +3441,28 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json_resp({'status': 'ok', 'output': p.stdout})
             return
 
+        with RUNNER_STATE_LOCK:
+            if RUNNER_STATE.get('running'):
+                target = RUNNER_STATE.get('target', '任务')
+                append_live_log(f'⚠️ 当前已有任务正在执行中 (目标: {target})，请等待其执行完毕')
+                self._json_resp({'status': 'busy', 'message': f'当前已有任务正在执行中 (目标: {target})，请等待完成后再提交'}, code=409)
+                return
+
+        # 检查底层 runner.lock 文件锁
+        lock_p = os.path.join(config.HOME, 'runner.lock') if getattr(config, 'HOME', None) else None
+        if lock_p and os.path.isfile(lock_p):
+            try:
+                with open(lock_p, 'r', encoding='utf-8') as f:
+                    c = f.read().strip()
+                if c.isdigit():
+                    pid = int(c)
+                    os.kill(pid, 0)
+                    append_live_log(f'⚠️ 系统检测到自动化任务进程 (PID: {pid}) 正在执行中，拒绝并发启动')
+                    self._json_resp({'status': 'busy', 'message': f'已有任务进程正在执行中 (PID: {pid})'}, code=409)
+                    return
+            except OSError:
+                pass
+
         def bg_runner():
             with RUNNER_STATE_LOCK:
                 RUNNER_STATE['running'] = True
@@ -3472,27 +3505,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
         all_accounts = [a['name'] for a in config.accounts()]
 
-        # 1. 实时内存日志流过滤
-        with LIVE_LOGS_LOCK:
-            if LIVE_LOGS:
-                if acc_filter == '__system__':
-                    matched = [l for l in LIVE_LOGS if not any(f'[{acc}]' in l or f'账号 [{acc}]' in l for acc in all_accounts)]
-                    if matched:
-                        lines.append('=== 实时内存日志 (系统与调度) ===')
-                        lines.extend(matched[-300:])
-                        lines.append('')
-                elif acc_filter and acc_filter != 'all':
-                    matched = [l for l in LIVE_LOGS if f'[{acc_filter}]' in l or f'[{acc_filter} ' in l or f'账号 [{acc_filter}]' in l or f'任务: {acc_filter}' in l]
-                    if matched:
-                        lines.append(f'=== 实时内存日志 (账号: {acc_filter}) ===')
-                        lines.extend(matched[-300:])
-                        lines.append('')
-                else:
-                    lines.append('=== 实时内存日志 (最新) ===')
-                    lines.extend(LIVE_LOGS[-300:])
-                    lines.append('')
-
-        # 2. 落盘日志提取
+        # 1. 先提取落盘历史日志 (全部模式下按最后修改时间正序排列，旧在上、新在下)
         today = time.strftime('%Y-%m-%d')
         if acc_filter == '__system__':
             for cron_p in (os.path.join(getattr(config, 'HOME', '/data'), 'cron.log'), '/data/cron.log', 'cron.log'):
@@ -3509,6 +3522,12 @@ class WebHandler(BaseHTTPRequestHandler):
             accounts = config.accounts()
             if acc_filter and acc_filter != 'all':
                 accounts = [a for a in accounts if a['name'] == acc_filter]
+            else:
+                # 全部账号模式：按今日日志最后修改时间升序排列，使今天越晚执行的账号越靠下方
+                def _get_mtime(a):
+                    lf = os.path.join(config.pfile(a['name'], 'logs'), f'{today}.log')
+                    return os.path.getmtime(lf) if os.path.isfile(lf) else 0
+                accounts = sorted(accounts, key=_get_mtime)
 
             for acc in accounts:
                 name = acc['name']
@@ -3520,6 +3539,26 @@ class WebHandler(BaseHTTPRequestHandler):
                             lines.extend(f.readlines()[-400:])
                     except Exception:
                         pass
+                    lines.append('')
+
+        # 2. 实时内存日志流放在最底部 (保证自动滚屏始终锚定在最新实时运行流上)
+        with LIVE_LOGS_LOCK:
+            if LIVE_LOGS:
+                if acc_filter == '__system__':
+                    matched = [l for l in LIVE_LOGS if not any(f'[{acc}]' in l or f'账号 [{acc}]' in l for acc in all_accounts)]
+                    if matched:
+                        lines.append('=== 实时内存日志 (系统与调度) ===')
+                        lines.extend(matched[-300:])
+                        lines.append('')
+                elif acc_filter and acc_filter != 'all':
+                    matched = [l for l in LIVE_LOGS if f'[{acc_filter}]' in l or f'[{acc_filter} ' in l or f'账号 [{acc_filter}]' in l or f'任务: {acc_filter}' in l]
+                    if matched:
+                        lines.append(f'=== 实时内存日志 (账号: [{acc_filter}]) ===')
+                        lines.extend(matched[-300:])
+                        lines.append('')
+                else:
+                    lines.append('=== 实时内存日志 (最新运行流) ===')
+                    lines.extend(LIVE_LOGS[-300:])
                     lines.append('')
 
         text = '\n'.join(lines) if lines else '今日暂无执行日志。'

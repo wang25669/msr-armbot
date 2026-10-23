@@ -62,7 +62,8 @@ def save_json(path, data):
 
 def log(name, msg):
     """账号日志(同时打到 stdout)。"""
-    line = '%s %s' % (time.strftime('%F %T'), msg)
+    tag = f'[{name}] ' if name else ''
+    line = '%s %s%s' % (time.strftime('%F %T'), tag, msg)
     print(line, flush=True)
     try:
         d = os.path.join(profile(name), 'logs')
