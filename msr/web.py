@@ -44,9 +44,10 @@ LIVE_LOGS_SET = set()
 LIVE_LOGS_LOCK = threading.Lock()
 MAX_LIVE_LOGS = 2000
 LAST_DISK_SYNC = 0
+DISK_FILE_STATE = {}
 
 
-def format_log_line(raw_line, default_acc='系统', known_accounts=None):
+def format_log_line(raw_line, default_acc='系统', known_accounts=None, fallback_ts=None):
     """标准化单行日志为: [HH:MM:SS] [账号/系统] 正文。保证每行仅有唯一时间标签与账号标签。"""
     s = str(raw_line or '').strip()
     if not s:
@@ -63,7 +64,7 @@ def format_log_line(raw_line, default_acc='系统', known_accounts=None):
             break
 
     if not ts:
-        ts = time.strftime('%H:%M:%S')
+        ts = fallback_ts or time.strftime('%H:%M:%S')
 
     # 2. 提取或匹配账号标签 [acc] 或裸账号名 acc
     m_acc = re.match(r'^\[([a-zA-Z0-9_\-\u4e00-\u9fa5]+)\]\s*', s)
@@ -127,32 +128,48 @@ def sync_logs_from_disk(force=False):
 
     new_lines = []
 
+    def _ingest_file(f_path, default_tag):
+        if not os.path.isfile(f_path):
+            return
+        try:
+            mtime = os.path.getmtime(f_path)
+            state = DISK_FILE_STATE.get(f_path)
+            if not force and state and state['mtime'] == mtime:
+                return
+
+            offset = 0 if force or not state else state['offset']
+            file_size = os.path.getsize(f_path)
+            if offset > file_size:
+                offset = 0
+
+            f_ts = time.strftime('%H:%M:%S', time.localtime(mtime))
+            with open(f_path, 'r', encoding='utf-8', errors='ignore') as f:
+                if offset > 0:
+                    f.seek(offset)
+                for line in f:
+                    line_s = line.strip()
+                    if not line_s:
+                        continue
+                    fl = format_log_line(line_s, default_acc=default_tag, known_accounts=known, fallback_ts=f_ts)
+                    if fl and fl not in LIVE_LOGS_SET:
+                        new_lines.append(fl)
+                DISK_FILE_STATE[f_path] = {'mtime': mtime, 'offset': f.tell()}
+        except Exception:
+            pass
+
     # 1. 扫描各账号今日落盘日志
     try:
         for acc in config.accounts():
             name = acc['name']
             log_f = os.path.join(config.pfile(name, 'logs'), f'{today}.log')
-            if os.path.isfile(log_f):
-                try:
-                    with open(log_f, 'r', encoding='utf-8', errors='ignore') as f:
-                        for l in f:
-                            fl = format_log_line(l.strip(), default_acc=name, known_accounts=known)
-                            if fl and fl not in LIVE_LOGS_SET:
-                                new_lines.append(fl)
-                except Exception:
-                    pass
+            _ingest_file(log_f, name)
     except Exception:
         pass
 
     # 2. 扫描 cron.log (若存在)
     try:
         cron_p = os.path.join(getattr(config, 'HOME', '/data'), 'cron.log')
-        if os.path.isfile(cron_p):
-            with open(cron_p, 'r', encoding='utf-8', errors='ignore') as f:
-                for l in f.readlines()[-100:]:
-                    fl = format_log_line(l.strip(), default_acc='系统', known_accounts=known)
-                    if fl and fl not in LIVE_LOGS_SET:
-                        new_lines.append(fl)
+        _ingest_file(cron_p, '系统')
     except Exception:
         pass
 
