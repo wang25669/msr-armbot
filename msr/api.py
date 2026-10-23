@@ -1,4 +1,4 @@
-"""RewardsPlatform API 层(从 edge_app_streak.py 提炼, 加入重试与降级)。"""
+"""MSR Platform API 层(从 edge_app_streak.py 提炼, 加入重试与降级)。"""
 import json
 import socket
 import time
@@ -110,7 +110,7 @@ def save_token(name, tdict, profile_path):
     path = profile_path + '/token.json'
     cur = config.load_json(path, {}) or {}
     cur['access_token'] = tdict.get('access_token') or cur.get('access_token')
-    if tdict.get('refresh_token'):          # 微软可能不轮换 refresh_token
+    if tdict.get('refresh_token'):          # MSR 可能不轮换 refresh_token
         cur['refresh_token'] = tdict['refresh_token']
     config.save_json(path, cur)
     os_chmod_quiet(path, 0o600)

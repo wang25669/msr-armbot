@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""msr - Microsoft Rewards automation for ARM Linux & Containers.
+"""msr - MSR automation for ARM Linux & Containers.
 
 Usage:
   msr login <name> [--method credential|cookies|interactive] [--username EMAIL] [--password PWD] [--cookies FILE] [--proxy URL]  引导账号登录
@@ -92,8 +92,8 @@ def main():
     p.add_argument('--method', choices=['credential', 'cookies', 'interactive'],
                    default='credential', help='登录方式: credential(账号密码推荐)|cookies(导入)|interactive(交互式)')
     p.add_argument('--cookies', help='浏览器导出的 cookies.json 文件路径')
-    p.add_argument('--username', help='微软账号邮箱 (用于 credential 登录)')
-    p.add_argument('--password', help='微软账号密码 (用于 credential 登录)')
+    p.add_argument('--username', help='MSR 账号邮箱 (用于 credential 登录)')
+    p.add_argument('--password', help='MSR 账号密码 (用于 credential 登录)')
     p.add_argument('--proxy', help='独立出口代理 (http://或socks5://)')
     p.add_argument('--cdp-port', type=int, help='可选外部 Chrome 调试端口')
 

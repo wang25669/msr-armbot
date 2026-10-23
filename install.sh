@@ -31,7 +31,7 @@ if [ "$(id -u)" = "0" ] && have systemctl; then
     RUN_USER="${SUDO_USER:-root}"
     cat > /etc/systemd/system/msr.service << EOF
 [Unit]
-Description=msr rewards run
+Description=msr run
 After=network-online.target
 
 [Service]

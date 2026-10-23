@@ -1,6 +1,6 @@
 # msr-armbot
 
-Microsoft Rewards 自动化, 为 ARM Linux (Armbian) 设计。Python stdlib-only, 无第三方依赖。
+MSR 自动化, 为 ARM Linux (Armbian) 设计。Python stdlib-only, 无第三方依赖。
 
 ## 特性
 
@@ -26,12 +26,12 @@ install.sh 做三件事: 装 chromium(缺才装) -> 写默认配置 -> 注册 sy
 ### 方式 1: 账号密码全自动登录与多重风控接管 (推荐)
 
 ```bash
-python3 -m msr login <账号名> -u <微软账号邮箱> -p <密码>
+python3 -m msr login <账号名> -u <MSR账号邮箱> -p <密码>
 ```
 
 后台自动驱动无头 Chromium 模拟真实用户交互完成登录，自动提取 Bing/Live 完整会话 Cookie，并通过静默 SSO 自动换取 OAuth2 Token 与自探测区域，实现一键双凭据闭环配置。
 
-**针对更换新设备或异地 IP 触发微软风控的完备应对能力**：
+**针对更换新设备或异地 IP 触发 MSR 风控的完备应对能力**：
 - **手机 Authenticator 推送**：系统自动探测双位数匹配质询，终端与 Web 控制台显著展示匹配数字（例如 `【 58 】`），手机端点击确认后自动继续；
 - **邮箱 / 短信验证码 (OTP)**：终端交互式提示输入，Web 控制台实时提供动态验证码提交表单；
 - **人机拼图验证码 (Arkose FunCaptcha)**：Web 控制台内置“远程实时画面”，无需配置 SSH 隧道，在网页中直接点击画面即可旋转拼图、选择验证方式；
@@ -101,7 +101,7 @@ docker compose up -d
 启动后在浏览器打开 `http://<服务器IP>:8080` 进入 Web 控制中心：
 1. **添加账号与独立代理**：直接在网页填写名称、设置该账号专属出口代理 (HTTP/SOCKS5)；
 2. **账号在线授权**：
-   - 方式 A (推荐账号密码)：输入微软账号与密码，后台无头浏览器全自动模拟登录交互，并一键换取 OAuth2 Token 与自探测区域；
+   - 方式 A (推荐账号密码)：输入 MSR 账号与密码，后台无头浏览器全自动模拟登录交互，并一键换取 OAuth2 Token 与自探测区域；
    - 方式 B (Cookie 导入)：粘贴 Cookie-Editor 导出的 JSON 或 Raw Header，自动清洗校验并即刻触发后台静默 SSO 换取 Token；
 3. **集中风控参数调节**：可视化修改搜索停留秒数、卡片延迟、Server酱 SendKey 等；
 4. **任务调度与实时日志**：一键“立即运行”、“排期预览”，实时查看任务滚屏日志。
@@ -204,7 +204,7 @@ python3 -m msr run <名>                # 全量
 ```
 msr/__main__.py      CLI 入口
 msr/config.py        数据目录 + 多账号 profile
-msr/api.py           RewardsPlatform API + token 生命周期
+msr/api.py           MSR Platform API + token 生命周期
 msr/auth.py          登录引导 (账号密码全自动登录 + Cookie 导入与 Token 静默自愈互换)
 msr/probe.py         区域/任务集探测
 msr/planner.py       执行计划生成
@@ -244,7 +244,7 @@ install.sh           Armbian 一键安装
 | `appread` | 资讯文章阅读 (10篇) | API (type101) | 每篇间隔 60-120s 随机波动，读满 10 篇或零增量自动停 |
 | `edge30m` | Edge 浏览打卡 (30分钟) | API (type714/29) | 5 分钟心跳上报共 6 次。**与前台浏览器任务在后台并行执行**，总耗时省 30 分钟 |
 | `dailyset` | 每日活动 (Daily Set 3卡) | Chromium DOM | `#dailyset` 结构解析，带真人鼠标平滑轨迹点击，智能识别题目选项 (`.btq_opt` / `role=radio`) |
-| `quests` | 任务打卡 (含桌面专属) | Chromium DOM | 注入 `MSRewards/Desktop` 伪装解锁桌面专属 Punchcards；支持多步骤流转推进与多日冷却去重 |
+| `quests` | 任务打卡 (含桌面专属) | Chromium DOM | 注入桌面专属客户端特征伪装解锁桌面专属 Punchcards；支持多步骤流转推进与多日冷却去重 |
 | `moreactivities` | 日常任务卡片 | Chromium DOM | `#moreactivities` 自动剔除已完成与兑换券卡片，真人点击停留落库 |
 | `search` | 必应 PC 搜索补全 | Chromium DOM | 读 dashboard/streaks 上限计数器，逐字真人按键键入，搜满即停 |
 | `visual` | 视觉搜索连续打卡 | Chromium DOM | 面板判据 → Bing 每日壁纸取图 → 镜头真人点击 → 键入搜索并停留落库 |

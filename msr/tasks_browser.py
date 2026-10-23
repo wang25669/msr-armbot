@@ -201,7 +201,7 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
                 except Exception as ex:
                     log('搜索结果点击容忍: %s' % str(ex)[:60])
 
-            # 核心节奏停留: 180-300 秒 (等待微软风控冷却，fast_mode 下 3-6 秒)
+            # 核心节奏停留: 180-300 秒 (等待 MSR 风控冷却，fast_mode 下 3-6 秒)
             dwell = random.uniform(dwell_min, dwell_max)
             log('搜索[%d] 模拟真人深度阅读停留 %.1f 秒 (%s)...' % (
                 searches_done, dwell, '在独立文章标签页' if res_tab_id else '在主搜索结果页'))
@@ -623,7 +623,7 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             if step_info.get('isMultiDay'):
                 prog_str = step_info.get('multiDayProg') or '跨日任务'
                 if step_href in seen_step_urls:
-                    log('%s 跨日累计步骤 (%s) 今日打卡搜索已完成，微软规则要求间隔24小时次日继续，转入下一打卡' % (q_name, prog_str))
+                    log('%s 跨日累计步骤 (%s) 今日打卡搜索已完成，MSR 规则要求间隔24小时次日继续，转入下一打卡' % (q_name, prog_str))
                     break
                 log('%s 发现跨日累计步骤: %s (需每日打卡推进)' % (q_name, prog_str))
             elif step_href in seen_step_urls:

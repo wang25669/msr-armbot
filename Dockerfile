@@ -2,7 +2,7 @@
 FROM python:3.11-slim-bookworm
 
 LABEL maintainer="wang25669"
-LABEL description="Microsoft Rewards automation container with web console"
+LABEL description="MSR automation container with web console"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

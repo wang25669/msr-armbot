@@ -392,7 +392,7 @@ def disguise_edge(cdp, version='141', log=print):
         if (window.WebGL2RenderingContext) patchWebGL(WebGL2RenderingContext.prototype);
       } catch(e) {}
 
-      // 禁用/删除 PublicKeyCredential 并拦截 WebAuthn，防止微软将无头浏览器识别为支持 Passkey/设备密钥
+      // 禁用/删除 PublicKeyCredential 并拦截 WebAuthn，防止将无头浏览器识别为支持 Passkey/设备密钥
       try {
         if ('PublicKeyCredential' in window) {
           try {
@@ -512,7 +512,7 @@ def capture_screenshot(cdp, quality=60):
 def human_click(cdp, find_js, label='', close_new=False):
     """真人式点击: 滚动到可见 -> 随机轨迹接近 -> 按压释放。返回新标签 id 列表。
 
-    2026-10-15 从现网 bing_daily_v2.human_click 移植。Rewards 卡片的归因
+    2026-10-15 从现网 bing_daily_v2.human_click 移植。MSR 卡片的归因
     记在"点击卡片"这个动作上, 直接 navigate 到 destinationUrl 不落库,
     所以卡片任务必须走真实鼠标点击。
     """

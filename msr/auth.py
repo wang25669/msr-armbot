@@ -1,7 +1,7 @@
-"""微软账号多方式登录与凭据固化系统。
+"""MSR 账号多方式登录与凭据固化系统。
 
 支持两大核心登录与凭据闭环策略:
-1. credential (推荐): 现代化账号密码自动化登录，原生适配微软 Fluent UI，支持智能密码切换、保持登录确认与 2FA 提示，自动提取 Cookie 并无感换取 OAuth Token。
+1. credential (推荐): 现代化账号密码自动化登录，原生适配 MSR Fluent UI，支持智能密码切换、保持登录确认与 2FA 提示，自动提取 Cookie 并无感换取 OAuth Token。
 2. cookies (备选): 导入 Cookie-Editor JSON 数组或 Raw 请求头文本，自动清洗并基于已登录会话静默换取 OAuth Token。
 """
 import base64
@@ -35,10 +35,10 @@ def cmd_login(args):
     else:
         # 默认推荐: 账号密码自动化登录
         if not username:
-            username = input('请输入微软账号邮箱 (例如 xxx@outlook.com): ').strip()
+            username = input('请输入 MSR 账号邮箱 (例如 xxx@outlook.com): ').strip()
         if not password:
             import getpass
-            password = getpass.getpass('请输入微软账号密码: ').strip()
+            password = getpass.getpass('请输入 MSR 账号密码: ').strip()
         login_with_credential(name, username, password, proxy=proxy, log_cb=print)
 
     # 更新或登记 accounts.json
@@ -62,7 +62,7 @@ def cmd_login(args):
 
 
 def exchange_token_from_cookies(name, proxy=None, cdp=None, ch=None, log_cb=None):
-    """通过无头浏览器中已注入的微软 Cookie，静默单点登录自动获取 OAuth2 Token。"""
+    """通过无头浏览器中已注入的 MSR Cookie，静默单点登录自动获取 OAuth2 Token。"""
     from msr import config, api, probe, browser
     log = log_cb or (lambda m: config.log(name, m))
     ck_path = config.pfile(name, 'cookie.json')
@@ -222,7 +222,7 @@ def _login_by_interactive(name, profile_path, config, proxy=None):
     print('如在远程服务器，请在本地电脑通过 SSH 隧道映射端口:')
     print(f'  ssh -L {port}:127.0.0.1:{port} <user>@<server_ip>')
     print(f'然后在本地 Chrome 打开: chrome://inspect 点击 inspect 进行网页登录。')
-    print('正在打开微软登录页面: https://login.live.com/ ...')
+    print('正在打开 MSR 登录页面: https://login.live.com/ ...')
 
     tab = ch.new_tab('https://login.live.com/')
     cdp = ch.attach(tab)
@@ -257,7 +257,7 @@ def _login_by_interactive(name, profile_path, config, proxy=None):
 
 
 def inspect_login_page(cdp):
-    """自适应探测微软登录页的当前状态与风控质询类型。"""
+    """自适应探测 MSR 登录页的当前状态与风控质询类型。"""
     from msr import browser
     script = '''(() => {
         const text = (document.body ? document.body.innerText : '') || '';
@@ -271,13 +271,13 @@ def inspect_login_page(cdp):
         // 2. 账号与风控错误拦截
         const lowerText = text.toLowerCase();
         if (text.includes('此 Microsoft 帐户不存在') || lowerText.includes("that microsoft account doesn't exist") || lowerText.includes("account doesn't exist")) {
-            return { type: 'error', error: '此 Microsoft 帐户不存在，请核对用户名' };
+            return { type: 'error', error: '此 MSR 帐户不存在，请核对用户名' };
         }
         if (text.includes('密码不正确') || text.includes('此密码不正确') || text.includes('该密码不正确') || lowerText.includes('password is incorrect') || lowerText.includes('your account or password is incorrect')) {
             return { type: 'error', error: '密码不正确，请核对密码' };
         }
         if (text.includes('此帐户已被锁定') || lowerText.includes('account has been locked') || text.includes('我们检测到异常活动') || lowerText.includes('unusual activity')) {
-            return { type: 'error', error: '该微软账户触发了安全风控拦截或已被锁定，需通过官方渠道重置' };
+            return { type: 'error', error: '该 MSR 账户触发了安全风控拦截或已被锁定，需通过官方渠道重置' };
         }
 
         // 检查输入字段的验证错误信息 (如 FluentUI field validationMessage)
@@ -330,7 +330,7 @@ def inspect_login_page(cdp):
         // 8. 二次验证/手机/邮箱 OTC 验证码输入框
         const otcInput = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #idTxtBx_OTC, #proof-confirmation-email-input');
         if (otcInput && otcInput.offsetParent !== null) {
-            let prompt = '微软要求输入安全验证码';
+            let prompt = 'MSR 要求输入安全验证码';
             const pEl = document.querySelector('#idDiv_SAOTCC_Description, .text-body, #idDiv_SAOTCS_Description, [role=heading]');
             if (pEl && pEl.innerText.trim()) {
                 prompt = pEl.innerText.trim().slice(0, 100);
@@ -473,7 +473,7 @@ class LoginSession:
             return {'status': 'error', 'message': '浏览器未就绪'}
         from msr import browser
         import json
-        self.log(f'正在向微软页面填入安全验证码/确认信息: {code} ...')
+        self.log(f'正在向 MSR 页面填入安全验证码/确认信息: {code} ...')
         script = f'''(() => {{
             const inp = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #idTxtBx_OTC, #proof-confirmation-email-input');
             if (inp) {{
@@ -490,7 +490,7 @@ class LoginSession:
         ok = browser.ev(self.cdp, script)
         if ok:
             self.status = 'running'
-            self.message = '验证码已提交，正在等待微软校验...'
+            self.message = '验证码已提交，正在等待 MSR 校验...'
             return {'status': 'ok'}
         return {'status': 'error', 'message': '未能定位验证码输入框，请确认当前画面是否在输入验证码'}
 
@@ -553,8 +553,8 @@ class LoginSession:
             except Exception:
                 pass
 
-            self.log('正在打开微软登录网关 (https://login.live.com/)...')
-            self.message = '正在加载微软登录网关 (login.live.com)...'
+            self.log('正在打开 MSR 登录网关 (https://login.live.com/)...')
+            self.message = '正在加载 MSR 登录网关 (login.live.com)...'
             browser.navigate(self.cdp, 'https://login.live.com/')
             time.sleep(2)
 
@@ -578,11 +578,11 @@ class LoginSession:
                     curr_url = browser.ev(self.cdp, 'location.href') or ''
                     if curr_url.startswith('chrome-error://') or 'ERR_' in curr_url:
                         self.status = 'error'
-                        self.message = '网络或代理连接失败，无法加载微软登录页，请核对网络与代理'
+                        self.message = '网络或代理连接失败，无法加载 MSR 登录页，请核对网络与代理'
                         self.log(f'❌ 浏览器网络加载失败: {curr_url}')
                         break
 
-                    # A. 优先检查当前是否有有效微软登录态并同步激活 Bing
+                    # A. 优先检查当前是否有有效 MSR 登录态并同步激活 Bing
                     try:
                         res = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com', 'https://rewards.bing.com']})
                         cks = res.get('cookies', [])
@@ -599,8 +599,8 @@ class LoginSession:
 
                         if is_authenticated:
                             self.status = 'running'
-                            self.message = '检测到已进入微软会话，正在同步激活 Bing / Rewards 登录态...'
-                            self.log('检测到已进入微软授权会话，正在导航至 Bing 激活登录态与固化凭据...')
+                            self.message = '检测到已进入 MSR 会话，正在同步激活 Bing / MSR 登录态...'
+                            self.log('检测到已进入 MSR 授权会话，正在导航至 Bing 激活登录态与固化凭据...')
                             
                             # 导航至 Bing 并触发 SSO 认证握手
                             browser.navigate(self.cdp, 'https://www.bing.com/')
@@ -640,13 +640,13 @@ class LoginSession:
                                 if self.save_credential_flag and self.username and self.password:
                                     try:
                                         config.save_credential(self.name, self.username, self.password)
-                                        self.log('已安全保存微软账号密码凭据，后续会话失效时将支持全自动静默自愈重登')
+                                        self.log('已安全保存 MSR 账号密码凭据，后续会话失效时将支持全自动静默自愈重登')
                                     except Exception as ex:
                                         self.log(f'保存账号密码凭据异常: {ex}')
 
                                 self.result = {
                                     'status': 'ok',
-                                    'message': '微软账号自动化登录成功！Cookie 与 Token 双凭据已全部就绪。',
+                                    'message': 'MSR 账号自动化登录成功！Cookie 与 Token 双凭据已全部就绪。',
                                     'cookie_count': len(final_cks),
                                     'has_token': bool(tok),
                                     'balance': rg.get('balance', 0),
@@ -656,7 +656,7 @@ class LoginSession:
                                 self.message = f'🎉 登录成功！所有凭据已自动固化就绪（积分: {rg.get("balance", 0)}, 区域: {rg.get("country", "未知")}）。'
                                 break
                             else:
-                                self.log('⚠️ 微软会话已建立但 Bing 尚未就绪 _U 凭据，继续等待页面完成 SSO 同步...')
+                                self.log('⚠️ MSR 会话已建立但 Bing 尚未就绪 _U 凭据，继续等待页面完成 SSO 同步...')
                     except Exception:
                         pass
 
@@ -668,14 +668,14 @@ class LoginSession:
                         self.status = 'error'
                         self.error_msg = state.get('error')
                         self.message = f'登录异常: {self.error_msg}'
-                        self.log(f'❌ 微软错误提示: {self.error_msg}')
+                        self.log(f'❌ MSR 错误提示: {self.error_msg}')
                         break
 
                     elif st_type == 'username_entry':
                         if not username_injected or (time.time() - username_injected_at > 8):
                             self.status = 'running'
-                            self.message = f'正在自动填入微软账号 ({self.username})...'
-                            self.log(f'正在填入微软账号 ({self.username})...')
+                            self.message = f'正在自动填入 MSR 账号 ({self.username})...'
+                            self.log(f'正在填入 MSR 账号 ({self.username})...')
                             user_ok = browser.ev(self.cdp, f'''(() => {{
                                 const input = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
                                 if (input) {{
@@ -708,7 +708,7 @@ class LoginSession:
                                         inp.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
                                     }
                                 })()''')
-                                self.message = '账号已提交，正在等待微软响应...'
+                                self.message = '账号已提交，正在等待 MSR 响应...'
                                 time.sleep(2.5)
 
                     elif st_type == 'switch_to_password':
@@ -770,7 +770,7 @@ class LoginSession:
                                         p.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
                                     }
                                 })()''')
-                                self.message = '密码已提交，正在等待微软校验与凭据固化...'
+                                self.message = '密码已提交，正在等待 MSR 校验与凭据固化...'
                                 time.sleep(2.5)
 
                     elif st_type == 'kmsi':
@@ -791,15 +791,15 @@ class LoginSession:
                         code = state.get('code')
                         self.status = 'wait_auth_push'
                         self.auth_code = code
-                        self.message = f'微软触发手机 Authenticator 验证，请在手机应用上选择数字：【 {code} 】'
-                        self.log(f'>>> [安全提示] 微软触发手机 Authenticator 二次验证，匹配数字: 【 {code} 】')
+                        self.message = f'MSR 触发手机 Authenticator 验证，请在手机应用上选择数字：【 {code} 】'
+                        self.log(f'>>> [安全提示] MSR 触发手机 Authenticator 二次验证，匹配数字: 【 {code} 】')
                         time.sleep(3)
 
                     elif st_type == 'otp_input':
                         prompt = state.get('prompt') or '请输入安全验证码'
                         self.status = 'wait_otp'
                         self.otp_prompt = prompt
-                        self.message = f'微软需要输入安全验证码: {prompt}'
+                        self.message = f'MSR 需要输入安全验证码: {prompt}'
                         time.sleep(2)
 
                     elif st_type in ('arkose_challenge', 'proof_selection'):
@@ -807,7 +807,7 @@ class LoginSession:
                         if st_type == 'arkose_challenge':
                             self.message = '检测到人机拼图验证码(Arkose)，请在下方实时交互窗口中点击完成验证'
                         else:
-                            self.message = '检测到微软身份验证方式选择，请在下方实时交互窗口中点击选择'
+                            self.message = '检测到 MSR 身份验证方式选择，请在下方实时交互窗口中点击选择'
                         time.sleep(2)
 
                     elif st_type == 'dismissible_prompt':
@@ -854,7 +854,7 @@ class LoginSession:
                     else:
                         title = browser.ev(self.cdp, 'document.title') or ''
                         self.status = 'running'
-                        self.message = f'正在等待微软页面加载 ({title or curr_url[:40]})...'
+                        self.message = f'正在等待 MSR 页面加载 ({title or curr_url[:40]})...'
                         time.sleep(1.5)
 
                 except browser.StepError as cdp_err:
@@ -937,7 +937,7 @@ def get_session_screenshot(name):
 
 
 def login_with_credential(name, username, password, proxy=None, log_cb=None, save_credential_flag=True):
-    """现代化微软账号密码全自动登录与多重风控质询接管。"""
+    """现代化 MSR 账号密码全自动登录与多重风控质询接管。"""
     session = start_session(name, username, password, proxy=proxy, log_cb=log_cb, save_credential_flag=save_credential_flag)
     deadline = time.time() + 180
     prompted_auth_code = None
@@ -952,12 +952,12 @@ def login_with_credential(name, username, password, proxy=None, log_cb=None, sav
         if session.status == 'wait_auth_push' and session.auth_code != prompted_auth_code:
             prompted_auth_code = session.auth_code
             if log_cb:
-                log_cb(f'>>> [安全提示] 微软触发手机 Authenticator 验证，请在手机上选择数字：【 {session.auth_code} 】')
+                log_cb(f'>>> [安全提示] MSR 触发手机 Authenticator 验证，请在手机上选择数字：【 {session.auth_code} 】')
 
         if session.status == 'wait_otp' and not prompted_otp:
             prompted_otp = True
             if sys.stdin and sys.stdin.isatty():
-                print(f'\n>>> 微软要求输入安全验证码 ({session.otp_prompt or "邮箱/短信"}):', flush=True)
+                print(f'\n>>> MSR 要求输入安全验证码 ({session.otp_prompt or "邮箱/短信"}):', flush=True)
                 try:
                     code = input('请输入验证码: ').strip()
                     if code:
@@ -966,11 +966,11 @@ def login_with_credential(name, username, password, proxy=None, log_cb=None, sav
                     pass
             else:
                 if log_cb:
-                    log_cb(f'>>> [安全提示] 微软要求输入安全验证码: {session.otp_prompt} (请在 Web 控制台输入提交)')
+                    log_cb(f'>>> [安全提示] MSR 要求输入安全验证码: {session.otp_prompt} (请在 Web 控制台输入提交)')
 
         if session.status == 'wait_interactive':
             if log_cb:
-                log_cb('>>> [风控提示] 检测到微软人机拼图/复杂安全质询，请在 Web 控制台进行远程交互操作')
+                log_cb('>>> [风控提示] 检测到 MSR 人机拼图/复杂安全质询，请在 Web 控制台进行远程交互操作')
 
         time.sleep(1)
 

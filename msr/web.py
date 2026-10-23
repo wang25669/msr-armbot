@@ -11,7 +11,7 @@
 2. 独立任务执行流程说明:
    - 单独展示 9 大标准任务执行阶段与生命周期 (API 极速 -> 后台 Edge 心跳 -> 浏览器流转 -> 智能防冷板搜索 -> 自动核查容错)
 3. 网页授权与重登录中心:
-   - 方式 A: 微软官方设备码免密授权 (Device Code 流，手机/电脑扫码授权，后台自动轮询落盘)
+   - 方式 A: MSR 官方设备码免密授权 (Device Code 流，手机/电脑扫码授权，后台自动轮询落盘)
    - 方式 B: Cookie 快速导入 (JSON 数组或 Raw 请求头，实时校验 _U 凭据)
 4. 账号级专属硬件指纹管理:
    - 每个账号独立绑定显卡 (WebGL)、CPU 核心、内存、分辨率、时区与语言
@@ -74,7 +74,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       --primary: #38bdf8; --primary-hover: #0ea5e9;
       --success: #22c55e; --warning: #f59e0b; --danger: #ef4444;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Heiti SC", sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 24px; min-height: 100vh; }
     .container { max-width: 1240px; margin: 0 auto; }
     header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 20px; margin-bottom: 24px; border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 14px; }
@@ -470,7 +470,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     <!-- 账号管理 -->
     <div id="tab-accounts" class="tab-content">
       <div class="card">
-        <div class="card-title">添加 / 编辑微软账号</div>
+        <div class="card-title">添加 / 编辑 MSR 账号</div>
         <div class="grid" style="grid-template-columns: 1fr 1.6fr 1fr auto; align-items: flex-end;">
           <div class="form-group">
             <label>账号名称 (唯一标识)</label>
@@ -1028,23 +1028,23 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
 
       <div class="nav-tabs" style="margin-bottom:16px;">
-        <button id="modal-tab-pwd" class="tab-btn active" onclick="switchModalTab('pwd')">微软账号密码登录 (推荐)</button>
+        <button id="modal-tab-pwd" class="tab-btn active" onclick="switchModalTab('pwd')">MSR 账号密码登录 (推荐)</button>
         <button id="modal-tab-ck" class="tab-btn" onclick="switchModalTab('ck')">Cookie 快速导入 (免密备选)</button>
       </div>
 
       <!-- 账号密码自动化登录与风控接管页面 -->
       <div id="modal-panel-pwd">
         <p style="font-size:13px; color:var(--text-sub); margin-bottom:14px; line-height:1.5;">
-          输入微软账号密码，后台 Chromium 将全自动登录并智能应对风控质询（支持 Authenticator 双位数匹配、邮箱验证码输入与人机拼图远程接管）。
+          输入 MSR 账号密码，后台 Chromium 将全自动登录并智能应对风控质询（支持 Authenticator 双位数匹配、邮箱验证码输入与人机拼图远程接管）。
         </p>
         <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:12px;">
           <div class="form-group">
-            <label>微软账号 (邮箱 / 手机号)</label>
+            <label>MSR 账号 (邮箱 / 手机号)</label>
             <input type="text" id="login-username" placeholder="例如: your_name@outlook.com">
           </div>
           <div class="form-group">
-            <label>微软密码</label>
-            <input type="password" id="login-password" placeholder="请输入微软账号密码">
+            <label>MSR 密码</label>
+            <input type="password" id="login-password" placeholder="请输入 MSR 账号密码">
           </div>
         </div>
 
@@ -1058,14 +1058,14 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         <!-- 手机 Authenticator 匹配数字提示卡片 (条件展示) -->
         <div id="login-auth-push-box" style="display:none; background:rgba(14,165,233,0.15); border:1px solid #0284c7; border-radius:8px; padding:12px; margin-bottom:12px; text-align:center;">
-          <div style="font-size:13px; color:#38bdf8; margin-bottom:6px;">📱 微软触发手机 Authenticator 二次验证，请在手机应用上选择数字：</div>
+          <div style="font-size:13px; color:#38bdf8; margin-bottom:6px;">📱 MSR 触发手机 Authenticator 二次验证，请在手机应用上选择数字：</div>
           <div style="font-size:32px; font-weight:800; color:#38bdf8; letter-spacing:4px;" id="auth-code-val">--</div>
           <div style="font-size:12px; color:var(--text-sub); margin-top:4px;">（在手机上点击对应数字后系统将自动继续）</div>
         </div>
 
         <!-- 安全验证码输入卡片 (条件展示) -->
         <div id="login-otp-box" style="display:none; background:rgba(234,179,8,0.15); border:1px solid #eab308; border-radius:8px; padding:12px; margin-bottom:12px;">
-          <div id="login-otp-prompt" style="font-size:13px; color:#facc15; margin-bottom:8px;">✉️ 微软需要安全验证码</div>
+          <div id="login-otp-prompt" style="font-size:13px; color:#facc15; margin-bottom:8px;">✉️ MSR 需要安全验证码</div>
           <div style="display:flex; gap:8px;">
             <input type="text" id="login-otp-input" placeholder="请输入 6 位安全验证码" style="flex:1;">
             <button class="btn" onclick="submitSessionOtp()">提交验证码</button>
@@ -1447,10 +1447,10 @@ HTML_CONTENT = """<!DOCTYPE html>
             <div class="acc-meta">
               <div>💰 当前积分: <strong style="color:var(--primary); font-size:16px;">${a.balance || 0}</strong> <span style="font-size:12px; color:var(--success); margin-left:6px;">(今日: +${todayGained}分)</span></div>
 
-              <!-- 微软三区架构与代理一致性诊断 -->
+              <!-- MSR 三区架构与代理一致性诊断 -->
               <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.07); border-radius:6px; padding:8px 10px; margin:7px 0;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
-                  <span style="font-weight:700; color:#94a3b8; font-size:11px;">🌍 微软业务区域架构与漫游诊断</span>
+                  <span style="font-weight:700; color:#94a3b8; font-size:11px;">🌍 MSR 业务区域架构与漫游诊断</span>
                   <span class="badge ${diagBadgeClass}" style="font-size:10.5px;">${diag.text}</span>
                 </div>
                 <div style="display:grid; grid-template-columns: 1fr 1fr 1.3fr; gap:6px; font-size:11px;">
@@ -1708,7 +1708,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     async function clearSavedCred(name) {
-      if (!confirm(`确定清除账号 [${name}] 保存的微软账号密码凭据吗？（清除后凭据过期将无法自动静默重登）`)) return;
+      if (!confirm(`确定清除账号 [${name}] 保存的 MSR 账号密码凭据吗？（清除后凭据过期将无法自动静默重登）`)) return;
       await fetch('/api/auth/credential/delete', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -2273,7 +2273,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           if ((!runnerState || runnerState.running !== false) &&
               (line.includes('>>> 开始执行任务') ||
                line.includes('正在自动唤醒') ||
-               line.includes('开始微软账号全自动登录') ||
+               line.includes('开始 MSR 账号全自动登录') ||
                line.includes('=== 运行开始') ||
                line.includes('>>> 开始浏览器阶段') ||
                (line.includes('搜索') && (line.includes('停留') || line.includes('计数'))))) {
@@ -2607,9 +2607,9 @@ HTML_CONTENT = """<!DOCTYPE html>
       
       const hintEl = document.getElementById('login-auth-hint');
       if (isReLogin) {
-        hintEl.innerHTML = `<span style="color:var(--success)">🟢 该账号当前登录凭据有效。</span> 如需更换微软账户或刷新会话，请在下方直接输入新账号密码或导入新 Cookie。`;
+        hintEl.innerHTML = `<span style="color:var(--success)">🟢 该账号当前登录凭据有效。</span> 如需更换 MSR 账户或刷新会话，请在下方直接输入新账号密码或导入新 Cookie。`;
       } else {
-        hintEl.innerHTML = `<span style="color:var(--danger)">🔴 该账号尚未登录或凭据失效。</span> 推荐在下方输入微软账号密码一键全自动登录，亦可粘贴 Cookie 激活。`;
+        hintEl.innerHTML = `<span style="color:var(--danger)">🔴 该账号尚未登录或凭据失效。</span> 推荐在下方输入 MSR 账号密码一键全自动登录，亦可粘贴 Cookie 激活。`;
       }
 
       const currentAcc = (currentAccounts || []).find(x => x.name === name) || {};
@@ -2625,10 +2625,10 @@ HTML_CONTENT = """<!DOCTYPE html>
         pwdInput.value = '';
         pwdInput.placeholder = '●●●●●●●● (留空沿用已安全保存的密码)';
         if (hintSavedEl) hintSavedEl.style.display = 'inline';
-        document.getElementById('login-pwd-status').innerHTML = '🔒 已检测到已保存的微软账号密码凭据，可直接点击“🚀 一键全自动登录”直接重登，或输入新密码以覆盖更新。';
+        document.getElementById('login-pwd-status').innerHTML = '🔒 已检测到已保存的 MSR 账号密码凭据，可直接点击“🚀 一键全自动登录”直接重登，或输入新密码以覆盖更新。';
       } else {
         pwdInput.value = '';
-        pwdInput.placeholder = '请输入微软账号密码';
+        pwdInput.placeholder = '请输入 MSR 账号密码';
         if (hintSavedEl) hintSavedEl.style.display = 'none';
         document.getElementById('login-pwd-status').innerHTML = '准备就绪。支持账号密码登录、手机 Authenticator 二次验证、安全验证码输入及人机拼图远程交互。';
       }
@@ -2729,15 +2729,15 @@ HTML_CONTENT = """<!DOCTYPE html>
       const saveCred = document.getElementById('login-save-cred') ? document.getElementById('login-save-cred').checked : true;
       const currentAcc = (currentAccounts || []).find(x => x.name === activeAccountName) || {};
 
-      if (!u) return toast('请输入微软账号邮箱');
-      if (!p && !currentAcc.has_saved_password) return toast('请输入微软账号密码');
+      if (!u) return toast('请输入 MSR 账号邮箱');
+      if (!p && !currentAcc.has_saved_password) return toast('请输入 MSR 账号密码');
 
       const btn = document.getElementById('login-pwd-btn');
       const cancelBtn = document.getElementById('login-cancel-btn');
       const statusEl = document.getElementById('login-pwd-status');
       btn.disabled = true;
       cancelBtn.style.display = 'inline-block';
-      statusEl.innerHTML = '<span style="color:var(--primary)">⏳ 正在启动安全 Chromium 实例并连接微软登录网关...</span>';
+      statusEl.innerHTML = '<span style="color:var(--primary)">⏳ 正在启动安全 Chromium 实例并连接 MSR 登录网关...</span>';
 
       try {
         const res = await fetch('/api/auth/session/start', {
@@ -2787,7 +2787,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           otpBox.style.display = 'none';
           document.getElementById('login-pwd-btn').disabled = false;
           document.getElementById('login-cancel-btn').style.display = 'none';
-          toast('微软账号登录成功');
+          toast('MSR 账号登录成功');
           fetchStatus();
           return;
         }
@@ -2813,7 +2813,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         if (s.status === 'wait_otp') {
           otpBox.style.display = 'block';
-          document.getElementById('login-otp-prompt').innerText = s.otp_prompt || '微软要求输入安全验证码';
+          document.getElementById('login-otp-prompt').innerText = s.otp_prompt || 'MSR 要求输入安全验证码';
         } else {
           otpBox.style.display = 'none';
         }
@@ -3131,10 +3131,20 @@ class WebHandler(BaseHTTPRequestHandler):
             return
 
         if path == '/api/notify-test':
-            from msr import notify
+            from msr import notify, settings
             append_live_log('触发通知测试推送...')
-            notify.notify('MSR-ArmBot Web 控制台测试', '恭喜！通知通道配置正常，Server酱 / Webhook 推送成功！', level='info')
-            self._json_resp({'status': 'ok', 'message': '推送测试请求已发送'})
+            cfg = settings.load_settings()
+            chs = cfg.get('notify', {}).get('channels', ['stdout'])
+            ch_names = {
+                'stdout': '控制台',
+                'serverchan': 'Server酱',
+                'telegram': 'Telegram',
+                'webhook': 'Webhook'
+            }
+            active_names = [ch_names.get(c, c) for c in chs]
+            ch_desc = '、'.join(active_names) if active_names else '标准输出'
+            notify.notify('MSR-ArmBot Web 控制台测试', f'恭喜！通知通道配置正常，当前启用渠道 [{ch_desc}] 推送成功！', level='info')
+            self._json_resp({'status': 'ok', 'message': f'推送测试请求已发送 (渠道: {ch_desc})'})
             return
 
         if path == '/api/auth/credential':
@@ -3173,7 +3183,7 @@ class WebHandler(BaseHTTPRequestHandler):
             name = payload.get('name')
             if name:
                 config.delete_credential(name)
-                append_live_log(f'[{name}] 已安全清除保存的微软账号密码凭据')
+                append_live_log(f'[{name}] 已安全清除保存的 MSR 账号密码凭据')
             self._json_resp({'status': 'ok'})
             return
 
@@ -3375,7 +3385,7 @@ class WebHandler(BaseHTTPRequestHandler):
         acc_cfg = config.get_account(name) or {}
         proxy = acc_cfg.get('proxy')
         try:
-            append_live_log(f'[{name}] 开始微软账号全自动登录 (账号: {username})...')
+            append_live_log(f'[{name}] 开始 MSR 账号全自动登录 (账号: {username})...')
             res = auth.login_with_credential(name, username, password, proxy=proxy,
                                              log_cb=lambda m: append_live_log(f'[{name}] {m}'))
             self._json_resp(res)

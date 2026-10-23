@@ -301,7 +301,7 @@ def apply_to_cdp(cdp, fp, log=print):
         if (window.WebGL2RenderingContext) patchWebGL(WebGL2RenderingContext.prototype);
       }} catch(e) {{}}
 
-      // 6. 禁用/删除 PublicKeyCredential 并拦截 WebAuthn，防止微软将无头浏览器识别为支持 Passkey/设备密钥
+      // 6. 禁用/删除 PublicKeyCredential 并拦截 WebAuthn，防止将无头浏览器识别为支持 Passkey/设备密钥
       try {{
         if ('PublicKeyCredential' in window) {{
           try {{

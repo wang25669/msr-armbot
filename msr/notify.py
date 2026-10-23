@@ -76,10 +76,14 @@ def _serverchan(sc_cfg, title, text):
 
 def _tg(tg, title, text):
     """Telegram Bot 推送。"""
-    token = tg.get('bot_token')
-    chat_id = tg.get('chat_id')
+    token = (tg.get('bot_token') or '').strip()
+    chat_id = (tg.get('chat_id') or '').strip()
     if not token or not chat_id:
+        print('[notify] Telegram 未配置 bot_token 或 chat_id，跳过推送', flush=True)
         return
+    # 容错：如果用户输入的 token 自带了 'bot' 前缀，予以剔除
+    if token.startswith('bot') and ':' in token:
+        token = token[3:]
     url = f'https://api.telegram.org/bot{token}/sendMessage'
     req = urllib.request.Request(url, data=json.dumps({
         'chat_id': chat_id,
@@ -87,16 +91,18 @@ def _tg(tg, title, text):
         'parse_mode': 'Markdown'
     }).encode(), headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=15) as resp:
-        pass
+        if resp.status == 200:
+            print('[notify] Telegram 推送成功', flush=True)
 
 
 def _wh(wh, payload):
     """自定义 HTTP Webhook 推送。"""
-    url = wh.get('url')
+    url = (wh.get('url') or '').strip()
     if not url:
+        print('[notify] Webhook 未配置 url，跳过推送', flush=True)
         return
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  headers={'Content-Type': 'application/json'},
                                  method=wh.get('method', 'POST'))
     with urllib.request.urlopen(req, timeout=15) as resp:
-        pass
+        print('[notify] Webhook 推送成功', flush=True)

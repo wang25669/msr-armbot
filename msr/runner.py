@@ -84,7 +84,7 @@ def cmd_run(args):
             except Exception as ex:
                 err_msg = '运行失败: %s' % str(ex)[:150]
                 config.log(name, '!!! %s' % err_msg)
-                notify.notify(f'Rewards 异常 [{name}]', err_msg, level='error')
+                notify.notify(f'MSR 异常 [{name}]', err_msg, level='error')
                 rc = 1
         return rc
     finally:
@@ -114,10 +114,10 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
 
     has_token = bool(tok.get('refresh_token') or tok.get('access_token'))
     if not has_token and not has_cookie:
-        # 尝试检查是否有已保存的微软账号密码进行后台静默重登自愈
+        # 尝试检查是否有已保存的 MSR 账号密码进行后台静默重登自愈
         cred = config.get_credential(name)
         if cred and cred.get('username') and cred.get('password'):
-            config.log(name, '检测到 Token 与 Cookie 均不可用，正在使用保存的微软凭据尝试后台全自动登录自愈...')
+            config.log(name, '检测到 Token 与 Cookie 均不可用，正在使用保存的 MSR 凭据尝试后台全自动登录自愈...')
             try:
                 res = auth.login_with_credential(name, cred['username'], cred['password'], proxy=proxy,
                                                  log_cb=lambda m: config.log(name, m))
@@ -130,7 +130,7 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
                 else:
                     config.log(name, f'后台静默重登未完成: {res.get("error")}')
                     if notify:
-                        notify.notify(f'Rewards 凭据需接管 [{name}]', f'账号 {name} 自动重登需用户配合质询: {res.get("error")}\n请前往 Web 控制台接管登录。', level='warning')
+                        notify.notify(f'MSR 凭据需接管 [{name}]', f'账号 {name} 自动重登需用户配合质询: {res.get("error")}\n请前往 Web 控制台接管登录。', level='warning')
             except Exception as ex_relogin:
                 config.log(name, f'后台自愈重登异常: {ex_relogin}')
 
@@ -296,7 +296,7 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
     config.log(name, '=== 运行结束 (余额: %s, 今日增量: +%d): %s ===' % (bal_after, gained, ' | '.join(results)))
 
     if notify:
-        summary_title = f'Rewards 报告 [{name}] (+{gained}分)'
+        summary_title = f'MSR 运行报告 [{name}] (+{gained}分)'
         summary_lines = [
             f'### 账号: {name} (区域: {pr.get("country")}, 代理: {proxy or "直连"})',
             f'- **当前积分**: {bal_after} (今日变动: +{gained} 分)',

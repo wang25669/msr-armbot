@@ -84,7 +84,7 @@ def parse_netscape(text):
 
 
 def validate_cookies(cookies):
-    """检查 Cookie 是否包含 Bing/Microsoft Rewards 核心登录态。"""
+    """检查 Cookie 是否包含 Bing/MSR 核心登录态。"""
     if not cookies:
         return {'valid': False, 'reason': 'Cookie 为空', 'count': 0}
     
@@ -93,7 +93,7 @@ def validate_cookies(cookies):
     has_muid = 'MUID' in names
     has_srch = any('SRCH' in n for n in names)
     
-    # _U 是 Bing 识别已登录微软账户的核心票据，绝对不可仅凭匿名追踪票据 MUID 误判为已登录
+    # _U 是 Bing 识别已登录 MSR 账户的核心票据，绝对不可仅凭匿名追踪票据 MUID 误判为已登录
     valid = bool(has_u)
     reason = 'OK' if valid else '缺少核心登录凭据 (_U)'
     return {

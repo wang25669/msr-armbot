@@ -87,7 +87,7 @@ def credential_file(name):
 
 
 def get_credential(name):
-    """读取账号保存的微软账号密码凭据。"""
+    """读取账号保存的 MSR 账号密码凭据。"""
     return load_json(credential_file(name), None)
 
 
