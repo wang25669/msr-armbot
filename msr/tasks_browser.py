@@ -813,10 +813,17 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
       }
     })()""")
 
-    # 2. 从 DOM 中提取待领取数字 (若 DOM 明确显示 0 则表示已无待领)
+    # 2. 从 DOM 中提取待领取数字 (中英双语与 React Aria 结构适配)
     dom_points = ev(cdp, """(() => {
-      const t = document.body.innerText || '';
-      const m = t.match(/可领取\\s*(\\d+)/) || t.match(/(\\d+)\\s*(?:待领取|可领取)/) || t.match(/claimable\\s*(\\d+)/i);
+      const t = (document.body.innerText || '').replace(/\\s+/g, ' ');
+      const m = (
+        t.match(/可领取\\s*(\\d+)/) ||
+        t.match(/(\\d+)\\s*(?:待领取|可领取)/) ||
+        t.match(/Ready to claim\\s*(\\d+)/i) ||
+        t.match(/(\\d+)\\s*Pending\\s*Claim/i) ||
+        t.match(/claimable\\s*(\\d+)/i) ||
+        t.match(/(\\d+)\\s*claimable/i)
+      );
       return m ? parseInt(m[1], 10) : null;
     })()""")
 
@@ -860,10 +867,18 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
     # 4. 执行 UI 点击领取
     # 第一步：展开“可领取”面板按钮 (如果尚未展开)
     panel_selector = """(() => {
-      const btns = [...document.querySelectorAll('button, [role="button"]')];
+      const btns = [...document.querySelectorAll('button, [role="button"], a')];
       return btns.find(b => {
-        const t = (b.innerText || '').trim();
-        return (t.includes('可领取') || /claimable/i.test(t)) && !t.includes('领取积分') && !t.includes('已领取');
+        const t = (b.innerText || '').trim().replace(/\\s+/g, ' ');
+        const isClaim = (
+          t.includes('可领取') ||
+          t.includes('待领取') ||
+          /ready to claim/i.test(t) ||
+          /claimable/i.test(t) ||
+          (/^claim\\b/i.test(t) && !/claim\\s*points/i.test(t))
+        );
+        const isAlreadyDone = t.includes('已领取') || t.includes('领取积分') || /claim\\s*points/i.test(t);
+        return isClaim && !isAlreadyDone;
       }) || null;
     })()"""
 
@@ -874,14 +889,27 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
             time.sleep(random.uniform(2.0, 3.5))
         except Exception as ex:
             log(f'点击可领取面板提示: {ex}')
+        # 降级直接派发 click 事件
+        try:
+            ev(cdp, f"(() => {{ const b = ({panel_selector}); if (b) b.click(); }})()")
+            time.sleep(1.5)
+        except Exception:
+            pass
 
     # 第二步：在弹层或页面内点击“领取积分”按钮
     btn_selector = """(() => {
-      const dialog = document.querySelector('[role="dialog"], [role="alertdialog"]');
+      const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], [data-rac="dialog"], .dialog, .modal');
       const scope = dialog ? [...dialog.querySelectorAll('button, a')] : [...document.querySelectorAll('button, a, [role="button"]')];
       return scope.find(x => {
         const t = (x.innerText || '').trim().replace(/\\s+/g, ' ');
-        return /^\\d+\\s*待领取\\s*领取积分/.test(t) || t.includes('领取积分') || /claim\\s*points/i.test(t) || (t.includes('待领取') && t.includes('领取'));
+        return (
+          /^\\d+\\s*待领取\\s*领取积分/.test(t) ||
+          t.includes('领取积分') ||
+          /claim\\s*points/i.test(t) ||
+          /\\d+\\s*Pending\\s*Claim/i.test(t) ||
+          (t.includes('待领取') && t.includes('领取')) ||
+          /^claim$/i.test(t)
+        );
       }) || null;
     })()"""
 
@@ -895,7 +923,15 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
         log('未找到"领取积分"按钮 (可能已自动入账或无需点击)')
         return f'检测到{total_claimable}分(未见领取按钮)' if (total_claimable and total_claimable > 0) else '无可领取'
 
-    human_click(cdp, btn_selector, label='领取积分', close_new=False)
+    try:
+        human_click(cdp, btn_selector, label='领取积分', close_new=False)
+    except Exception:
+        pass
+    # 兜底直接派发原生 click 事件以穿透 React Aria 拦截
+    try:
+        ev(cdp, f"(() => {{ const b = ({btn_selector}); if (b) b.click(); }})()")
+    except Exception:
+        pass
     time.sleep(random.uniform(4.0, 6.0))
     log('已点击领取积分按钮并完成结算等待')
     return f'领取{total_claimable}分' if (total_claimable and total_claimable > 0) else '领取完成'
