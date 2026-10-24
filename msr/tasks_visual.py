@@ -367,4 +367,4 @@ def run(name, cdp, pr, log=print, used_path=None, max_attempts=2):
             log('视觉第%d轮失败: %s' % (i + 1, str(ex)[:90]))
         if i < max_attempts - 1:
             time.sleep(30)
-    return '视觉搜索未完成(尝试%d轮)' % max_attempts
+    return '未完成:视觉搜索(尝试%d轮)' % max_attempts

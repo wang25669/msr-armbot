@@ -265,35 +265,52 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
     # 5. 按照原始 plan 顺序组装结果
     results = ['%s:%s' % (w['phase'], results_map.get(w['phase'], '未执行')) for w in plan]
 
-    # 自动核查 + 自动修复
+    # 阶段 10 · 容错核查与智能回补修复 (repair)
+    # 深度达标审计：全方位核查未满额(如 9/15, 25/50)、未完成、部分完成或残留未做卡片
     bad = []
     for r in results:
         ph, _, val = r.partition(':')
-        if val.startswith('失败') or '未complete' in val or '未出现' in val or '未发现每日活动' in val:
+        is_bad = False
+        if val.startswith('失败') or val.startswith('未完成') or val.startswith('未满额') or val.startswith('部分完成'):
+            is_bad = True
+        elif '未complete' in val or '未出现' in val or '待完成' in val or '待做' in val:
+            is_bad = True
+        elif ph in ('search', 'pcsearch') and ('/' in val):
+            m = re.search(r'(\d+)\s*/\s*(\d+)', val)
+            if m and int(m.group(1)) < int(m.group(2)):
+                is_bad = True
+        elif ph in ('visual', 'visualsearch') and ('未完成' in val):
+            is_bad = True
+
+        if is_bad:
             bad.append(ph)
+
     if bad and not args.dry_run:
         from msr import settings as S
         st_runner = S.load_settings()
         retry_mins = int(st_runner.get('schedule', {}).get('retry_wait_minutes', 4))
         fast_mode = bool(st_runner.get('schedule', {}).get('fast_mode', False))
         wait_s = 5 if fast_mode else retry_mins * 60
-        config.log(name, '自动修复: 等待 %.1f 分钟后重跑 %s' % (wait_s / 60, bad))
+        config.log(name, '[阶段 10 · 容错核查] 发现未满分/未完成项目: %s, 冷却等待 %.1f 分钟后启动精准回补...' % (bad, wait_s / 60))
         time.sleep(wait_s)
         bad_api = [ph for ph in bad if next((t['needs'] for t in planner.TASK_TABLE.values() if t['phase'] == ph), 'api') == 'api']
         bad_browser = [ph for ph in bad if ph not in bad_api]
         for ph in bad_api:
             try:
                 r = executor.run_api_phase(name, ph, token, pr, p, config, api, proxy=proxy)
-                results.append('%s:修复(%s)' % (ph, r))
-                config.log(name, '自动修复 %s: %s' % (ph, r))
+                results_map[ph] = '回补成功(%s)' % r
+                config.log(name, '[阶段 10 自动回补] %s: %s' % (ph, r))
             except Exception as ex:
-                results.append('%s:修复失败(%s)' % (ph, str(ex)[:50]))
-                config.log(name, '自动修复 %s 仍失败: %s' % (ph, str(ex)[:100]))
+                results_map[ph] = '回补仍失败(%s)' % str(ex)[:50]
+                config.log(name, '[阶段 10 自动回补] %s 仍失败: %s' % (ph, str(ex)[:100]))
         if bad_browser:
             b_fixes = executor.run_browser_session(name, bad_browser, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
             for ph, r in b_fixes.items():
-                results.append('%s:修复(%s)' % (ph, r))
-                config.log(name, '自动修复 %s: %s' % (ph, r))
+                results_map[ph] = '回补(%s)' % r
+                config.log(name, '[阶段 10 自动回补] %s: %s' % (ph, r))
+
+        # 重新生成更新后的最终结果列表
+        results = ['%s:%s' % (w['phase'], results_map.get(w['phase'], '未执行')) for w in plan]
 
     # 获取运行后最新余额
     bal_after = bal_before

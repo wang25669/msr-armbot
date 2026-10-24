@@ -309,7 +309,9 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
                 log('搜索计数连续 %d 次停滞，提前收尾(避免死磕风控)' % stall_max)
                 break
 
-    return '%d/%d (尝试%d次)' % (current_prog, target_max, searches_done)
+    if current_prog >= target_max:
+        return '%d/%d满额 (尝试%d次)' % (current_prog, target_max, searches_done)
+    return '未满额:%d/%d (尝试%d次,缺%d分)' % (current_prog, target_max, searches_done, target_max - current_prog)
 
 
 # ---------- 每日活动卡 (Daily Set) ----------
@@ -499,8 +501,21 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
         done_count += 1
 
     navigate(cdp, 'https://rewards.bing.com/dashboard')
-    time.sleep(2)
-    return '处理%d张' % done_count
+    time.sleep(2.5)
+    remaining_todo = ev(cdp, """(() => {
+      const ds = document.getElementById("dailyset");
+      if (!ds) return 0;
+      const links = Array.from(ds.querySelectorAll("a[href]"));
+      return links.filter(a => {
+        const isDone = /已完成|complete|completed/i.test(a.innerText) || 
+                       /bg-statusSuccess|check/i.test(a.innerHTML) || 
+                       /已完成|complete|completed/i.test(a.getAttribute("aria-label") || "");
+        return !isDone;
+      }).length;
+    })()""") or 0
+    if remaining_todo == 0:
+        return '3/3已完成'
+    return '部分完成:处理%d张(剩%d张待完成)' % (done_count, remaining_todo)
 
 
 phase_quick = phase_dailyset
@@ -842,7 +857,24 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
             time.sleep(random.uniform(min(wmin, 10), min(wmax, 20)))
         done_count += 1
 
-    return '处理%d张' % done_count
+    navigate(cdp, 'https://rewards.bing.com/earn')
+    time.sleep(2.5)
+    remaining_ma = ev(cdp, """(() => {
+      const ma = document.getElementById("moreactivities");
+      if (!ma) return 0;
+      return Array.from(ma.querySelectorAll("a[href]")).filter(a => {
+        const text = a.innerText.replace(/\\n/g, ' ');
+        const isRedeem = a.href.includes("/redeem/");
+        const isDone = /已完成|complete|completed/i.test(a.innerText) || 
+                       /bg-statusSuccess|check/i.test(a.innerHTML) || 
+                       /已完成|complete|completed/i.test(a.getAttribute("aria-label") || "");
+        const hasPoints = text.includes("+") || text.includes("分") || /\\b\\d+\\s*(?:points|pts)\\b/i.test(text);
+        return !isRedeem && !isDone && hasPoints;
+      }).length;
+    })()""") or 0
+    if remaining_ma == 0:
+        return '日常任务已全部完成(共%d张)' % done_count
+    return '部分完成:处理%d张(剩%d张待做)' % (done_count, remaining_ma)
 
 
 phase_earn = phase_moreactivities
