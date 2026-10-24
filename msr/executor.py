@@ -164,7 +164,7 @@ def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger, t
                                log=logger, token=token, proxy=proxy)
     if p in ('visual', 'visualsearch'):
         from msr import tasks_visual
-        return tasks_visual.run(name, cdp, pr, log=logger,
+        return tasks_visual.run(name, cdp, pr, log=logger, ch=ch,
                                 used_path=config.pfile(name, 'visual_used.json'))
     if p in ('claim', 'pointclaim', 'claimpoints'):
         return tb.phase_claim(name, cdp, pr, ch=ch, log=logger)
@@ -206,6 +206,13 @@ def run_browser_session(name, phases, token, pr, profile_path, config, proxy=Non
         cookies = config.load_json(config.pfile(name, 'cookie.json'))
         if cookies:
             browser.inject_cookies(cdp, cookies, log=logger)
+
+        # 账号启动时先自动扫描并激活所有连续打卡任务 (Streak，如 Visual Search Streak, Edge Browsing Streak)
+        from msr import tasks_browser as tb
+        try:
+            tb.auto_activate_streaks(cdp, ch=ch, log=logger)
+        except Exception as ex:
+            logger('自动激活 Streak 检查异常: %s' % str(ex)[:80])
 
         for phase in phases:
             logger('>>> 开始浏览器阶段: %s' % phase)

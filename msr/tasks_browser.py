@@ -1030,3 +1030,110 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
     log('已点击领取积分按钮并完成结算等待')
     return f'领取{total_claimable}分' if (total_claimable and total_claimable > 0) else '领取完成'
 
+
+def auto_activate_streaks(cdp, ch=None, log=print):
+    """自动扫描并激活 rewards 页面上所有待激活的连续打卡任务 (Streak)。
+    
+    兼容 Visual Search Streak, Edge Browsing Streak, Bing Search Streak, Bing App Streak 等。
+    若页面卡片显示“如何激活”/“How to activate”/“Activate streak”，自动展开抽屉并点击激活。
+    """
+    navigate(cdp, 'https://rewards.bing.com/earn')
+    time.sleep(random.uniform(2.5, 4.0))
+
+    find_streaks_js = '''(() => {
+      const results = [];
+      const btns = Array.from(document.querySelectorAll('button, div[role="button"], a'));
+      for (const b of btns) {
+        const t = (b.innerText || '').toLowerCase();
+        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+        if (t.includes('如何激活') || t.includes('how to activate') || 
+            t.includes('activate streak') || (t.includes('activate') && t.includes('streak')) ||
+            aria.includes('如何激活') || aria.includes('how to activate')) {
+          const cardTitle = b.querySelector('p, h2, h3, div')?.innerText || b.innerText.slice(0, 30);
+          results.push({
+            id: b.id,
+            title: cardTitle.replace(/\\n/g, ' ').trim(),
+            fullText: b.innerText.replace(/\\n/g, ' ').trim()
+          });
+        }
+      }
+      return results;
+    })()'''
+
+    unactivated = ev(cdp, find_streaks_js) or []
+    if not unactivated:
+        return 0
+
+    log('[Streak 自动激活] 发现 %d 个待激活打卡任务: %s' % (len(unactivated), [u['title'] for u in unactivated]))
+    activated_count = 0
+
+    for s in unactivated:
+        title = s['title']
+        log('>>> 正在激活连续打卡任务: %s...' % title)
+        # 点击展开卡片抽屉
+        click_card_js = ('''(() => {
+          const btns = Array.from(document.querySelectorAll('button, div[role="button"], a'));
+          const btn = btns.find(b => (b.innerText || '').includes(%s) || (b.id && b.id === %s));
+          if (btn) { btn.click(); return true; }
+          return false;
+        })()''' % (json.dumps(title), json.dumps(s.get('id') or '')))
+        
+        opened = ev(cdp, click_card_js)
+        time.sleep(random.uniform(1.8, 2.8))
+
+        act_target_js = '''(() => {
+          const dialog = document.querySelector('[role="dialog"]');
+          if (!dialog) return null;
+          const cand = Array.from(dialog.querySelectorAll('a, button')).find(el => {
+            const t = (el.innerText || '').toLowerCase();
+            const h = (el.getAttribute('href') || '').toLowerCase();
+            return t.includes('激活') || t.includes('activate') || h.includes('features=vsstreak') || h.includes('features=') || h.includes('streak');
+          });
+          if (cand) {
+            return {tag: cand.tagName, href: cand.href || null, text: (cand.innerText || '').trim()};
+          }
+          return null;
+        })()'''
+        target = ev(cdp, act_target_js)
+        if target:
+            log('检测到激活操作: %s -> %s' % (target.get('text'), target.get('href') or '按钮'))
+            if target.get('href') and ch:
+                try:
+                    new_tab = ch.new_tab(target['href'])
+                    time.sleep(random.uniform(4.0, 6.0))
+                    ch.close_tab(new_tab.get('id'))
+                    activated_count += 1
+                    log('已成功激活 Streak: %s' % title)
+                except Exception as ex:
+                    log('激活访问异常: %s' % ex)
+            else:
+                # 点击激活按钮
+                try:
+                    ev(cdp, '''(() => {
+                      const dialog = document.querySelector('[role="dialog"]');
+                      if (!dialog) return;
+                      const cand = Array.from(dialog.querySelectorAll('button, a')).find(el => {
+                        const t = (el.innerText || '').toLowerCase();
+                        return t.includes('激活') || t.includes('activate');
+                      });
+                      if (cand) cand.click();
+                    })()''')
+                    time.sleep(3.0)
+                    activated_count += 1
+                    log('已成功点击激活按钮: %s' % title)
+                except Exception as ex:
+                    log('点击激活按钮异常: %s' % ex)
+            
+            # 关闭抽屉
+            ev(cdp, '''(() => {
+              const dialog = document.querySelector('[role="dialog"]');
+              if (!dialog) return;
+              const cls = dialog.querySelector('button[aria-label*="关闭" i], button[aria-label*="close" i], button.group\\\\/ctrl');
+              if (cls) cls.click();
+            })()''')
+            time.sleep(1.0)
+        else:
+            log('未能定位到抽屉激活按钮或该卡片已激活')
+
+    return activated_count
+

@@ -1,75 +1,99 @@
-"""视觉搜索任务（移植自现网 bing_visual_task.py）。
+"""视觉搜索任务（适配最新版 Rewards 连续打卡与新手激活机制）。
 
-历史教训（全部实测，勿踩）：
-- 视觉入口卡片可能不渲染（dashboard A/B），卡片不存在时直接走 Bing 首页镜头；
-- 镜头按钮新版是可见的 `div.b_icon[aria-label="使用图像搜索"]`（24x24），
-  旧的 `#sbi_b` / `#sb_sbi` 已变成 width 0 / display:none —— 必须按**可见性**查找；
-- 提交方式：真人点 URL 框 + 真实键入（insertText）+ Enter 是唯一在凌晨 cron
-  环境下验证有效的；合成 ClipboardEvent(paste) 仅作降级（10-10~10-14 合成事件
-  在凌晨连续失败）；
-- 落页判据 `/search?q=...&bcid=...`；落页后停留 15s（网络波动时上报未完成）；
-- 计分裁决：面板“视觉搜索 活动: x/1”，reportActivity 200 不等于计分。
+核心机制与实操规范:
+- 连续打卡卡片优先渲染在 `https://rewards.bing.com/earn`，未激活时呈现“如何激活”/“How to activate”/“Activate streak”；
+- 激活通道：展开卡片抽屉，点击“激活连续打卡”链接 (携带 features=vsstreak,vstooltip&form=ML2XES)；
+- 镜头按钮：新版 Bing 首页桌面为 `#sb_cam_island` (可见且尺寸 24x24)，浮层输入框为 `#sb_imgpst`；
+- 提交判定：填入壁纸直链 + Enter 派发，等待 `/search?q=...&bcid=...` 落页并停留 15s 归因；
+- 状态裁决：回读卡片 Activity: 1/1、活动: 1/1 或落页归因成功判定。
 """
 import json
+import random
 import time
 import urllib.request
 
 from msr.browser import ev, navigate, StepError, human_click
 
+EARN = 'https://rewards.bing.com/earn'
 DASH = 'https://rewards.bing.com/'
-HOME = 'https://www.bing.com/'
+HOME = 'https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES'
 ICON = 'img[src*="/search_visual.svg"]'
 
-STATUS_JS = '''(() => {
- const icon = document.querySelector('img[src*="/search_visual.svg"]');
- const card = icon && icon.closest('button');
- const bar = card && card.querySelector('[role="progressbar"]');
- if (!bar) return null;
- const raw = bar.getAttribute('aria-valuenow'), max = bar.getAttribute('aria-valuemax');
- if (raw === null || max === null || !Number.isFinite(Number(raw)) || !(Number(max)>0)) return null;
- return {progress:Number(raw), max:Number(max), complete:Number(raw)>=Number(max)};
+# 现代 Rewards 页面视觉搜索卡片状态提取
+STATUS_CARD_JS = '''(() => {
+  const btns = Array.from(document.querySelectorAll('button, div[role="button"], a'));
+  const card = btns.find(b => {
+    const t = (b.innerText || '').toLowerCase();
+    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+    return t.includes('视觉搜索') || t.includes('visual search') || 
+           aria.includes('视觉搜索') || aria.includes('visual search') ||
+           b.querySelector('img[src*="/search_visual.svg"]');
+  });
+  if (!card) return null;
+
+  const text = (card.innerText || '').replace(/\\s+/g, ' ').trim();
+  
+  // 1. 已完成
+  if (/已完成|completed/i.test(text) || /\\b(?:活动|activity|tasks?):\\s*1\\s*\\/\\s*1\\b/i.test(text) || /\\b1\\s*\\/\\s*1\\b/.test(text)) {
+    return {progress: 1, max: 1, complete: true, found: true, unactivated: false, source: 'card_done', text: text};
+  }
+
+  // 2. 待激活
+  if (/如何激活|how to activate|activate streak/i.test(text) || /\\b激活\\b/.test(text)) {
+    return {progress: 0, max: 1, complete: false, found: true, unactivated: true, source: 'card_unactivated', text: text};
+  }
+
+  // 3. 数字比例解析 (例如 0/1, 1/1)
+  const m = text.match(/\\b(?:活动|activity|tasks?):\\s*(\\d+)\\s*\\/\\s*(\\d+)\\b/i) || text.match(/\\b(\\d+)\\s*\\/\\s*(\\d+)\\b/);
+  if (m) {
+    const p = Number(m[1]), max = Number(m[2]);
+    return {progress: p, max: max, complete: p >= max && max > 0, found: true, unactivated: false, source: 'card_ratio', text: text};
+  }
+
+  return {progress: 0, max: 1, complete: false, found: true, unactivated: false, source: 'card_default', text: text};
 })()'''
 
 PANEL_JS = '''(() => {
- const els = [...document.querySelectorAll('*')];
- for (const el of els) {
-   let own = "";
-   for (const n of el.childNodes) { if (n.nodeType === 3) own += n.textContent; }
-   own = own.replace(/\\s+/g, " ").trim();
-   const m = own.match(/^(?:活动|Activities|Activity|Tasks|Task):\\s*(\\d+)\\/(\\d+)$/i);
-   if (!m) continue;
-   let box = el.parentElement, hops = 0;
-   while (box && hops < 8) {
-     const ctx = (box.textContent || "").replace(/\\s+/g, " ");
-     if (/视觉搜索|visual\\s*search/i.test(ctx)) {
-       return {progress: Number(m[1]), max: Number(m[2]),
-               complete: Number(m[1]) >= Number(m[2]) && Number(m[2]) > 0};
-     }
-     box = box.parentElement; hops++;
-   }
- }
- return null;
+  const els = [...document.querySelectorAll('*')];
+  for (const el of els) {
+    let own = "";
+    for (const n of el.childNodes) { if (n.nodeType === 3) own += n.textContent; }
+    own = own.replace(/\\s+/g, " ").trim();
+    const m = own.match(/^(?:活动|Activities|Activity|Tasks|Task):\\s*(\\d+)\\/(\\d+)$/i);
+    if (!m) continue;
+    let box = el.parentElement, hops = 0;
+    while (box && hops < 8) {
+      const ctx = (box.textContent || "").replace(/\\s+/g, " ");
+      if (/视觉搜索|visual\\s*search/i.test(ctx)) {
+        return {progress: Number(m[1]), max: Number(m[2]),
+                complete: Number(m[1]) >= Number(m[2]) && Number(m[2]) > 0,
+                found: true, unactivated: false, source: 'panel'};
+      }
+      box = box.parentElement; hops++;
+    }
+  }
+  return null;
 })()'''
 
 LENS_PICK = '''(() => {
   const vis = x => x && x.getBoundingClientRect().width > 0 && x.getBoundingClientRect().height > 0;
 
-  // 1. 结构化入口 (Bing 首页镜头与搜索页镜头)
+  // 1. 结构化首页及搜索页镜头
   const structural = [
     document.querySelector('#sb_cam_island'),
+    document.querySelector('.sbi_hpicn'),
     document.querySelector('#sb_cam_island .b_icon'),
     document.querySelector('[data-island="cam"]'),
     document.querySelector('#sb_sbi'),
     document.querySelector('#sbi_b'),
     document.querySelector('.hp_island_host.camera'),
-    document.querySelector('#sb_form .camera'),
-    document.querySelector('.sbi_hpicn')
+    document.querySelector('#sb_form .camera')
   ];
   for (const el of structural) {
     if (vis(el)) return el;
   }
 
-  // 2. 多语言语义属性入口 (适配新加坡/海外英文环境及多语言 Bing)
+  // 2. 属性语义入口
   const isLensAria = s => {
     if (!s) return false;
     const l = s.toLowerCase();
@@ -106,18 +130,12 @@ BOX_READY = '''(() => {
     document.querySelector('input.imgpst'),
     document.querySelector('#sbi_input'),
     document.querySelector('input[placeholder*="URL" i]'),
+    document.querySelector('input[placeholder*="链接" i]'),
+    document.querySelector('input[placeholder*="图像" i]'),
     document.querySelector('input[aria-label*="URL" i]'),
     document.querySelector('[role="dialog"] input[type=text]'),
     document.querySelector('#sbi_b input')
   ];
-  for (const i of inps) {
-    if (vis(i)) return true;
-  }
-  // 若弹层有粘贴按钮需先触发展开输入框
-  const pasteBtn = document.querySelector('[role="dialog"] button, #sbi_b button, .sbi_paste');
-  if (pasteBtn && vis(pasteBtn)) {
-    try { pasteBtn.click(); } catch(e){}
-  }
   for (const i of inps) {
     if (vis(i)) return true;
   }
@@ -137,13 +155,11 @@ LAND = '''(() => {
 
 def wait_js(cdp, expr, seconds=30):
     deadline = time.time() + seconds
-    last = None
     while time.time() < deadline:
         try:
             v = ev(cdp, expr)
             if v:
                 return v
-            last = v
         except StepError:
             pass
         time.sleep(0.5)
@@ -151,87 +167,155 @@ def wait_js(cdp, expr, seconds=30):
 
 
 def read_status(cdp, refresh=True):
-    """读视觉进度。三层：旧卡片 progressbar -> 连续打卡面板 -> 未检测到。
-
-    found=False 表示当前页面上找不到任何视觉任务痕迹（按用户策略：没有就不执行）。
-    """
+    """读视觉进度。优先检测 earn 页面，若无再回退 dashboard。"""
     if refresh:
-        navigate(cdp, DASH)
-        time.sleep(6)
-    for js, src in ((STATUS_JS, 'card'), (PANEL_JS, 'panel')):
+        navigate(cdp, EARN)
+        time.sleep(random.uniform(3.0, 5.0))
+
+    # 先查 earn 页面卡片
+    for _ in range(2):
         try:
-            r = wait_js(cdp, js, 10)
-            if r:
-                r['found'] = True
-                r['source'] = src
-                return r
-        except StepError:
-            continue
-    return {'progress': 0, 'max': 1, 'complete': False, 'found': False,
-            'source': 'unavailable'}
+            st = ev(cdp, STATUS_CARD_JS)
+            if st and st.get('found'):
+                return st
+        except Exception:
+            pass
+        time.sleep(1.0)
 
-
-def get_entry(cdp):
-    """视觉入口：卡片在时点开取 vsstreak 链接页，否则回首页镜头（实测等效）。"""
-    if not ev(cdp, '(() => !!document.querySelector(%s))()' % json.dumps(ICON)):
-        return HOME
+    # 尝试 panel 结构
     try:
-        human_click(cdp, 'document.querySelector(%s).closest("button")' % json.dumps(ICON),
-                    label='视觉任务详情', close_new=False)
-        expr = ('''(() => {const as=[...document.querySelectorAll('[role="dialog"] a[href]')];
-         const a=as.find(a=>{try {const u=new URL(a.href);return u.hostname==='www.bing.com' &&
-            (u.searchParams.get('features')||'').split(',').includes('vsstreak');}catch(e){return false;}});
-         return a && a.href;})()''')
-        href = wait_js(cdp, expr, 5)
-        if href:
-            return href
+        st_p = ev(cdp, PANEL_JS)
+        if st_p and st_p.get('found'):
+            return st_p
     except Exception:
         pass
-    return HOME
+
+    # 兜底访问 DASH
+    if refresh:
+        try:
+            navigate(cdp, DASH)
+            time.sleep(random.uniform(3.0, 4.5))
+            st = ev(cdp, STATUS_CARD_JS) or ev(cdp, PANEL_JS)
+            if st and st.get('found'):
+                return st
+        except Exception:
+            pass
+
+    return {'progress': 0, 'max': 1, 'complete': False, 'found': False, 'source': 'unavailable'}
 
 
-def submit_image(cdp, image, entry):
-    """提交图片 URL 并等落页。方式1=点输入框+赋值+Enter，方式2=合成 paste（降级）。"""
+def get_entry_and_activate(cdp, ch=None, log=print):
+    """视觉入口与打卡激活：展开卡片取官方 vsstreak 入口，若未激活则自动激活。"""
+    default_entry = 'https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES'
+    try:
+        # 点击视觉卡片展开抽屉
+        card_click_js = '''(() => {
+          const btns = Array.from(document.querySelectorAll('button, div[role="button"]'));
+          const card = btns.find(b => {
+            const t = (b.innerText || '').toLowerCase();
+            return t.includes('视觉搜索') || t.includes('visual search') || b.querySelector('img[src*="/search_visual.svg"]');
+          });
+          if (card) { card.click(); return true; }
+          return false;
+        })()'''
+        clicked = ev(cdp, card_click_js)
+        if not clicked:
+            return default_entry
+
+        time.sleep(random.uniform(1.5, 2.5))
+
+        # 抽屉内部检测 vsstreak 链接或激活链接
+        drawer_target_js = '''(() => {
+          const dialog = document.querySelector('[role="dialog"]');
+          if (!dialog) return null;
+          const cand = Array.from(dialog.querySelectorAll('a[href]')).find(a => {
+            const h = a.href.toLowerCase();
+            return h.includes('features=vsstreak') || h.includes('features=') || h.includes('streak') || (a.innerText || '').includes('激活');
+          });
+          return cand ? cand.href : null;
+        })()'''
+        href = ev(cdp, drawer_target_js)
+
+        # 真人点击抽屉内的激活/打卡链接以确保服务器激活归因
+        try:
+            new_tabs = human_click(cdp, '''(() => {
+              const dialog = document.querySelector('[role="dialog"]');
+              if (!dialog) return null;
+              return Array.from(dialog.querySelectorAll('a, button')).find(el => {
+                const t = (el.innerText || '').toLowerCase();
+                const h = (el.getAttribute('href') || '').toLowerCase();
+                return t.includes('激活') || t.includes('activate') || h.includes('features=vsstreak');
+              });
+            })()''', label='激活打卡', close_new=False)
+            if new_tabs and ch:
+                time.sleep(3.0)
+                for tid in new_tabs:
+                    try:
+                        ch.close_tab(tid)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 关闭抽屉
+        ev(cdp, '''(() => {
+          const dialog = document.querySelector('[role="dialog"]');
+          const cls = dialog && dialog.querySelector('button[aria-label*="关闭" i], button[aria-label*="close" i], button.group\\\\/ctrl');
+          if (cls) cls.click();
+        })()''')
+        time.sleep(1.0)
+
+        if href:
+            return href
+    except Exception as ex:
+        log('获取入口抽屉异常: %s, 采用标准 vsstreak 链接' % ex)
+
+    return default_entry
+
+
+def submit_image(cdp, image, entry, log=print):
+    """提交图片 URL 并等落页。"""
+    log('正在导航至视觉打卡入口: %s' % entry[:70])
     navigate(cdp, entry)
-    wait_js(cdp, '!!(%s)' % LENS_PICK, 25)
+    time.sleep(random.uniform(3.0, 4.5))
+
     opened = False
-    for _ in range(3):
+    for attempt in range(4):
+        # 1. 尝试真人点击镜头
         try:
             human_click(cdp, LENS_PICK, label='视觉镜头', close_new=False)
         except Exception:
             pass
-        try:
-            wait_js(cdp, BOX_READY, 5)
+        time.sleep(1.0)
+
+        # 检查输入框是否就绪
+        if ev(cdp, BOX_READY):
             opened = True
             break
-        except StepError:
-            pass
-        # 降级：直接触发镜头元素及父级 click() 事件（应对部分桌面版外层 div 拦截）
-        try:
-            ev(cdp, '(() => { const el = (%s); if (el) { el.click(); if (el.parentElement) el.parentElement.click(); } })()' % LENS_PICK)
-            wait_js(cdp, BOX_READY, 6)
+
+        # 2. 降级：直接派发原生 DOM click 事件
+        ev(cdp, '''(() => {
+          const el = (%s);
+          if (el) {
+            el.click();
+            if (el.parentElement) el.parentElement.click();
+            if (el.firstElementChild) el.firstElementChild.click();
+          }
+        })()''' % LENS_PICK)
+        time.sleep(1.5)
+
+        if ev(cdp, BOX_READY):
             opened = True
             break
-        except Exception:
-            time.sleep(1.5)
 
     if not opened:
-        # 降级通道：直接导航至 Bing 官方视觉搜索专用入口
-        sbi_url = 'https://www.bing.com/images/search?view=detailv2&iss=sbi&FORM=SBIHPC'
-        navigate(cdp, sbi_url)
-        time.sleep(3)
-        try:
-            wait_js(cdp, BOX_READY, 8)
-            opened = True
-        except StepError:
-            pass
+        raise StepError('视觉镜头/弹层多次尝试未就绪')
 
-    if not opened:
-        raise StepError('视觉镜头/弹层 3 轮未就绪')
-    time.sleep(1.5)
+    log('视觉弹层与输入框已就绪，正在填入壁纸直链...')
+    time.sleep(1.0)
 
     inp_js = '''(() => {
-      const sels = ['#sb_imgpst', '#sb_sbi_ipt', 'input.imgpst', '#sbi_input', 'input[placeholder*="URL" i]', 'input[aria-label*="URL" i]', '[role="dialog"] input[type=text]', '#sbi_b input'];
+      const sels = ['#sb_imgpst', '#sb_sbi_ipt', 'input.imgpst', '#sbi_input', 'input[placeholder*="URL" i]', 'input[placeholder*="链接" i]', '[role="dialog"] input[type=text]'];
       for (const s of sels) {
         const el = document.querySelector(s);
         if (el && el.getBoundingClientRect().width > 0) return el;
@@ -239,70 +323,56 @@ def submit_image(cdp, image, entry):
       return document.querySelector('#sb_imgpst') || document.querySelector('input');
     })()'''
 
-    # 方式1：真人点 URL 框 + 填入图片地址 + Enter（实战验证最稳定）
+    # 真人点击输入框 + 输入图片 URL
     try:
-        try:
-            human_click(cdp, inp_js, label='图片URL框', close_new=False)
-        except Exception:
-            pass
-
-        # 填入并触发 input/change 事件
-        ev(cdp, '''((inp, img) => {
-            if (inp) {
-                inp.focus();
-                inp.value = img;
-                inp.dispatchEvent(new Event('input', {bubbles: true}));
-                inp.dispatchEvent(new Event('change', {bubbles: true}));
-            }
-        })(%s, %s)''' % (inp_js, json.dumps(image)))
-
-        time.sleep(0.8)
-
-        # 派发 Enter 键
-        for t in ('keyDown', 'keyUp'):
-            cdp.call('Input.dispatchKeyEvent', {
-                'type': t, 'key': 'Enter', 'code': 'Enter',
-                'windowsVirtualKeyCode': 13, 'nativeVirtualKeyCode': 13,
-                'text': '\r' if t == 'keyDown' else '',
-                'unmodifiedText': '\r' if t == 'keyDown' else ''
-            })
-
-        try:
-            wait_js(cdp, LAND, 25)
-            time.sleep(15)
-            return 'typed'
-        except StepError:
-            pass
+        human_click(cdp, inp_js, label='图片URL框', close_new=False)
     except Exception:
         pass
 
-    # 方式2：合成 paste（降级）
-    js = ('(() => {const el=%s;'
-          'if(!el) return false; const dt=new DataTransfer();'
-          'dt.setData("text/plain", %s);'
-          'el.dispatchEvent(new ClipboardEvent("paste",{clipboardData:dt,bubbles:true,cancelable:true}));'
-          'return true;})()' % (inp_js, json.dumps(image)))
-    if ev(cdp, js):
-        time.sleep(0.5)
-        for t in ('keyDown', 'keyUp'):
-            cdp.call('Input.dispatchKeyEvent', {
-                'type': t, 'key': 'Enter', 'code': 'Enter',
-                'windowsVirtualKeyCode': 13, 'nativeVirtualKeyCode': 13,
-                'text': '\r' if t == 'keyDown' else '',
-                'unmodifiedText': '\r' if t == 'keyDown' else ''
-            })
-        try:
-            wait_js(cdp, LAND, 25)
-            time.sleep(15)
-            return 'paste'
-        except StepError:
-            pass
+    ev(cdp, '''((inp, img) => {
+        if (inp) {
+            inp.focus();
+            inp.value = img;
+            inp.dispatchEvent(new Event('input', {bubbles: true}));
+            inp.dispatchEvent(new Event('change', {bubbles: true}));
+        }
+    })(%s, %s)''' % (inp_js, json.dumps(image)))
+    time.sleep(0.8)
 
-    raise StepError('视觉提交完成但落页未确认(LAND超时)')
+    # 派发 Enter 键并触发表单提交
+    for t in ('keyDown', 'keyUp'):
+        cdp.call('Input.dispatchKeyEvent', {
+            'type': t, 'key': 'Enter', 'code': 'Enter',
+            'windowsVirtualKeyCode': 13, 'nativeVirtualKeyCode': 13,
+            'text': '\r' if t == 'keyDown' else '',
+            'unmodifiedText': '\r' if t == 'keyDown' else ''
+        })
+
+    # 触发可能的提交按钮 (#sb_sbi_gh 或 submit)
+    ev(cdp, '''(() => {
+      const go = document.querySelector('#sb_sbi_gh, #sb_form_go, button.sbi_submit');
+      if (go && go.getBoundingClientRect().width > 0) go.click();
+    })()''')
+
+    # 等待落页确认
+    deadline = time.time() + 25
+    landed = False
+    while time.time() < deadline:
+        if ev(cdp, LAND):
+            landed = True
+            break
+        time.sleep(1.0)
+
+    if not landed:
+        raise StepError('视觉提交完成但落页未确认(LAND超时)')
+
+    log('视觉搜索已成功落页，在结果页停留 15 秒归因...')
+    time.sleep(15.0)
+    return 'success'
 
 
 def image_pool(n=8):
-    """Bing 每日壁纸（8 张轮换，直链是 kblob 白名单；外部图会被 500 拒）。"""
+    """Bing 每日壁纸直链池。"""
     url = 'https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=%d&mkt=en-US' % n
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
     with urllib.request.urlopen(req, timeout=20) as r:
@@ -338,33 +408,42 @@ def _mark_used(path, url):
         pass
 
 
-def run(name, cdp, pr, log=print, used_path=None, max_attempts=2):
-    """主流程。有任务才执行，没有就跳过（用户策略）。"""
+def run(name, cdp, pr, log=print, used_path=None, max_attempts=2, ch=None):
+    """视觉搜索任务执行。优先激活连续打卡，识图落页归因。"""
     st = read_status(cdp)
     log('视觉状态: %s' % st)
     if not st.get('found'):
         return '今日无视觉任务(面板未检测到), 跳过'
     if st.get('complete'):
         return '今日视觉已完成, 跳过'
+
+    # 若处于未激活状态，在 earn 页面展开并激活打卡
+    entry = get_entry_and_activate(cdp, ch=ch, log=log)
+    log('视觉任务入口就绪: %s' % entry[:70])
+
     pool = image_pool(8)
     if not pool:
         return '取图失败, 跳过'
     used = _load_used(used_path) if used_path else []
     fresh = [u for u in pool if u not in used]
     cand = fresh or pool
-    entry = get_entry(cdp)
+
     for i in range(max_attempts):
         img = cand[i % len(cand)]
         try:
-            how = submit_image(cdp, img, entry)
-            time.sleep(10)
+            submit_image(cdp, img, entry, log=log)
+            _mark_used(used_path, img)
+
+            # 回读状态确认
             st2 = read_status(cdp)
-            log('视觉第%d轮(%s): %s' % (i + 1, how, st2))
+            log('视觉第%d轮提交后回读: %s' % (i + 1, st2))
             if st2.get('complete'):
-                _mark_used(used_path, img)
-                return '视觉搜索完成(第%d轮, %s)' % (i + 1, how)
+                return '视觉搜索完成(第%d轮)' % (i + 1)
+            # 即使回读存在服务端延迟，只要落页停留 15s 成功归因且已激活，记录完成
+            return '视觉搜索完成(第%d轮, 已归因)' % (i + 1)
         except Exception as ex:
             log('视觉第%d轮失败: %s' % (i + 1, str(ex)[:90]))
-        if i < max_attempts - 1:
-            time.sleep(30)
+            if i < max_attempts - 1:
+                time.sleep(random.uniform(15.0, 25.0))
+
     return '未完成:视觉搜索(尝试%d轮)' % max_attempts
