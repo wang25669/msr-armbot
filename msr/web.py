@@ -3567,7 +3567,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._json_resp({'status': 'busy', 'message': f'当前已有任务正在执行中 (目标: {target})，请等待完成后再提交'}, code=409)
                 return
 
-        # 检查底层 runner.lock 文件锁
+        # 检查底层 runner.lock 文件锁 (严格核验进程指纹，避免死锁或容器 PID 误判)
         lock_p = os.path.join(config.HOME, 'runner.lock') if getattr(config, 'HOME', None) else None
         if lock_p and os.path.isfile(lock_p):
             try:
@@ -3575,11 +3575,18 @@ class WebHandler(BaseHTTPRequestHandler):
                     c = f.read().strip()
                 if c.isdigit():
                     pid = int(c)
-                    os.kill(pid, 0)
-                    append_live_log(f'⚠️ 系统检测到自动化任务进程 (PID: {pid}) 正在执行中，拒绝并发启动')
-                    self._json_resp({'status': 'busy', 'message': f'已有任务进程正在执行中 (PID: {pid})'}, code=409)
-                    return
-            except OSError:
+                    from msr.runner import is_runner_process_alive
+                    if is_runner_process_alive(pid):
+                        append_live_log(f'⚠️ 系统检测到自动化任务进程 (PID: {pid}) 正在执行中，拒绝并发启动')
+                        self._json_resp({'status': 'busy', 'message': f'已有任务进程正在执行中 (PID: {pid})'}, code=409)
+                        return
+                    else:
+                        # 属残留假死锁，主动清理以保证用户操作畅通
+                        try:
+                            os.remove(lock_p)
+                        except Exception:
+                            pass
+            except Exception:
                 pass
 
         def bg_runner():

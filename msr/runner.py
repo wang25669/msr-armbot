@@ -1,30 +1,64 @@
 import os
 import random
 import time
+import fcntl
+
+_LOCK_FD = None
+
+
+def is_runner_process_alive(pid):
+    """精确检查指定 PID 进程是否真正存活且属于 msr runner 任务 (防止容器内 PID 复用误判死锁)。"""
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        with open(f'/proc/{pid}/cmdline', 'rb') as f:
+            cmd = f.read().decode('utf-8', errors='ignore')
+        return 'msr' in cmd and ('run' in cmd or 'python' in cmd)
+    except Exception:
+        return False
 
 
 def acquire_runner_lock(config):
-    """跨进程文件锁，防止定时任务与手动触发并发冲突。"""
+    """跨进程内核级文件排他锁 (fcntl.flock)，进程崩溃或容器重启由操作系统内核自动解封，杜绝死锁。"""
+    global _LOCK_FD
     lock_path = os.path.join(config.HOME, 'runner.lock')
     try:
-        if os.path.isfile(lock_path):
-            with open(lock_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-            if content.isdigit():
-                pid = int(content)
-                try:
-                    os.kill(pid, 0)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            try:
+                with open(lock_path, 'r', encoding='utf-8') as f:
+                    c = f.read().strip()
+                if c.isdigit() and is_runner_process_alive(int(c)):
+                    os.close(fd)
                     return None
-                except OSError:
-                    pass
-        with open(lock_path, 'w', encoding='utf-8') as f:
-            f.write(str(os.getpid()))
+                # 若持有该文件的 PID 并非活跃的 msr 任务，视作残留锁尝试抢锁
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except Exception:
+                os.close(fd)
+                return None
+
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode('utf-8'))
+        _LOCK_FD = fd
         return lock_path
     except Exception:
         return None
 
 
 def release_runner_lock(lock_path):
+    """释放内核排他锁并清理锁文件。"""
+    global _LOCK_FD
+    if _LOCK_FD is not None:
+        try:
+            fcntl.flock(_LOCK_FD, fcntl.LOCK_UN)
+            os.close(_LOCK_FD)
+        except Exception:
+            pass
+        _LOCK_FD = None
     if lock_path and os.path.isfile(lock_path):
         try:
             os.remove(lock_path)
