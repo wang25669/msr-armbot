@@ -100,8 +100,28 @@ LENS_PICK = '''(() => {
 
 BOX_READY = '''(() => {
   const vis = x => x && x.getBoundingClientRect().width > 0 && x.getBoundingClientRect().height > 0;
-  const inp = document.querySelector('#sb_imgpst') || document.querySelector('#sb_sbi_ipt') || document.querySelector('input.imgpst');
-  return !!(inp && vis(inp));
+  const inps = [
+    document.querySelector('#sb_imgpst'),
+    document.querySelector('#sb_sbi_ipt'),
+    document.querySelector('input.imgpst'),
+    document.querySelector('#sbi_input'),
+    document.querySelector('input[placeholder*="URL" i]'),
+    document.querySelector('input[aria-label*="URL" i]'),
+    document.querySelector('[role="dialog"] input[type=text]'),
+    document.querySelector('#sbi_b input')
+  ];
+  for (const i of inps) {
+    if (vis(i)) return true;
+  }
+  // 若弹层有粘贴按钮需先触发展开输入框
+  const pasteBtn = document.querySelector('[role="dialog"] button, #sbi_b button, .sbi_paste');
+  if (pasteBtn && vis(pasteBtn)) {
+    try { pasteBtn.click(); } catch(e){}
+  }
+  for (const i of inps) {
+    if (vis(i)) return true;
+  }
+  return false;
 })()'''
 
 LAND = '''(() => {
@@ -196,10 +216,28 @@ def submit_image(cdp, image, entry):
             time.sleep(1.5)
 
     if not opened:
+        # 降级通道：直接导航至 Bing 官方视觉搜索专用入口
+        sbi_url = 'https://www.bing.com/images/search?view=detailv2&iss=sbi&FORM=SBIHPC'
+        navigate(cdp, sbi_url)
+        time.sleep(3)
+        try:
+            wait_js(cdp, BOX_READY, 8)
+            opened = True
+        except StepError:
+            pass
+
+    if not opened:
         raise StepError('视觉镜头/弹层 3 轮未就绪')
     time.sleep(1.5)
 
-    inp_js = 'document.querySelector("#sb_imgpst") || document.querySelector("#sb_sbi_ipt") || document.querySelector("input.imgpst")'
+    inp_js = '''(() => {
+      const sels = ['#sb_imgpst', '#sb_sbi_ipt', 'input.imgpst', '#sbi_input', 'input[placeholder*="URL" i]', 'input[aria-label*="URL" i]', '[role="dialog"] input[type=text]', '#sbi_b input'];
+      for (const s of sels) {
+        const el = document.querySelector(s);
+        if (el && el.getBoundingClientRect().width > 0) return el;
+      }
+      return document.querySelector('#sb_imgpst') || document.querySelector('input');
+    })()'''
 
     # 方式1：真人点 URL 框 + 填入图片地址 + Enter（实战验证最稳定）
     try:
@@ -209,15 +247,14 @@ def submit_image(cdp, image, entry):
             pass
 
         # 填入并触发 input/change 事件
-        ev(cdp, '''((sel, img) => {
-            const inp = eval(sel);
+        ev(cdp, '''((inp, img) => {
             if (inp) {
                 inp.focus();
                 inp.value = img;
                 inp.dispatchEvent(new Event('input', {bubbles: true}));
                 inp.dispatchEvent(new Event('change', {bubbles: true}));
             }
-        })(%s, %s)''' % (json.dumps(inp_js), json.dumps(image)))
+        })(%s, %s)''' % (inp_js, json.dumps(image)))
 
         time.sleep(0.8)
 

@@ -31,22 +31,56 @@ def press_enter(cdp):
 
 
 def typed_search(cdp, query, domain):
-    """真人式搜索: 首页输入框 -> 逐字插入 -> 随机延迟 -> 回车。"""
+    """真人式搜索: 首页输入框 -> 逐字插入 -> 随机延迟 -> 回车 (多层防卡死与跳转保障)。"""
     navigate(cdp, f'https://{domain}/')
-    time.sleep(random.uniform(1.5, 2.5))
-    focused = ev(cdp, """(function(){
-      var el = document.querySelector('textarea[name=q], input[name=q], #sb_form_q');
-      if (!el) return 'NO-INPUT';
-      el.focus();
-      return 'OK';
-    })()""")
-    if focused != 'OK':
-        raise StepError('搜索框失踪')
+    # 智能轮询等待搜索框就绪 (最多等待 12 秒，杜绝跨国代理加载抖动误报“搜索框失踪”)
+    deadline = time.time() + 12
+    focused = False
+    while time.time() < deadline:
+        res = ev(cdp, """(function(){
+          var el = document.querySelector('textarea[name=q], input[name=q], #sb_form_q');
+          if (!el) return 'NO-INPUT';
+          el.focus();
+          return 'OK';
+        })()""")
+        if res == 'OK':
+            focused = True
+            break
+        time.sleep(0.8)
+
+    if not focused:
+        # 如果首页实在加载不出输入框，直接导航至搜索结果页作为顶级兜底
+        search_url = f'https://{domain}/search?q={urllib.parse.quote(query)}&form=QBLH'
+        navigate(cdp, search_url)
+        time.sleep(random.uniform(3, 5))
+        return ev(cdp, 'location.href') or search_url
+
     cdp.call('Input.insertText', {'text': query})
-    time.sleep(random.uniform(1.0, 2.0))
+    time.sleep(random.uniform(0.8, 1.5))
     press_enter(cdp)
-    time.sleep(random.uniform(4, 7))
-    return ev(cdp, 'location.href')
+    time.sleep(2.5)
+
+    # 检查回车后是否成功跳转至搜索结果页
+    cur_url = ev(cdp, 'location.href') or ''
+    if '/search' not in cur_url:
+        # 尝试点击搜索按钮或提交表单 (应对 textarea 默认不提交或输入法阻断)
+        ev(cdp, """(() => {
+          const btn = document.querySelector('#search_icon, #sb_form_go, button[type=submit], label[for=sb_form_go], [aria-label*="search" i]');
+          if (btn) { btn.click(); return; }
+          const f = document.querySelector('#sb_form, form');
+          if (f) { f.submit(); return; }
+        })()""")
+        time.sleep(3.0)
+        cur_url = ev(cdp, 'location.href') or ''
+
+    # 终极兜底：如果依然停留在首页，直接导航到对应关键词的搜索结果页
+    if '/search' not in cur_url:
+        search_url = f'https://{domain}/search?q={urllib.parse.quote(query)}&form=QBLH'
+        navigate(cdp, search_url)
+        time.sleep(random.uniform(3, 5))
+        cur_url = ev(cdp, 'location.href') or search_url
+
+    return cur_url
 
 
 def scroll_human(cdp):
@@ -491,11 +525,15 @@ def resolve_quest_subtask_action(step_info, q_name):
     if any(k in href for k in ('REWARDSQUIZ', 'BTBQ', 'BTB')) or '/quiz' in href.lower():
         return {'action': 'quiz', 'search_term': None, 'reason': 'URL携带官方测验标识(REWARDSQUIZ/BTBQ/quiz)'}
 
-    # 2. 搜索类属性判定 (Search)
+    # 2. 搜索类属性判定 (Search，含新手打卡 Onboarding / Search now 引导)
     parsed = urllib.parse.urlparse(href)
-    is_search = 'bing.com' in parsed.netloc and parsed.path.rstrip('/') == '/search'
+    is_bing = 'bing.com' in parsed.netloc
+    is_search_path = parsed.path.rstrip('/') == '/search'
+    is_search_intent = any(k in title.lower() or k in card_text.lower() for k in (
+        '搜索', 'search', 'search now', 'keep searching', '立即搜索', '开始搜索'
+    ))
 
-    if is_search:
+    if (is_bing and is_search_path) or (is_bing and is_search_intent):
         if has_query:
             return {'action': 'search_direct', 'search_term': None, 'reason': 'URL已携带官方预置搜索词'}
         # 开放式搜索任务: 从卡片元数据中的 title (标题) 净化提取主题词
@@ -503,6 +541,7 @@ def resolve_quest_subtask_action(step_info, q_name):
         for prefix in (
             'Bing 有您的', 'Bing有您的', '通过', '使用', '在您的桌面上', '在桌面上', '探索', '查找', '关于',
             'Search with Bing on your desktop', 'Search with Bing', 'Bing has your', 'Use Bing',
+            'Search now', 'Keep searching', '立即搜索', '开始搜索',
             'Explore', 'Find', 'Discover', 'About'
         ):
             clean_term = re.sub(re.escape(prefix), '', clean_term, flags=re.IGNORECASE)
@@ -513,7 +552,7 @@ def resolve_quest_subtask_action(step_info, q_name):
         else:
             matches = re.findall(r'[\u4e00-\u9fa5a-zA-Z0-9]{2,12}', card_text)
             chosen_term = matches[0] if (matches and len(matches[0]) >= 2) else 'trending news'
-        return {'action': 'search_semantic', 'search_term': chosen_term, 'reason': f'开放式搜索任务，从卡片元数据提取核心词: "{chosen_term}"'}
+        return {'action': 'search_semantic', 'search_term': chosen_term, 'reason': f'搜索打卡任务(含新手搜索)，从卡片提取核心词: "{chosen_term}"'}
 
     # 3. 常规落地页属性 (Landing Page / Wallpaper / Promotion)
     return {'action': 'landing', 'search_term': None, 'reason': '常规展示/体验类落地页'}
@@ -693,7 +732,18 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                                 c2.call('Input.insertText', {'text': term})
                                 time.sleep(random.uniform(1.0, 1.8))
                                 press_enter(c2)
-                                time.sleep(3)
+                                time.sleep(2.5)
+                                cur_h = ev(c2, 'location.href') or ''
+                                if '/search' not in cur_h:
+                                    ev(c2, """(() => {
+                                      const btn = document.querySelector('#search_icon, #sb_form_go, button[type=submit], label[for=sb_form_go]');
+                                      if (btn) btn.click();
+                                    })()""")
+                                    time.sleep(2.5)
+                                    cur_h = ev(c2, 'location.href') or ''
+                                if '/search' not in cur_h:
+                                    navigate(c2, f'https://www.bing.com/search?q={urllib.parse.quote(term)}&form=QBLH')
+                                    time.sleep(3)
                                 scroll_human(c2)
                             c2.close()
                         except Exception as ex:
@@ -918,6 +968,8 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
           /claim\\s*points/i.test(t) ||
           /\\d+\\s*Pending\\s*Claim/i.test(t) ||
           (t.includes('待领取') && t.includes('领取')) ||
+          /^(?:claim|collect|get)\s*(?:now|all|points)?$/i.test(t) ||
+          /claim\s*now/i.test(t) ||
           /^claim$/i.test(t)
         );
       }) || null;
@@ -930,8 +982,8 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
         has_btn = ev(cdp, f"!!({btn_selector})")
 
     if not has_btn:
-        log('未找到"领取积分"按钮 (可能已自动入账或无需点击)')
-        return f'检测到{total_claimable}分(未见领取按钮)' if (total_claimable and total_claimable > 0) else '无可领取'
+        log('未找到"领取积分"按钮 (多为未到期的待存入锁定积分或已自动入账)')
+        return f'检测到{total_claimable}分(待存入锁定中)' if (total_claimable and total_claimable > 0) else '无可领取'
 
     try:
         human_click(cdp, btn_selector, label='领取积分', close_new=False)

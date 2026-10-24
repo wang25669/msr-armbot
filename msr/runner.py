@@ -298,12 +298,17 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
     # 获取运行后最新余额
     bal_after = bal_before
     if token:
-        try:
-            rg_me = {'country': pr['country'], 'language': pr['language']}
-            me_resp = api.get_me(name, token, rg_me, proxy=proxy)
-            bal_after = me_resp.get('balance') or bal_before
-        except Exception:
-            pass
+        rg_me = {'country': pr.get('country', 'US'), 'language': pr.get('language', 'en-US')}
+        for retry_i in range(3):
+            try:
+                me_resp = api.get_me(name, token, rg_me, proxy=proxy)
+                b = me_resp.get('balance') or me_resp.get('profile', {}).get('balance')
+                if b is not None and int(b) > 0:
+                    bal_after = int(b)
+                    break
+            except Exception:
+                if retry_i < 2:
+                    time.sleep(3)
 
     gained = max(0, (bal_after or 0) - (bal_before or 0))
 
