@@ -801,6 +801,17 @@ def inject_cookies(cdp, cookies, log=print):
                 pass
         cookie_params.append(p)
 
+    # 自动补全 Edge 官方标识 Cookie，确保 Bing Rewards 将会话识别为 Microsoft Edge 环境
+    if not any(p.get('name') == '_EDGE_V' for p in cookie_params):
+        cookie_params.append({
+            'name': '_EDGE_V',
+            'value': '1',
+            'domain': '.bing.com',
+            'path': '/',
+            'secure': True,
+            'httpOnly': False,
+        })
+
     # 1. 优先尝试 CDP 批量原子写入 Network.setCookies (1 次交互完成数十/百枚 Cookie 注入)
     try:
         cdp.call('Network.setCookies', {'cookies': cookie_params})

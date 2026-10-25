@@ -1225,13 +1225,13 @@ def auto_activate_streaks(cdp, ch=None, log=print):
       return results;
     })()'''
 
-    navigate(cdp, 'https://rewards.bing.com/earn')
+    navigate(cdp, 'https://rewards.bing.com/earn?setlang=en&mkt=en-US')
     time.sleep(random.uniform(2.5, 4.0))
     unactivated = ev(cdp, find_streaks_js) or []
 
     if not unactivated:
         # 回退至 dashboard 页面进行二次扫描
-        navigate(cdp, 'https://rewards.bing.com/dashboard')
+        navigate(cdp, 'https://rewards.bing.com/dashboard?setlang=en&mkt=en-US')
         time.sleep(random.uniform(2.5, 3.5))
         unactivated = ev(cdp, find_streaks_js) or []
 
@@ -1281,33 +1281,29 @@ def auto_activate_streaks(cdp, ch=None, log=print):
                     new_tab = ch.new_tab(target_url)
                     time.sleep(random.uniform(4.0, 6.0))
                     ch.close_tab(new_tab.get('id'))
-                    if s.get('isEdge') or 'edge' in title.lower() or 'browsing' in title.lower():
-                        activated_types.append('edge')
-                    if s.get('isVisual') or 'visual' in title.lower() or '视觉' in title:
-                        activated_types.append('visual')
-                    log('已成功激活 Streak: %s' % title)
                 except Exception as ex:
-                    log('激活访问异常: %s' % ex)
-            else:
-                # 点击激活按钮
-                try:
-                    ev(cdp, '''(() => {
-                      const dialog = document.querySelector('[role="dialog"], section[role="dialog"]');
-                      if (!dialog) return;
-                      const cand = Array.from(dialog.querySelectorAll('button, a')).find(el => {
-                        const t = (el.innerText || '').toLowerCase();
-                        return t.includes('激活') || t.includes('activate') || t.includes('start') || t.includes('开启') || t.includes('加入');
-                      });
-                      if (cand) cand.click();
-                    })()''')
-                    time.sleep(3.0)
-                    if s.get('isEdge') or 'edge' in title.lower() or 'browsing' in title.lower():
-                        activated_types.append('edge')
-                    if s.get('isVisual') or 'visual' in title.lower() or '视觉' in title:
-                        activated_types.append('visual')
-                    log('已成功点击激活按钮: %s' % title)
-                except Exception as ex:
-                    log('点击激活按钮异常: %s' % ex)
+                    log('激活访问新标签异常: %s' % ex)
+            
+            # 双重保障：在当前抽屉 DOM 中触发原生点击事件以确保 React 状态同步
+            try:
+                ev(cdp, '''(() => {
+                  const dialog = document.querySelector('[role="dialog"], section[role="dialog"]');
+                  if (!dialog) return;
+                  const cand = Array.from(dialog.querySelectorAll('button, a')).find(el => {
+                    const t = (el.innerText || '').toLowerCase();
+                    return t.includes('激活') || t.includes('activate') || t.includes('start') || t.includes('开启') || t.includes('加入');
+                  });
+                  if (cand) cand.click();
+                })()''')
+                time.sleep(3.0)
+            except Exception as ex:
+                log('点击激活按钮异常: %s' % ex)
+
+            if s.get('isEdge') or 'edge' in title.lower() or 'browsing' in title.lower():
+                activated_types.append('edge')
+            if s.get('isVisual') or 'visual' in title.lower() or '视觉' in title:
+                activated_types.append('visual')
+            log('已成功激活 Streak: %s' % title)
             
             # 关闭抽屉
             ev(cdp, '''(() => {

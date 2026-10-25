@@ -63,6 +63,18 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
         if flight is None:
             config.log(name, '本账号未下发 Edge 浏览打卡任务 (flight 为空，如页面有卡片需先在浏览器完成新手激活)')
             return '未下发Edge任务(跳过)'
+        elig = api.find_promo(promos, 'edge_browsing_streak_eligible')
+        if elig is None or str(elig.get('complete', '')).lower() != 'true':
+            config.log(name, 'Edge打卡处于待激活状态，正在发送激活资格确认信令 (edge_flight_1_ww_treatment_eligible)...')
+            try:
+                api.api(name, 'POST', '/me/activities', token, eh,
+                        {'amount': 1, 'attributes': {'offerid': 'edge_flight_1_ww_treatment_eligible'},
+                         'request_user_info': True, 'type': 714}, proxy=proxy)
+                time.sleep(5)
+                promos = api.get_me(name, token, rg, proxy=proxy)
+                flight = api.find_promo(promos, 'edge_browsing_streak_flight')
+            except Exception as ex_act:
+                config.log(name, f'Edge打卡激活信令异常: {ex_act}')
         if str(flight.get('complete')).lower() == 'true':
             return '已完成'
         from msr import settings
@@ -75,7 +87,7 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
             for attempt_no in range(3):
                 r = api.api(name, 'POST', '/me/activities', token, eh,
                             {'amount': 1, 'attributes': {'offerid': flight.get('offerid')},
-                             'request_user_info': True, 'type': flight.get('report_offer_type')}, proxy=proxy)
+                             'request_user_info': True, 'type': int(flight.get('report_offer_type', 29))}, proxy=proxy)
                 try:
                     aid = r['response']['activity']['id']
                 except (KeyError, TypeError):
