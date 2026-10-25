@@ -1216,7 +1216,9 @@ def auto_activate_streaks(cdp, ch=None, log=print):
           results.push({
             id: b.id,
             title: cardTitle.replace(/\\n/g, ' ').trim(),
-            fullText: b.innerText.replace(/\\n/g, ' ').trim()
+            fullText: b.innerText.replace(/\\n/g, ' ').trim(),
+            isEdge: /edge|browsing/i.test(combined),
+            isVisual: /visual|视觉/i.test(combined)
           });
         }
       }
@@ -1234,10 +1236,10 @@ def auto_activate_streaks(cdp, ch=None, log=print):
         unactivated = ev(cdp, find_streaks_js) or []
 
     if not unactivated:
-        return 0
+        return []
 
     log('[Streak 自动激活] 发现 %d 个待激活打卡任务: %s' % (len(unactivated), [u['title'] for u in unactivated]))
-    activated_count = 0
+    activated_types = []
 
     for s in unactivated:
         title = s['title']
@@ -1269,12 +1271,20 @@ def auto_activate_streaks(cdp, ch=None, log=print):
         target = ev(cdp, act_target_js)
         if target:
             log('检测到激活操作: %s -> %s' % (target.get('text'), target.get('href') or '按钮'))
-            if target.get('href') and ch:
+            target_url = target.get('href')
+            if target_url and ch:
                 try:
-                    new_tab = ch.new_tab(target['href'])
+                    if target_url.lower().startswith('microsoft-edge:'):
+                        target_url = re.sub(r'^microsoft-edge:(?://)?', '', target_url, flags=re.I)
+                        if not target_url.startswith('http'):
+                            target_url = 'https://' + target_url
+                    new_tab = ch.new_tab(target_url)
                     time.sleep(random.uniform(4.0, 6.0))
                     ch.close_tab(new_tab.get('id'))
-                    activated_count += 1
+                    if s.get('isEdge') or 'edge' in title.lower() or 'browsing' in title.lower():
+                        activated_types.append('edge')
+                    if s.get('isVisual') or 'visual' in title.lower() or '视觉' in title:
+                        activated_types.append('visual')
                     log('已成功激活 Streak: %s' % title)
                 except Exception as ex:
                     log('激活访问异常: %s' % ex)
@@ -1291,7 +1301,10 @@ def auto_activate_streaks(cdp, ch=None, log=print):
                       if (cand) cand.click();
                     })()''')
                     time.sleep(3.0)
-                    activated_count += 1
+                    if s.get('isEdge') or 'edge' in title.lower() or 'browsing' in title.lower():
+                        activated_types.append('edge')
+                    if s.get('isVisual') or 'visual' in title.lower() or '视觉' in title:
+                        activated_types.append('visual')
                     log('已成功点击激活按钮: %s' % title)
                 except Exception as ex:
                     log('点击激活按钮异常: %s' % ex)
@@ -1307,5 +1320,5 @@ def auto_activate_streaks(cdp, ch=None, log=print):
         else:
             log('未能定位到抽屉激活按钮或该卡片已激活')
 
-    return activated_count
+    return list(set(activated_types))
 

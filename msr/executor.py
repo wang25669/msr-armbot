@@ -61,21 +61,8 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
         promos = api.get_me(name, token, rg, proxy=proxy)
         flight = api.find_promo(promos, 'edge_browsing_streak_flight')
         if flight is None:
-            elig = api.find_promo(promos, 'edge_browsing_streak_eligible')
-            offer_id = elig.get('offerid') if elig else 'edge_flight_1_ww_treatment'
-            offer_type = elig.get('report_offer_type') if elig else 714
-            config.log(name, f'Edge打卡未激活，正在发送标准激活信令: offerid={offer_id}, type={offer_type}...')
-            try:
-                api.api(name, 'POST', '/me/activities', token, eh,
-                        {'amount': 1, 'attributes': {'offerid': offer_id},
-                         'request_user_info': True, 'type': offer_type}, proxy=proxy)
-            except Exception as ex_act:
-                config.log(name, f'Edge打卡激活信令发送异常: {ex_act}')
-            time.sleep(12)
-            promos = api.get_me(name, token, rg, proxy=proxy)
-            flight = api.find_promo(promos, 'edge_browsing_streak_flight')
-            if flight is None:
-                return '无Edge资格或未下发flight'
+            config.log(name, '本账号未下发 Edge 浏览打卡任务 (flight 为空，如页面有卡片需先在浏览器完成新手激活)')
+            return '未下发Edge任务(跳过)'
         if str(flight.get('complete')).lower() == 'true':
             return '已完成'
         from msr import settings
@@ -215,7 +202,9 @@ def run_browser_session(name, phases, token, pr, profile_path, config, proxy=Non
         # 账号启动时先自动扫描并激活所有连续打卡任务 (Streak，如 Visual Search Streak, Edge Browsing Streak)
         from msr import tasks_browser as tb
         try:
-            tb.auto_activate_streaks(cdp, ch=ch, log=logger)
+            newly_activated = tb.auto_activate_streaks(cdp, ch=ch, log=logger)
+            if newly_activated:
+                results['_newly_activated'] = newly_activated
         except Exception as ex:
             logger('自动激活 Streak 检查异常: %s' % str(ex)[:80])
 
