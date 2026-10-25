@@ -1280,6 +1280,20 @@ def auto_activate_streaks(cdp, ch=None, log=print):
                             target_url = 'https://' + target_url
                     new_tab = ch.new_tab(target_url)
                     time.sleep(random.uniform(4.0, 6.0))
+                    # 若落地页包含进一步确认激活按钮 (如 Edge 打卡落地页的“开始在 Edge 上浏览”按钮)，模拟真人点击
+                    try:
+                        new_cdp = ch.attach(new_tab)
+                        ev(new_cdp, '''(() => {
+                          const a = Array.from(document.querySelectorAll('a, button')).find(el => {
+                            const h = el.getAttribute('href') || el.href || '';
+                            const t = (el.innerText || '').trim();
+                            return h.includes('rwgbopen=1') || t === '开始' || t === 'Get started' || t.includes('开始在 Edge 上浏览');
+                          });
+                          if (a) a.click();
+                        })()''')
+                        time.sleep(random.uniform(2.5, 4.0))
+                    except Exception:
+                        pass
                     ch.close_tab(new_tab.get('id'))
                 except Exception as ex:
                     log('激活访问新标签异常: %s' % ex)

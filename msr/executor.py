@@ -5,6 +5,7 @@ import secrets
 import time
 import uuid
 
+from msr import browser, fingerprint
 from msr.browser import navigate
 
 
@@ -60,21 +61,41 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
     if phase in ('edge30m', 'edge_api', 'edge'):
         promos = api.get_me(name, token, rg, proxy=proxy)
         flight = api.find_promo(promos, 'edge_browsing_streak_flight')
-        if flight is None:
-            config.log(name, '本账号未下发 Edge 浏览打卡任务 (flight 为空，如页面有卡片需先在浏览器完成新手激活)')
-            return '未下发Edge任务(跳过)'
         elig = api.find_promo(promos, 'edge_browsing_streak_eligible')
-        if elig is None or str(elig.get('complete', '')).lower() != 'true':
-            config.log(name, 'Edge打卡处于待激活状态，正在发送激活资格确认信令 (edge_flight_1_ww_treatment_eligible)...')
+
+        # 严禁直接发送伪造激活信令！若处于待激活状态，必须且只能启动浏览器通过真实页面交互点击激活卡片
+        if flight is None or elig is None or str(elig.get('complete', '')).lower() != 'true':
+            config.log(name, '检测到本账号 Edge 浏览打卡尚未激活，正在启动浏览器执行页面交互点击激活...')
+            from msr import tasks_browser as tb
+            bc = browser_cfg(config)
+            chrome_dir = profile_path + '/chrome'
+            fp = fingerprint.load_or_create(name, country=rg.get('country', 'US'))
+            ch_tmp = browser.Chromium(binary=bc['binary'], user_data_dir=chrome_dir,
+                                      version=bc['version'], proxy=proxy, fingerprint=fp,
+                                      headless=bc['headless'],
+                                      disable_webrtc_leak=bc['disable_webrtc_leak'])
             try:
-                api.api(name, 'POST', '/me/activities', token, eh,
-                        {'amount': 1, 'attributes': {'offerid': 'edge_flight_1_ww_treatment_eligible'},
-                         'request_user_info': True, 'type': 714}, proxy=proxy)
-                time.sleep(5)
-                promos = api.get_me(name, token, rg, proxy=proxy)
-                flight = api.find_promo(promos, 'edge_browsing_streak_flight')
-            except Exception as ex_act:
-                config.log(name, f'Edge打卡激活信令异常: {ex_act}')
+                tabs = ch_tmp.start()
+                tab = tabs[0] if tabs else ch_tmp.new_tab('about:blank')
+                cdp = ch_tmp.attach(tab)
+                browser.disguise_edge(cdp, version=bc['version'], log=lambda m: None)
+                cookies = config.load_json(config.pfile(name, 'cookie.json'))
+                if cookies:
+                    browser.inject_cookies(cdp, cookies, log=lambda m: None)
+                tb.auto_activate_streaks(cdp, ch=ch_tmp, log=lambda m: config.log(name, m))
+            except Exception as ex_browser_act:
+                config.log(name, f'浏览器页面激活 Edge 打卡异常: {ex_browser_act}')
+            finally:
+                ch_tmp.stop()
+
+            # 浏览器完成真实页面交互后，重新查询资格
+            promos = api.get_me(name, token, rg, proxy=proxy)
+            flight = api.find_promo(promos, 'edge_browsing_streak_flight')
+            elig = api.find_promo(promos, 'edge_browsing_streak_eligible')
+            if flight is None or elig is None or str(elig.get('complete', '')).lower() != 'true':
+                config.log(name, '本账号在页面未检测到可激活的 Edge 浏览卡片或页面激活未生效 (跳过)')
+                return '未激活或无任务(跳过)'
+
         if str(flight.get('complete')).lower() == 'true':
             return '已完成'
         from msr import settings
