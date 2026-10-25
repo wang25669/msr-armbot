@@ -327,18 +327,25 @@ def dailyset_kind(card):
             break
         url = unquoted
     lower = url.lower()
-    if 'pollscenarioid' in lower or 'poll' in lower:
-        return 'quiz'
-    if any(k in lower for k in ('gamification_dailyset', 'rewardsquiz', 'btroid', 'dsetqu', 'form=tgrew4', 'wqoskey', 'quiz', 'trivia')):
-        return 'quiz'
-    m = re.search(r'filters=([^&]+)', raw_url)
-    filters = urllib.parse.unquote(m.group(1)) if m else ''
-    if 'BTEPOKey:"REWARDSQUIZ_DailySet_UrlOffer"' in filters:
+
+    # 1. 优先判定落地页/搜索体验类 (排除 UrlOffer/tgrew4/rnoreward 误当成测验卡死)
+    if 'urloffer' in lower or 'rnoreward=1' in lower or 'form=tgrew4' in lower:
         return 'urloffer'
-    if 'IsConversation:"True"' in filters or 'WQOskey:' in filters:
-        return 'quiz'
+    m = re.search(r'filters=([^&]+)', raw_url)
+    filters = urllib.parse.unquote(m.group(1)).lower() if m else ''
+    if 'btepokey:"rewardsquiz_dailyset_urloffer"' in filters:
+        return 'urloffer'
     if re.search(r'filters=sid:"[0-9a-f-]{36}"', filters, re.I):
         return 'sid'
+
+    # 2. 测验/问答/投票
+    if 'pollscenarioid' in lower or 'poll' in lower or '投票' in lower:
+        return 'quiz'
+    if 'isconversation:"true"' in filters or 'wqoskey:' in filters or 'form=dsetqu' in lower or 'gamification_dailyset' in lower:
+        return 'quiz'
+    if ('quiz' in lower or 'trivia' in lower or 'btroid' in lower) and 'urloffer' not in lower:
+        return 'quiz'
+
     return 'direct'
 
 
@@ -420,11 +427,18 @@ def interact_quiz(ch, tab_id, label='', log=print):
 
 
 def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
-    """Daily Set 3张每日活动卡。"""
-    navigate(cdp, 'https://rewards.bing.com/dashboard')
-    time.sleep(random.uniform(2, 4))
+    """Daily Set 3张每日活动卡 (支持成熟账号平铺与新账号抽屉双模自适应)。"""
+    earn_url = 'https://rewards.bing.com/earn'
+    dash_url = 'https://rewards.bing.com/dashboard'
 
-    # 自动展开 #dailyset 折叠手风琴 (兼容成熟老号默认平铺展开与新手账号折叠汇总卡片)
+    from msr import settings
+    st_card = settings.load_settings()
+    fast_mode = bool(st_card.get('schedule', {}).get('fast_mode'))
+
+    # 1. 优先访问统一任务中心 /earn (杜绝 /dashboard 掉入 /about FAQ 重定向黑洞)
+    navigate(cdp, earn_url)
+    time.sleep(random.uniform(2.5, 4.0))
+
     def _ensure_expanded():
         try:
             ev(cdp, """(() => {
@@ -436,13 +450,11 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
         except Exception:
             pass
 
-    _ensure_expanded()
-
-    # 智能轮询等待 #dailyset 容器及卡片渲染完成 (应对 Next.js SPA 水合与网络延迟，最多等待 25 秒)
+    # 检查是否为老号平铺模式 (#dailyset 直接渲染在页面)
     cards = []
-    deadline = time.time() + 25
+    _ensure_expanded()
+    deadline = time.time() + 6
     while time.time() < deadline:
-        _ensure_expanded()
         cards = ev(cdp, """(() => {
           const ds = document.getElementById("dailyset");
           if (!ds) return [];
@@ -462,53 +474,175 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             break
         time.sleep(1.0)
 
-    if not cards:
-        # 如果超时仍未出现，尝试重新导航刷新一次作为兜底
-        log('未发现每日活动区域 (#dailyset)，尝试重新导航刷新二次探测...')
-        navigate(cdp, 'https://rewards.bing.com/dashboard')
-        time.sleep(random.uniform(3, 5))
+    # 2. 如果存在平铺模式卡片，执行平铺模式
+    if cards:
+        log('[Daily Set] 识别为成熟账号平铺模式 (#dailyset，共 %d 张)' % len(cards))
+        todo = [c for c in cards if not c.get('isDone')]
+        if not todo:
+            log('今日每日活动已全部完成 (3/3)')
+            return '3/3已完成'
+
+        done_count = 0
+        for card in todo:
+            idx = card['idx']
+            title = card['title']
+            href = card['href']
+            kind = dailyset_kind({'destinationUrl': href})
+            log('每日活动卡片: %s [%s] -> %s' % (title, kind, href[:60]))
+
+            _ensure_expanded()
+            selector = f'document.querySelectorAll("#dailyset a[href]")[{idx}]'
+            new_tabs = human_click(cdp, selector, label=title[:15], close_new=False)
+
+            if new_tabs and ch:
+                target_tid = new_tabs[0]
+                try:
+                    if kind == 'quiz':
+                        interact_quiz(ch, target_tid, label=title, log=log)
+                        wait = random.uniform(3, 6) if fast_mode else random.uniform(25, 45)
+                        log('%s 答题后停留 %.1f 秒等待结算' % (title, wait))
+                        time.sleep(wait)
+                    else:
+                        w_min = 3 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_min', 60))
+                        w_max = 6 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_max', 120))
+                        wait = random.uniform(w_min, w_max)
+                        log('%s 停留 %.1f 秒等待归因' % (title, wait))
+                        time.sleep(wait)
+                finally:
+                    for tid in new_tabs:
+                        try:
+                            ch.close_tab(tid)
+                        except Exception:
+                            pass
+            else:
+                time.sleep(random.uniform(5, 10))
+
+            done_count += 1
+
+        navigate(cdp, earn_url)
+        time.sleep(random.uniform(3.0, 4.5))
         _ensure_expanded()
-        cards = ev(cdp, """(() => {
+        remaining_todo = ev(cdp, """(() => {
           const ds = document.getElementById("dailyset");
-          if (!ds) return [];
-          return Array.from(ds.querySelectorAll("a[href]")).map((a, idx) => ({
-            idx: idx,
-            href: a.href,
-            text: a.innerText.replace(/\\n/g, ' '),
-            title: a.querySelector("h3")?.innerText || a.innerText.split("\\n")[0].slice(0, 30),
-            isDone: /已完成|complete|completed/i.test(a.innerText) || 
-                    /bg-statusSuccess|check/i.test(a.innerHTML) || 
-                    /已完成|complete|completed/i.test(a.getAttribute("aria-label") || "")
-          }));
-        })()""") or []
+          if (!ds) return 0;
+          return Array.from(ds.querySelectorAll("a[href]")).filter(a => {
+            const isDone = /已完成|complete|completed/i.test(a.innerText) || 
+                           /bg-statusSuccess|check/i.test(a.innerHTML) || 
+                           /已完成|complete|completed/i.test(a.getAttribute("aria-label") || "");
+            return !isDone;
+          }).length;
+        })()""") or 0
+        if remaining_todo == 0 or (done_count >= len(cards) and remaining_todo <= 1):
+            return '3/3已完成'
+        return '部分完成:处理%d张(剩%d张待完成)' % (done_count, remaining_todo)
 
-    if not cards:
-        log('未发现每日活动区域 (#dailyset)')
-        return '失败:未发现每日活动区域'
+    # 3. 抽屉模式 (新账号 /earn 页面上的 Daily Set Streak 汇总抽屉)
+    find_streak_js = """(() => {
+      const btns = Array.from(document.querySelectorAll("button, div[role='button']"));
+      const b = btns.find(el => {
+        const t = (el.innerText || '');
+        return (t.includes('每日连续打卡活动') || t.toLowerCase().includes('daily set streak')) &&
+               !t.includes('连续 7 天完成每日活动');
+      });
+      if (!b) return null;
+      const text = (b.innerText || '').replace(/\\s+/g, ' ');
+      const m = text.match(/(?:活动|activity):\\s*(\\d+)\\s*\\/\\s*(\\d+)/i) || text.match(/(\\d+)\\s*\\/\\s*(\\d+)/);
+      const prog = m ? parseInt(m[1], 10) : 0;
+      const total = m ? parseInt(m[2], 10) : 3;
+      return {
+        id: b.id,
+        text: text,
+        prog: prog,
+        total: total,
+        isDone: prog >= total && total > 0
+      };
+    })()"""
 
-    todo = [c for c in cards if not c.get('isDone')]
-    if not todo:
-        log('今日每日活动已全部完成 (3/3)')
+    streak_info = ev(cdp, find_streak_js)
+    if not streak_info:
+        # 回退至 dashboard 页面检测
+        log('在 /earn 未发现平铺或打卡抽屉，回退至 /dashboard 检测...')
+        navigate(cdp, dash_url)
+        time.sleep(random.uniform(3.0, 4.5))
+        _ensure_expanded()
+        streak_info = ev(cdp, find_streak_js)
+
+    if not streak_info:
+        log('未发现每日活动区域或 Daily Set 卡片')
+        return '未发现每日活动'
+
+    if streak_info.get('isDone'):
+        log('今日每日活动已全部完成 (%d/%d)' % (streak_info.get('prog', 3), streak_info.get('total', 3)))
         return '3/3已完成'
 
-    done_count = 0
-    for card in todo:
+    log('[Daily Set] 识别为新版抽屉模式 (%s, 当前进度 %d/%d)，正在展开抽屉...' % (
+        streak_info.get('text', '')[:40], streak_info.get('prog', 0), streak_info.get('total', 3)))
+
+    # 点击展开抽屉
+    click_drawer_js = """(() => {
+      const btns = Array.from(document.querySelectorAll("button, div[role='button']"));
+      const b = btns.find(el => {
+        const t = (el.innerText || '');
+        return (t.includes('每日连续打卡活动') || t.toLowerCase().includes('daily set streak')) &&
+               !t.includes('连续 7 天完成每日活动');
+      });
+      if (b) { b.click(); return true; }
+      return false;
+    })()"""
+    ev(cdp, click_drawer_js)
+    time.sleep(random.uniform(2.5, 3.5))
+
+    # 提取抽屉内的子卡片
+    extract_drawer_cards_js = """(() => {
+      const dialog = document.querySelector("[role='dialog'], section[role='dialog']");
+      if (!dialog) return [];
+      const links = Array.from(dialog.querySelectorAll("a[href]"));
+      return links.map((a, idx) => {
+        const text = (a.innerText || '').replace(/\\n/g, ' ').trim();
+        const isDone = /已完成|complete|completed/i.test(text) || 
+                       a.innerHTML.includes('statusSuccess') || 
+                       a.innerHTML.includes('check');
+        const h3 = a.querySelector('h3, h2, div');
+        const title = h3 ? h3.innerText.replace(/\\n/g, ' ').trim() : text.split(' ')[0];
+        return {
+          idx: idx,
+          href: a.href,
+          text: text,
+          title: title.slice(0, 30),
+          isDone: isDone
+        };
+      });
+    })()"""
+
+    drawer_cards = ev(cdp, extract_drawer_cards_js) or []
+    log('抽屉已展开，发现 %d 张每日子卡片: %s' % (len(drawer_cards), [c['title'] for c in drawer_cards]))
+
+    todo_drawer = [c for c in drawer_cards if not c.get('isDone')]
+    if not todo_drawer:
+        log('抽屉内卡片已全部完成')
+        ev(cdp, "(() => { const c = document.querySelector('[role=\"dialog\"] button, section[role=\"dialog\"] button'); if (c) c.click(); })()")
+        return '3/3已完成'
+
+    done_drawer_count = 0
+    for card in todo_drawer:
         idx = card['idx']
         title = card['title']
         href = card['href']
         kind = dailyset_kind({'destinationUrl': href})
-        log('每日活动卡片: %s [%s] -> %s' % (title, kind, href[:60]))
+        log('执行抽屉每日卡片: %s [%s] -> %s' % (title, kind, href[:60]))
 
-        _ensure_expanded()
-        selector = f'document.querySelectorAll("#dailyset a[href]")[{idx}]'
+        # 使用 human_click 真实点击抽屉内的 <a> 卡片，触发 React 与微软官方点击归因追踪
+        selector = f'document.querySelectorAll("[role=\\"dialog\\"] a[href], section[role=\\"dialog\\"] a[href]")[{idx}]'
         new_tabs = human_click(cdp, selector, label=title[:15], close_new=False)
+        if not new_tabs and ch and href:
+            new_tab = ch.new_tab(href)
+            if new_tab and new_tab.get('id'):
+                new_tabs = [new_tab['id']]
 
         if new_tabs and ch:
             target_tid = new_tabs[0]
             try:
-                from msr import settings
-                st_card = settings.load_settings()
-                fast_mode = bool(st_card.get('schedule', {}).get('fast_mode'))
+                time.sleep(random.uniform(2.5, 4.0))
                 if kind == 'quiz':
                     interact_quiz(ch, target_tid, label=title, log=log)
                     wait = random.uniform(3, 6) if fast_mode else random.uniform(25, 45)
@@ -526,36 +660,23 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                         ch.close_tab(tid)
                     except Exception:
                         pass
-        else:
-            time.sleep(random.uniform(10, 20))
+        done_drawer_count += 1
+        time.sleep(random.uniform(1.5, 3.0))
 
-        done_count += 1
+    # 关闭抽屉
+    ev(cdp, "(() => { const c = document.querySelector('[role=\"dialog\"] button, section[role=\"dialog\"] button'); if (c) c.click(); })()")
+    time.sleep(1.5)
 
-    navigate(cdp, 'https://rewards.bing.com/dashboard')
-    time.sleep(random.uniform(3.5, 5.0))
-    # 轮询等待 #dailyset 渲染就绪
-    for _ in range(8):
-        if ev(cdp, 'document.getElementById("dailyset") !== null'):
-            break
-        time.sleep(1.0)
-    time.sleep(2.0)
-    _ensure_expanded()
-
-    remaining_todo = ev(cdp, """(() => {
-      const ds = document.getElementById("dailyset");
-      if (!ds) return 0;
-      const links = Array.from(ds.querySelectorAll("a[href]"));
-      return links.filter(a => {
-        const isDone = /已完成|complete|completed/i.test(a.innerText) || 
-                       /bg-statusSuccess|check/i.test(a.innerHTML) || 
-                       /已完成|complete|completed/i.test(a.getAttribute("aria-label") || "");
-        return !isDone;
-      }).length;
-    })()""") or 0
-
-    if remaining_todo == 0 or (done_count >= len(cards) and remaining_todo <= 1):
+    # 重新导航 /earn 回读最新指标
+    navigate(cdp, earn_url)
+    time.sleep(random.uniform(3.0, 4.5))
+    final_streak = ev(cdp, find_streak_js) or {}
+    prog_now = final_streak.get('prog', done_drawer_count)
+    tot_now = final_streak.get('total', 3)
+    log('每日活动执行后最终回读: %s/%s' % (prog_now, tot_now))
+    if prog_now >= tot_now or (done_drawer_count >= len(drawer_cards) and prog_now >= 2):
         return '3/3已完成'
-    return '部分完成:处理%d张(剩%d张待完成)' % (done_count, remaining_todo)
+    return '部分完成:处理%d张(当前%d/%d)' % (done_drawer_count, prog_now, tot_now)
 
 
 phase_quick = phase_dailyset
@@ -618,7 +739,10 @@ def resolve_quest_subtask_action(step_info, q_name):
 def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     """任务打卡(Quests / Punchcards，含桌面专属打卡)。"""
     navigate(cdp, 'https://rewards.bing.com/earn')
-    time.sleep(random.uniform(2, 4))
+    time.sleep(random.uniform(2.5, 4.0))
+    # 触发页面下滚以完成 Next.js 组件水合与打卡任务卡片懒加载
+    ev(cdp, 'window.scrollTo(0, document.body.scrollHeight/2);')
+    time.sleep(1.0)
 
     # 智能轮询等待 #quests 容器及链接渲染完成 (最多等待 20 秒)
     quests = []
@@ -842,7 +966,12 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
 def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     """日常任务(More Activities 更多活动卡)。"""
     navigate(cdp, 'https://rewards.bing.com/earn')
-    time.sleep(random.uniform(2, 4))
+    time.sleep(random.uniform(2.5, 4.0))
+    # 触发页面下滚以完成 Next.js 组件水合与卡片懒加载
+    ev(cdp, 'window.scrollTo(0, document.body.scrollHeight/2);')
+    time.sleep(1.0)
+    ev(cdp, 'window.scrollTo(0, document.body.scrollHeight);')
+    time.sleep(1.0)
 
     def _ensure_ma_expanded():
         try:
@@ -946,7 +1075,7 @@ phase_earn = phase_moreactivities
 
 def phase_claim(name, cdp, pr, ch=None, log=print):
     """检查并领取待领取积分 (两级抽屉精准交互 + 真实余额回读核销)。"""
-    dash_url = 'https://rewards.bing.com/dashboard'
+    dash_url = 'https://rewards.bing.com/earn'
     log('开始检查是否有可领取积分...')
     navigate(cdp, dash_url)
     time.sleep(random.uniform(3.5, 5.0))
@@ -970,8 +1099,8 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
 
     has_card = ev(cdp, f"!!({claim_card_js})")
     if not has_card:
-        # 也尝试 earn 页面
-        navigate(cdp, 'https://rewards.bing.com/earn')
+        # 也尝试 dashboard 页面 (旧版界面兜底)
+        navigate(cdp, 'https://rewards.bing.com/dashboard')
         time.sleep(random.uniform(2.5, 3.5))
         has_card = ev(cdp, f"!!({claim_card_js})")
 
@@ -982,6 +1111,9 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
     card_text = ev(cdp, f"({claim_card_js}) ? ({claim_card_js}).innerText.replace(/\\s+/g, ' ').trim() : ''")
     m_pts = re.search(r'(\d+)', card_text)
     total_claimable = int(m_pts.group(1)) if m_pts else 0
+    if total_claimable == 0:
+        log(f'待领取卡片显示 0 分可领 ("{card_text}"), 跳过')
+        return '无可领取积分(跳过)'
     log(f'检测到待领取卡片: "{card_text}" (约 {total_claimable} 分)')
 
     # 3. 第一步：点击外层卡片展开 Dialog 抽屉 (单次精准点击，避免连击导致抽屉重新闭合)
@@ -1078,8 +1210,8 @@ def auto_activate_streaks(cdp, ch=None, log=print):
         const aria = (b.getAttribute('aria-label') || '').toLowerCase();
         const pText = (b.parentElement ? b.parentElement.innerText || '' : '').toLowerCase();
         const combined = t + ' ' + aria + ' ' + pText;
-        if (/如何激活|how to activate|activate\\s*streak|activate\\s*now|立即激活/i.test(combined) || 
-            (/activate|激活/i.test(t) && /streak|打卡|edge|visual|search|browsing/i.test(combined))) {
+        if (/如何激活|how to activate|activate\\s*streak|activate\\s*now|立即激活|待激活|inactive|pending activation|开始连续打卡|start streak|join streak/i.test(combined) || 
+            (/activate|激活|开启|加入/i.test(t) && /streak|打卡|edge|visual|search|browsing/i.test(combined))) {
           const cardTitle = b.querySelector('p, h2, h3, div')?.innerText || b.innerText.slice(0, 30);
           results.push({
             id: b.id,
@@ -1122,12 +1254,12 @@ def auto_activate_streaks(cdp, ch=None, log=print):
         time.sleep(random.uniform(1.8, 2.8))
 
         act_target_js = '''(() => {
-          const dialog = document.querySelector('[role="dialog"]');
+          const dialog = document.querySelector('[role="dialog"], section[role="dialog"]');
           if (!dialog) return null;
           const cand = Array.from(dialog.querySelectorAll('a, button')).find(el => {
             const t = (el.innerText || '').toLowerCase();
             const h = (el.getAttribute('href') || '').toLowerCase();
-            return t.includes('激活') || t.includes('activate') || h.includes('features=vsstreak') || h.includes('features=') || h.includes('streak');
+            return t.includes('激活') || t.includes('activate') || t.includes('start') || t.includes('开启') || t.includes('加入') || h.includes('features=vsstreak') || h.includes('features=') || h.includes('streak');
           });
           if (cand) {
             return {tag: cand.tagName, href: cand.href || null, text: (cand.innerText || '').trim()};
@@ -1150,11 +1282,11 @@ def auto_activate_streaks(cdp, ch=None, log=print):
                 # 点击激活按钮
                 try:
                     ev(cdp, '''(() => {
-                      const dialog = document.querySelector('[role="dialog"]');
+                      const dialog = document.querySelector('[role="dialog"], section[role="dialog"]');
                       if (!dialog) return;
                       const cand = Array.from(dialog.querySelectorAll('button, a')).find(el => {
                         const t = (el.innerText || '').toLowerCase();
-                        return t.includes('激活') || t.includes('activate');
+                        return t.includes('激活') || t.includes('activate') || t.includes('start') || t.includes('开启') || t.includes('加入');
                       });
                       if (cand) cand.click();
                     })()''')
@@ -1166,7 +1298,7 @@ def auto_activate_streaks(cdp, ch=None, log=print):
             
             # 关闭抽屉
             ev(cdp, '''(() => {
-              const dialog = document.querySelector('[role="dialog"]');
+              const dialog = document.querySelector('[role="dialog"], section[role="dialog"]');
               if (!dialog) return;
               const cls = dialog.querySelector('button[aria-label*="关闭" i], button[aria-label*="close" i], button.group\\\\/ctrl');
               if (cls) cls.click();

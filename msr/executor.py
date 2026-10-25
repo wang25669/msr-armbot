@@ -62,15 +62,20 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
         flight = api.find_promo(promos, 'edge_browsing_streak_flight')
         if flight is None:
             elig = api.find_promo(promos, 'edge_browsing_streak_eligible')
-            if not elig:
-                return '无资格'
-            api.api(name, 'POST', '/me/activities', token, eh,
-                    {'amount': 1, 'attributes': {'offerid': elig.get('offerid')},
-                     'request_user_info': True, 'type': elig.get('report_offer_type')}, proxy=proxy)
-            time.sleep(15)
-            flight = api.find_promo(api.get_me(name, token, rg, proxy=proxy), 'edge_browsing_streak_flight')
+            offer_id = elig.get('offerid') if elig else 'edge_flight_1_ww_treatment'
+            offer_type = elig.get('report_offer_type') if elig else 714
+            config.log(name, f'Edge打卡未激活，正在发送标准激活信令: offerid={offer_id}, type={offer_type}...')
+            try:
+                api.api(name, 'POST', '/me/activities', token, eh,
+                        {'amount': 1, 'attributes': {'offerid': offer_id},
+                         'request_user_info': True, 'type': offer_type}, proxy=proxy)
+            except Exception as ex_act:
+                config.log(name, f'Edge打卡激活信令发送异常: {ex_act}')
+            time.sleep(12)
+            promos = api.get_me(name, token, rg, proxy=proxy)
+            flight = api.find_promo(promos, 'edge_browsing_streak_flight')
             if flight is None:
-                return '资格后无flight'
+                return '无Edge资格或未下发flight'
         if str(flight.get('complete')).lower() == 'true':
             return '已完成'
         from msr import settings

@@ -423,7 +423,7 @@ def run(name, cdp, pr, log=print, used_path=None, max_attempts=2, ch=None):
     st = read_status(cdp)
     log('视觉状态: %s' % st)
     if not st.get('found'):
-        return '今日无视觉任务(面板未检测到), 跳过'
+        return '本账号未参与视觉打卡(跳过)'
     if st.get('complete'):
         return '今日视觉已完成, 跳过'
 
