@@ -936,18 +936,23 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
     total_claimable = int(m_pts.group(1)) if m_pts else 0
     log(f'检测到待领取卡片: "{card_text}" (约 {total_claimable} 分)')
 
-    # 3. 第一步：点击外层卡片展开 Dialog 抽屉
+    # 3. 第一步：点击外层卡片展开 Dialog 抽屉 (单次精准点击，避免连击导致抽屉重新闭合)
     log('正在点击外层待领取卡片以展开领取抽屉...')
+    opened = False
     try:
         human_click(cdp, claim_card_js, label='待领取卡片', close_new=False)
+        time.sleep(random.uniform(2.0, 3.0))
+        opened = ev(cdp, '!!document.querySelector(\'[role="dialog"], section[role="dialog"]\')')
     except Exception:
         pass
-    ev(cdp, f"(() => {{ const b = ({claim_card_js}); if (b) b.click(); }})()")
-    time.sleep(random.uniform(2.5, 4.0))
+
+    if not opened:
+        ev(cdp, f"(() => {{ const b = ({claim_card_js}); if (b) b.click(); }})()")
+        time.sleep(random.uniform(2.5, 3.5))
 
     # 4. 第二步：在抽屉内部点击二次确认按钮 (例如 "6 待领取 领取积分" / "15 Pending Claim points")
     confirm_btn_js = '''(() => {
-      const d = document.querySelector('[role="dialog"], [role="alertdialog"], .modal');
+      const d = document.querySelector('[role="dialog"], section[role="dialog"], [role="alertdialog"], .modal');
       const scope = d ? Array.from(d.querySelectorAll('button, a, [role="button"]')) : Array.from(document.querySelectorAll('button, a'));
       return scope.find(el => {
         const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
@@ -968,21 +973,25 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
 
     if not has_confirm:
         log('未在抽屉内找到可执行领取的确认按钮 (积分可能处于锁定期或待满足条件)')
-        ev(cdp, "(() => { const c = document.querySelector('[role=\"dialog\"] button'); if (c) c.click(); })()")
+        ev(cdp, "(() => { const c = document.querySelector('[role=\"dialog\"] button, section[role=\"dialog\"] button'); if (c) c.click(); })()")
         return f'检测到{total_claimable}分(待存入锁定中)' if total_claimable > 0 else '待存入锁定中'
 
     c_text = ev(cdp, f"({confirm_btn_js}) ? ({confirm_btn_js}).innerText.replace(/\\s+/g, ' ').trim() : ''")
     log(f'抽屉内确认领取按钮已就绪: "{c_text}", 正在触发领取结算...')
 
+    clicked_confirm = False
     try:
         human_click(cdp, confirm_btn_js, label='确认领取按钮', close_new=False)
+        clicked_confirm = True
     except Exception:
         pass
-    ev(cdp, f"(() => {{ const b = ({confirm_btn_js}); if (b) b.click(); }})()")
+
+    if not clicked_confirm:
+        ev(cdp, f"(() => {{ const b = ({confirm_btn_js}); if (b) b.click(); }})()")
     time.sleep(random.uniform(4.0, 6.0))
 
     # 尝试关闭抽屉
-    ev(cdp, "(() => { const c = document.querySelector('[role=\"dialog\"] button'); if (c) c.click(); })()")
+    ev(cdp, "(() => { const c = document.querySelector('[role=\"dialog\"] button, section[role=\"dialog\"] button'); if (c) c.click(); })()")
     time.sleep(1.0)
 
     # 5. 第三步：刷新页面并严格回读可用余额核销
