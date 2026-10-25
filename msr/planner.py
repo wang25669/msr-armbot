@@ -106,9 +106,8 @@ def plan(probe_result, force_phases=None):
     want_phases = [
         {'phase': 'appcheckin', 'needs': 'api'},          # type103 签到总是有效
         {'phase': 'appread', 'needs': 'api'},             # 移动端10篇阅读(+30分)默认纳入
+        {'phase': 'edge30m', 'needs': 'api'},             # Edge 30分钟打卡心跳 (内置自动资格激活与飞跃检测，无资格/已完成则秒级跳过)
     ]
-    if 'edge_browsing_streak_flight' in have or 'edge_browsing_streak_eligible' in have:
-        want_phases.append({'phase': 'edge30m', 'needs': 'api'})
     for ph in BROWSER_ALWAYS:
         want_phases.append({'phase': ph, 'needs': 'browser'})
     return want_phases

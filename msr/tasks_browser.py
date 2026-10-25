@@ -1022,18 +1022,16 @@ def auto_activate_streaks(cdp, ch=None, log=print):
     兼容 Visual Search Streak, Edge Browsing Streak, Bing Search Streak, Bing App Streak 等。
     若页面卡片显示“如何激活”/“How to activate”/“Activate streak”，自动展开抽屉并点击激活。
     """
-    navigate(cdp, 'https://rewards.bing.com/earn')
-    time.sleep(random.uniform(2.5, 4.0))
-
     find_streaks_js = '''(() => {
       const results = [];
       const btns = Array.from(document.querySelectorAll('button, div[role="button"], a'));
       for (const b of btns) {
         const t = (b.innerText || '').toLowerCase();
         const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-        if (t.includes('如何激活') || t.includes('how to activate') || 
-            t.includes('activate streak') || (t.includes('activate') && t.includes('streak')) ||
-            aria.includes('如何激活') || aria.includes('how to activate')) {
+        const pText = (b.parentElement ? b.parentElement.innerText || '' : '').toLowerCase();
+        const combined = t + ' ' + aria + ' ' + pText;
+        if (/如何激活|how to activate|activate\\s*streak|activate\\s*now|立即激活/i.test(combined) || 
+            (/activate|激活/i.test(t) && /streak|打卡|edge|visual|search|browsing/i.test(combined))) {
           const cardTitle = b.querySelector('p, h2, h3, div')?.innerText || b.innerText.slice(0, 30);
           results.push({
             id: b.id,
@@ -1045,7 +1043,16 @@ def auto_activate_streaks(cdp, ch=None, log=print):
       return results;
     })()'''
 
+    navigate(cdp, 'https://rewards.bing.com/earn')
+    time.sleep(random.uniform(2.5, 4.0))
     unactivated = ev(cdp, find_streaks_js) or []
+
+    if not unactivated:
+        # 回退至 dashboard 页面进行二次扫描
+        navigate(cdp, 'https://rewards.bing.com/dashboard')
+        time.sleep(random.uniform(2.5, 3.5))
+        unactivated = ev(cdp, find_streaks_js) or []
+
     if not unactivated:
         return 0
 
