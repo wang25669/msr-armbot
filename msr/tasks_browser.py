@@ -1225,13 +1225,13 @@ def auto_activate_streaks(cdp, ch=None, log=print):
       return results;
     })()'''
 
-    navigate(cdp, 'https://rewards.bing.com/earn?setlang=en&mkt=en-US')
+    navigate(cdp, 'https://rewards.bing.com/earn')
     time.sleep(random.uniform(2.5, 4.0))
     unactivated = ev(cdp, find_streaks_js) or []
 
     if not unactivated:
         # 回退至 dashboard 页面进行二次扫描
-        navigate(cdp, 'https://rewards.bing.com/dashboard?setlang=en&mkt=en-US')
+        navigate(cdp, 'https://rewards.bing.com/dashboard')
         time.sleep(random.uniform(2.5, 3.5))
         unactivated = ev(cdp, find_streaks_js) or []
 
