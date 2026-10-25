@@ -424,14 +424,14 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     navigate(cdp, 'https://rewards.bing.com/dashboard')
     time.sleep(random.uniform(2, 4))
 
-    # 自动展开 #dailyset 折叠手风琴 (应对 React Aria Disclosure 组件)
+    # 自动展开 #dailyset 折叠手风琴 (兼容成熟老号默认平铺展开与新手账号折叠汇总卡片)
     def _ensure_expanded():
         try:
             ev(cdp, """(() => {
               const ds = document.getElementById("dailyset");
               if (!ds) return;
-              const btn = ds.querySelector("button[aria-expanded='false']");
-              if (btn) btn.click();
+              const trigger = ds.querySelector("button[slot='trigger'][aria-expanded='false'], [class*=Disclosure]:not([data-expanded='true']) button[aria-expanded='false']");
+              if (trigger) trigger.click();
             })()""")
         except Exception:
             pass
@@ -849,8 +849,8 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
             ev(cdp, """(() => {
               const ma = document.getElementById("moreactivities");
               if (!ma) return;
-              const btn = ma.querySelector("button[aria-expanded='false']");
-              if (btn) btn.click();
+              const trigger = ma.querySelector("button[slot='trigger'][aria-expanded='false'], [class*=Disclosure]:not([data-expanded='true']) button[aria-expanded='false']");
+              if (trigger) trigger.click();
             })()""")
         except Exception:
             pass
