@@ -339,6 +339,9 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
                 results_map[ph] = '回补仍失败(%s)' % str(ex)[:50]
                 config.log(name, '[阶段 10 自动回补] %s 仍失败: %s' % (ph, str(ex)[:100]))
         if bad_browser:
+            # 若有浏览器任务回补，自动附带 claim 阶段以保证补全后新释放的待存入积分能被立即结算入账
+            if 'claim' not in bad_browser:
+                bad_browser.append('claim')
             b_fixes = executor.run_browser_session(name, bad_browser, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
             for ph, r in b_fixes.items():
                 results_map[ph] = '回补(%s)' % r

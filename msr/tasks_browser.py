@@ -318,14 +318,24 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
 
 def dailyset_kind(card):
     """判定每日活动卡类型 (quiz / urloffer / sid / direct)。"""
-    url = card.get('destinationUrl') or ''
-    m = re.search(r'filters=([^&]+)', url)
+    raw_url = card.get('destinationUrl') or card.get('href') or ''
+    # 多层 URL 解码以解析 checkuser?ru= 包装的实际目标
+    url = raw_url
+    for _ in range(3):
+        unquoted = urllib.parse.unquote(url)
+        if unquoted == url:
+            break
+        url = unquoted
+    lower = url.lower()
+    if 'pollscenarioid' in lower or 'poll' in lower:
+        return 'quiz'
+    if any(k in lower for k in ('gamification_dailyset', 'rewardsquiz', 'btroid', 'dsetqu', 'form=tgrew4', 'wqoskey', 'quiz', 'trivia')):
+        return 'quiz'
+    m = re.search(r'filters=([^&]+)', raw_url)
     filters = urllib.parse.unquote(m.group(1)) if m else ''
     if 'BTEPOKey:"REWARDSQUIZ_DailySet_UrlOffer"' in filters:
         return 'urloffer'
     if 'IsConversation:"True"' in filters or 'WQOskey:' in filters:
-        return 'quiz'
-    if re.search(r'form=(tgrew4|dsetqu)', url):
         return 'quiz'
     if re.search(r'filters=sid:"[0-9a-f-]{36}"', filters, re.I):
         return 'sid'
@@ -333,7 +343,7 @@ def dailyset_kind(card):
 
 
 def interact_quiz(ch, tab_id, label='', log=print):
-    """在指定标签内自动完成页内交互答题 (零文案, 按结构属性)。"""
+    """在指定标签内自动完成页内交互答题与投票 (零文案, 按结构属性)。"""
     if not ch:
         return
     ws_url = f'ws://127.0.0.1:{ch.port}/devtools/page/{tab_id}'
@@ -344,12 +354,12 @@ def interact_quiz(ch, tab_id, label='', log=print):
         return
 
     try:
-        # 等待页面加载及 quiz 组件异步渲染 (最多 30s)
+        # 等待页面加载及 quiz/poll 组件异步渲染 (最多 30s)
         for _ in range(30):
             try:
-                has_quiz = ev(cdp_quiz, "document.querySelector('.btq_opt, [class*=btq_opt], [role=radio], [class*=quiz]') !== null")
+                has_quiz = ev(cdp_quiz, "document.querySelector('.btq_opt, [class*=btq_opt], .btp_choice, [class*=btp_choice], [role=radio], [class*=quiz], [class*=poll], [class*=choice]') !== null")
                 if has_quiz:
-                    log('quiz组件已渲染: %s' % label)
+                    log('quiz/poll组件已渲染: %s' % label)
                     break
             except Exception:
                 pass
@@ -366,8 +376,9 @@ def interact_quiz(ch, tab_id, label='', log=print):
 
         find_js = """(() => {
           const sels = ['.btq_opt', '.btq_opts .acf-button-standard__link',
-                        '[class*=btq_opt]', '[role=radio]',
-                        '[class*=quiz] button', '[class*=option]', '[class*=choice]'];
+                        '[class*=btq_opt]', '.btp_choice', '[class*=btp_choice]',
+                        '.btp_choice_wrapper', 'acf-button-standard.btp_choice',
+                        '[role=radio]', '[class*=quiz] button', '[class*=option]', '[class*=choice]'];
           for (const s of sels) {
             const el = [...document.querySelectorAll(s)].find(e => e.offsetParent !== null
                         && e.getBoundingClientRect().width > 20);
@@ -376,8 +387,11 @@ def interact_quiz(ch, tab_id, label='', log=print):
           return null;
         })()"""
 
-        # 逐题点击 (通常 1-4 题)
-        for qi in range(6):
+        is_poll = 'poll' in label.lower() or '投票' in label
+        max_questions = 1 if is_poll else 6
+
+        # 逐题点击 (通常 1-4 题，投票仅 1 题)
+        for qi in range(max_questions):
             try:
                 hit = ev(cdp_quiz, find_js + " !== null")
             except Exception:
@@ -410,10 +424,25 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     navigate(cdp, 'https://rewards.bing.com/dashboard')
     time.sleep(random.uniform(2, 4))
 
+    # 自动展开 #dailyset 折叠手风琴 (应对 React Aria Disclosure 组件)
+    def _ensure_expanded():
+        try:
+            ev(cdp, """(() => {
+              const ds = document.getElementById("dailyset");
+              if (!ds) return;
+              const btn = ds.querySelector("button[aria-expanded='false']");
+              if (btn) btn.click();
+            })()""")
+        except Exception:
+            pass
+
+    _ensure_expanded()
+
     # 智能轮询等待 #dailyset 容器及卡片渲染完成 (应对 Next.js SPA 水合与网络延迟，最多等待 25 秒)
     cards = []
     deadline = time.time() + 25
     while time.time() < deadline:
+        _ensure_expanded()
         cards = ev(cdp, """(() => {
           const ds = document.getElementById("dailyset");
           if (!ds) return [];
@@ -438,6 +467,7 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
         log('未发现每日活动区域 (#dailyset)，尝试重新导航刷新二次探测...')
         navigate(cdp, 'https://rewards.bing.com/dashboard')
         time.sleep(random.uniform(3, 5))
+        _ensure_expanded()
         cards = ev(cdp, """(() => {
           const ds = document.getElementById("dailyset");
           if (!ds) return [];
@@ -469,6 +499,7 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
         kind = dailyset_kind({'destinationUrl': href})
         log('每日活动卡片: %s [%s] -> %s' % (title, kind, href[:60]))
 
+        _ensure_expanded()
         selector = f'document.querySelectorAll("#dailyset a[href]")[{idx}]'
         new_tabs = human_click(cdp, selector, label=title[:15], close_new=False)
 
@@ -480,14 +511,14 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                 fast_mode = bool(st_card.get('schedule', {}).get('fast_mode'))
                 if kind == 'quiz':
                     interact_quiz(ch, target_tid, label=title, log=log)
-                    wait = random.uniform(3, 6) if fast_mode else random.uniform(60, 90)
-                    log('%s 答题后停留 %.1f 分钟等待结算' % (title, wait / 60))
+                    wait = random.uniform(3, 6) if fast_mode else random.uniform(25, 45)
+                    log('%s 答题后停留 %.1f 秒等待结算' % (title, wait))
                     time.sleep(wait)
                 else:
-                    w_min = 3 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_min', 120))
-                    w_max = 6 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_max', 180))
+                    w_min = 3 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_min', 60))
+                    w_max = 6 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_max', 120))
                     wait = random.uniform(w_min, w_max)
-                    log('%s 停留 %.1f 分钟等待归因' % (title, wait / 60))
+                    log('%s 停留 %.1f 秒等待归因' % (title, wait))
                     time.sleep(wait)
             finally:
                 for tid in new_tabs:
@@ -508,6 +539,7 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             break
         time.sleep(1.0)
     time.sleep(2.0)
+    _ensure_expanded()
 
     remaining_todo = ev(cdp, """(() => {
       const ds = document.getElementById("dailyset");
@@ -812,9 +844,23 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
     navigate(cdp, 'https://rewards.bing.com/earn')
     time.sleep(random.uniform(2, 4))
 
+    def _ensure_ma_expanded():
+        try:
+            ev(cdp, """(() => {
+              const ma = document.getElementById("moreactivities");
+              if (!ma) return;
+              const btn = ma.querySelector("button[aria-expanded='false']");
+              if (btn) btn.click();
+            })()""")
+        except Exception:
+            pass
+
+    _ensure_ma_expanded()
+
     # 智能轮询等待 #moreactivities 容器渲染 (最多等待 20 秒)
     deadline = time.time() + 20
     while time.time() < deadline:
+        _ensure_ma_expanded()
         has_ma = ev(cdp, 'document.getElementById("moreactivities") !== null')
         if has_ma:
             break
@@ -845,6 +891,7 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
         href = card['href']
         log('日常任务卡片: %s -> %s' % (text[:30], href[:60]))
 
+        _ensure_ma_expanded()
         selector = f'document.querySelectorAll("#moreactivities a[href]")[{idx}]'
         new_tabs = human_click(cdp, selector, label=text[:15], close_new=False)
         from msr import settings
@@ -872,6 +919,7 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
             break
         time.sleep(1.0)
     time.sleep(2.0)
+    _ensure_ma_expanded()
 
     remaining_ma = ev(cdp, """(() => {
       const ma = document.getElementById("moreactivities");
