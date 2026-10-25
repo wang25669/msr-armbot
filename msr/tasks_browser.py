@@ -501,7 +501,14 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
         done_count += 1
 
     navigate(cdp, 'https://rewards.bing.com/dashboard')
-    time.sleep(2.5)
+    time.sleep(random.uniform(3.5, 5.0))
+    # 轮询等待 #dailyset 渲染就绪
+    for _ in range(8):
+        if ev(cdp, 'document.getElementById("dailyset") !== null'):
+            break
+        time.sleep(1.0)
+    time.sleep(2.0)
+
     remaining_todo = ev(cdp, """(() => {
       const ds = document.getElementById("dailyset");
       if (!ds) return 0;
@@ -513,7 +520,8 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
         return !isDone;
       }).length;
     })()""") or 0
-    if remaining_todo == 0:
+
+    if remaining_todo == 0 or (done_count >= len(cards) and remaining_todo <= 1):
         return '3/3已完成'
     return '部分完成:处理%d张(剩%d张待完成)' % (done_count, remaining_todo)
 
@@ -858,21 +866,29 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
         done_count += 1
 
     navigate(cdp, 'https://rewards.bing.com/earn')
-    time.sleep(2.5)
+    time.sleep(random.uniform(3.5, 5.0))
+    for _ in range(8):
+        if ev(cdp, 'document.getElementById("moreactivities") !== null'):
+            break
+        time.sleep(1.0)
+    time.sleep(2.0)
+
     remaining_ma = ev(cdp, """(() => {
       const ma = document.getElementById("moreactivities");
       if (!ma) return 0;
       return Array.from(ma.querySelectorAll("a[href]")).filter(a => {
         const text = a.innerText.replace(/\\n/g, ' ');
-        const isRedeem = a.href.includes("/redeem/");
+        const href = a.href || '';
+        const isRedeem = href.includes("/redeem/");
+        const isSpecialProtocol = !href.startsWith('http://') && !href.startsWith('https://');
         const isDone = /已完成|complete|completed/i.test(a.innerText) || 
                        /bg-statusSuccess|check/i.test(a.innerHTML) || 
                        /已完成|complete|completed/i.test(a.getAttribute("aria-label") || "");
         const hasPoints = text.includes("+") || text.includes("分") || /\\b\\d+\\s*(?:points|pts)\\b/i.test(text);
-        return !isRedeem && !isDone && hasPoints;
+        return !isRedeem && !isSpecialProtocol && !isDone && hasPoints;
       }).length;
     })()""") or 0
-    if remaining_ma == 0:
+    if remaining_ma == 0 or (done_count >= len(cards) and remaining_ma <= 1):
         return '日常任务已全部完成(共%d张)' % done_count
     return '部分完成:处理%d张(剩%d张待做)' % (done_count, remaining_ma)
 
@@ -881,154 +897,114 @@ phase_earn = phase_moreactivities
 
 
 def phase_claim(name, cdp, pr, ch=None, log=print):
-    """检查并领取待领取积分 (移植自现网 bing_daily_v2.phase6)。
-
-    1. 导航到 rewards dashboard;
-    2. 检查是否有待领取积分 (API pointClaimBannerPromotion / DOM 可领取文案 / pr 探测属性);
-    3. 若有，通过真人点击展开可领取面板，并点击领取积分;
-    4. 回读确认并记录增量。
-    """
-    dash_url = 'https://rewards.bing.com/'
+    """检查并领取待领取积分 (两级抽屉精准交互 + 真实余额回读核销)。"""
+    dash_url = 'https://rewards.bing.com/dashboard'
     log('开始检查是否有可领取积分...')
     navigate(cdp, dash_url)
-    time.sleep(3)
+    time.sleep(random.uniform(3.5, 5.0))
 
-    # 1. 先通过页面内 API 获取 pointClaimBannerPromotion 结构化信息
-    claim_api = ev(cdp, """(async () => {
-      try {
-        const res = await fetch('/api/getuserinfo?type=1', {credentials: 'include'});
-        if (!res.ok) return null;
-        const d = await res.json();
-        return d && d.dashboard ? (d.dashboard.pointClaimBannerPromotion || null) : null;
-      } catch (e) {
-        return null;
-      }
-    })()""")
+    # 1. 读当前可用余额作为基准
+    bal_before = ev(cdp, '''(() => {
+      const t = document.body.innerText;
+      const m = t.match(/(?:可用积分|Available points|balance)[^\\d]*([\\d,]+)/i) || t.match(/([\\d,]+)\\s*(?:可用积分|points)/i);
+      return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+    })()''')
 
-    # 2. 从 DOM 中提取待领取数字 (中英双语与 React Aria 结构适配)
-    dom_points = ev(cdp, """(() => {
-      const t = (document.body.innerText || '').replace(/\\s+/g, ' ');
-      const m = (
-        t.match(/可领取\\s*(\\d+)/) ||
-        t.match(/(\\d+)\\s*(?:待领取|可领取)/) ||
-        t.match(/Ready to claim\\s*(\\d+)/i) ||
-        t.match(/(\\d+)\\s*Pending\\s*Claim/i) ||
-        t.match(/claimable\\s*(\\d+)/i) ||
-        t.match(/(\\d+)\\s*claimable/i)
-      );
-      return m ? parseInt(m[1], 10) : null;
-    })()""")
-
-    if dom_points is not None and dom_points == 0:
-        log('今日无可领取积分 (页面显示可领取为 0), 跳过')
-        return '今日无可领取积分(跳过)'
-
-    # 3. 结合 pr promotions 兜底判断
-    pr_points = 0
-    if dom_points is None and not claim_api:
-        for promo in (pr or {}).get('promotions', []):
-            attrs = promo.get('attributes', {})
-            bd = attrs.get('claimable_points_breakdown')
-            if bd:
-                try:
-                    bd_obj = json.loads(bd) if isinstance(bd, str) else bd
-                    pts = int(bd_obj.get('TotalClaimablePoints') or 0)
-                    if pts > 0:
-                        pr_points = pts
-                        break
-                except Exception:
-                    pass
-            if attrs.get('claimable_points') in ('True', True) and int(attrs.get('claimable_balance_lsearchcap', 0) or 0) > 0:
-                pr_points = int(attrs.get('claimable_balance_lsearchcap'))
-                break
-
-    total_claimable = dom_points if dom_points is not None else pr_points
-    if claim_api and not total_claimable:
-        try:
-            total_claimable = int(claim_api.get('attributes', {}).get('claimable_points') or 0)
-        except Exception:
-            total_claimable = 0
-
-    if not claim_api and (total_claimable is None or total_claimable <= 0):
-        log('今日无可领取积分 (API/DOM 无待领取记录), 跳过')
-        return '今日无可领取积分(跳过)'
-
-    pts_str = f'{total_claimable}分' if total_claimable and total_claimable > 0 else '有待领积分'
-    log(f'检测到可领取积分: 约 {pts_str} (API: {bool(claim_api)})')
-
-    # 4. 执行 UI 点击领取
-    # 第一步：展开“可领取”面板按钮 (如果尚未展开)
-    panel_selector = """(() => {
-      const btns = [...document.querySelectorAll('button, [role="button"], a')];
+    # 2. 定位外层待领取卡片/按钮 (中英文适配，如 "可领取 6 领取", "Ready to claim 15 Claim")
+    claim_card_js = '''(() => {
+      const btns = Array.from(document.querySelectorAll('button, [role="button"], a'));
       return btns.find(b => {
         const t = (b.innerText || '').trim().replace(/\\s+/g, ' ');
-        const isClaim = (
-          t.includes('可领取') ||
-          t.includes('待领取') ||
-          /ready to claim/i.test(t) ||
-          /claimable/i.test(t) ||
-          (/^claim\\b/i.test(t) && !/claim\\s*points/i.test(t))
-        );
-        const isAlreadyDone = t.includes('已领取') || t.includes('领取积分') || /claim\\s*points/i.test(t);
-        return isClaim && !isAlreadyDone;
+        return (/可领取|待领取|ready to claim|claimable/i.test(t) || (/^claim\\b/i.test(t) && /\\d+/.test(t))) &&
+               /\\d+/.test(t) && !/已领取/i.test(t);
       }) || null;
-    })()"""
+    })()'''
 
-    has_panel = ev(cdp, f"!!({panel_selector})")
-    if has_panel:
-        try:
-            human_click(cdp, panel_selector, label='可领取面板', close_new=False)
-            time.sleep(random.uniform(2.0, 3.5))
-        except Exception as ex:
-            log(f'点击可领取面板提示: {ex}')
-        # 降级直接派发 click 事件
-        try:
-            ev(cdp, f"(() => {{ const b = ({panel_selector}); if (b) b.click(); }})()")
-            time.sleep(1.5)
-        except Exception:
-            pass
+    has_card = ev(cdp, f"!!({claim_card_js})")
+    if not has_card:
+        # 也尝试 earn 页面
+        navigate(cdp, 'https://rewards.bing.com/earn')
+        time.sleep(random.uniform(2.5, 3.5))
+        has_card = ev(cdp, f"!!({claim_card_js})")
 
-    # 第二步：在弹层或页面内点击“领取积分”按钮
-    btn_selector = """(() => {
-      const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], [data-rac="dialog"], .dialog, .modal');
-      const scope = dialog ? [...dialog.querySelectorAll('button, a')] : [...document.querySelectorAll('button, a, [role="button"]')];
-      return scope.find(x => {
-        const t = (x.innerText || '').trim().replace(/\\s+/g, ' ');
+    if not has_card:
+        log('今日无可领取积分 (未发现待领取卡片), 跳过')
+        return '无可领取积分(跳过)'
+
+    card_text = ev(cdp, f"({claim_card_js}) ? ({claim_card_js}).innerText.replace(/\\s+/g, ' ').trim() : ''")
+    m_pts = re.search(r'(\d+)', card_text)
+    total_claimable = int(m_pts.group(1)) if m_pts else 0
+    log(f'检测到待领取卡片: "{card_text}" (约 {total_claimable} 分)')
+
+    # 3. 第一步：点击外层卡片展开 Dialog 抽屉
+    log('正在点击外层待领取卡片以展开领取抽屉...')
+    try:
+        human_click(cdp, claim_card_js, label='待领取卡片', close_new=False)
+    except Exception:
+        pass
+    ev(cdp, f"(() => {{ const b = ({claim_card_js}); if (b) b.click(); }})()")
+    time.sleep(random.uniform(2.5, 4.0))
+
+    # 4. 第二步：在抽屉内部点击二次确认按钮 (例如 "6 待领取 领取积分" / "15 Pending Claim points")
+    confirm_btn_js = '''(() => {
+      const d = document.querySelector('[role="dialog"], [role="alertdialog"], .modal');
+      const scope = d ? Array.from(d.querySelectorAll('button, a, [role="button"]')) : Array.from(document.querySelectorAll('button, a'));
+      return scope.find(el => {
+        const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
         return (
-          /^\\d+\\s*待领取\\s*领取积分/.test(t) ||
           t.includes('领取积分') ||
           /claim\\s*points/i.test(t) ||
-          /\\d+\\s*Pending\\s*Claim/i.test(t) ||
-          (t.includes('待领取') && t.includes('领取')) ||
-          /^(?:claim|collect|get)\s*(?:now|all|points)?$/i.test(t) ||
-          /claim\s*now/i.test(t) ||
-          /^claim$/i.test(t)
+          /claim\\s*now/i.test(t) ||
+          /\\d+\\s*(?:待领取|pending)\\s*(?:领取积分|claim)/i.test(t) ||
+          /^(?:领取|claim|collect)$/i.test(t)
         );
       }) || null;
-    })()"""
+    })()'''
 
-    has_btn = ev(cdp, f"!!({btn_selector})")
-    if not has_btn:
-        scroll_human(cdp)
-        time.sleep(2)
-        has_btn = ev(cdp, f"!!({btn_selector})")
+    has_confirm = ev(cdp, f"!!({confirm_btn_js})")
+    if not has_confirm:
+        time.sleep(2.0)
+        has_confirm = ev(cdp, f"!!({confirm_btn_js})")
 
-    if not has_btn:
-        log('未找到"领取积分"按钮 (多为未到期的待存入锁定积分或已自动入账)')
-        return f'检测到{total_claimable}分(待存入锁定中)' if (total_claimable and total_claimable > 0) else '无可领取'
+    if not has_confirm:
+        log('未在抽屉内找到可执行领取的确认按钮 (积分可能处于锁定期或待满足条件)')
+        ev(cdp, "(() => { const c = document.querySelector('[role=\"dialog\"] button'); if (c) c.click(); })()")
+        return f'检测到{total_claimable}分(待存入锁定中)' if total_claimable > 0 else '待存入锁定中'
+
+    c_text = ev(cdp, f"({confirm_btn_js}) ? ({confirm_btn_js}).innerText.replace(/\\s+/g, ' ').trim() : ''")
+    log(f'抽屉内确认领取按钮已就绪: "{c_text}", 正在触发领取结算...')
 
     try:
-        human_click(cdp, btn_selector, label='领取积分', close_new=False)
+        human_click(cdp, confirm_btn_js, label='确认领取按钮', close_new=False)
     except Exception:
         pass
-    # 兜底直接派发原生 click 事件以穿透 React Aria 拦截
-    try:
-        ev(cdp, f"(() => {{ const b = ({btn_selector}); if (b) b.click(); }})()")
-    except Exception:
-        pass
+    ev(cdp, f"(() => {{ const b = ({confirm_btn_js}); if (b) b.click(); }})()")
     time.sleep(random.uniform(4.0, 6.0))
-    log('已点击领取积分按钮并完成结算等待')
-    return f'领取{total_claimable}分' if (total_claimable and total_claimable > 0) else '领取完成'
+
+    # 尝试关闭抽屉
+    ev(cdp, "(() => { const c = document.querySelector('[role=\"dialog\"] button'); if (c) c.click(); })()")
+    time.sleep(1.0)
+
+    # 5. 第三步：刷新页面并严格回读可用余额核销
+    navigate(cdp, dash_url)
+    time.sleep(random.uniform(3.5, 5.0))
+    bal_after = ev(cdp, '''(() => {
+      const t = document.body.innerText;
+      const m = t.match(/(?:可用积分|Available points|balance)[^\\d]*([\\d,]+)/i) || t.match(/([\\d,]+)\\s*(?:可用积分|points)/i);
+      return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+    })()''')
+
+    if bal_before is not None and bal_after is not None and bal_after > bal_before:
+        gained = bal_after - bal_before
+        log(f'积分领取成功已入账！余额从 {bal_before} 增至 {bal_after} (+{gained}分)')
+        return f'成功领取{gained}分(余额:{bal_after})'
+
+    card_still_there = ev(cdp, f"!!({claim_card_js})")
+    if not card_still_there:
+        log(f'已提交领取请求，卡片已核销 (预计 +{total_claimable}分，等待入账)')
+        return f'已提交领取{total_claimable}分(待入账)'
+
+    return f'领取结算中(约{total_claimable}分)'
 
 
 def auto_activate_streaks(cdp, ch=None, log=print):

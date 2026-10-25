@@ -33,21 +33,31 @@ STATUS_CARD_JS = '''(() => {
 
   const text = (card.innerText || '').replace(/\\s+/g, ' ').trim();
   
-  // 1. 已完成
-  if (/已完成|completed/i.test(text) || /\\b(?:活动|activity|tasks?):\\s*1\\s*\\/\\s*1\\b/i.test(text) || /\\b1\\s*\\/\\s*1\\b/.test(text)) {
-    return {progress: 1, max: 1, complete: true, found: true, unactivated: false, source: 'card_done', text: text};
+  // 1. 优先提取当天具体的活动比例指标 (例如 活动: 0/1, 活动: 1/1, Activity: 0/1, Activity: 1/1)
+  const ratioMatch = text.match(/\\b(?:活动|activity|tasks?):\\s*(\\d+)\\s*\\/\\s*(\\d+)\\b/i) || text.match(/\\b(\\d+)\\s*\\/\\s*(\\d+)\\b/);
+  if (ratioMatch) {
+    const p = Number(ratioMatch[1]), max = Number(ratioMatch[2]);
+    return {
+      progress: p,
+      max: max,
+      complete: p >= max && max > 0,
+      found: true,
+      unactivated: false,
+      source: 'card_ratio',
+      text: text
+    };
   }
 
-  // 2. 待激活
+  // 2. 待激活 (如何激活 / How to activate / Activate streak)
   if (/如何激活|how to activate|activate streak/i.test(text) || /\\b激活\\b/.test(text)) {
     return {progress: 0, max: 1, complete: false, found: true, unactivated: true, source: 'card_unactivated', text: text};
   }
 
-  // 3. 数字比例解析 (例如 0/1, 1/1)
-  const m = text.match(/\\b(?:活动|activity|tasks?):\\s*(\\d+)\\s*\\/\\s*(\\d+)\\b/i) || text.match(/\\b(\\d+)\\s*\\/\\s*(\\d+)\\b/);
-  if (m) {
-    const p = Number(m[1]), max = Number(m[2]);
-    return {progress: p, max: max, complete: p >= max && max > 0, found: true, unactivated: false, source: 'card_ratio', text: text};
+  // 3. 排除连续打卡累计天数干扰 (例如 "已完成连续打卡 2 天" / "Day 2 of 7 streak completed") 后再判断是否已完成
+  const cleanText = text.replace(/已完成连续打卡\\s*\\d+\\s*天/gi, '')
+                        .replace(/Day\\s*\\d+\\s*(?:of\\s*\\d+)?\\s*streak\\s*completed/gi, '');
+  if (/已完成|completed/i.test(cleanText)) {
+    return {progress: 1, max: 1, complete: true, found: true, unactivated: false, source: 'card_done', text: text};
   }
 
   return {progress: 0, max: 1, complete: false, found: true, unactivated: false, source: 'card_default', text: text};
