@@ -88,14 +88,17 @@ PANEL_JS = '''(() => {
 LENS_PICK = '''(() => {
   const vis = x => x && x.getBoundingClientRect().width > 0 && x.getBoundingClientRect().height > 0;
 
-  // 1. 结构化首页及搜索页镜头
+  // 1. 结构化首页及搜索页镜头 (优先点击具备 role="button" 的内层交互节点，避免只点中外层容器)
   const structural = [
+    document.querySelector('#sb_cam_island .b_icon'),
+    document.querySelector('#sb_cam_island [role="button"]'),
     document.querySelector('#sb_cam_island'),
     document.querySelector('.sbi_hpicn'),
-    document.querySelector('#sb_cam_island .b_icon'),
+    document.querySelector('[data-island="cam"] [role="button"]'),
     document.querySelector('[data-island="cam"]'),
     document.querySelector('#sb_sbi'),
     document.querySelector('#sbi_b'),
+    document.querySelector('.hp_island_host.camera [role="button"]'),
     document.querySelector('.hp_island_host.camera'),
     document.querySelector('#sb_form .camera')
   ];
@@ -246,15 +249,14 @@ def get_entry_and_activate(cdp, ch=None, log=print):
         })()'''
         href = ev(cdp, drawer_target_js)
 
-        # 真人点击抽屉内的激活/打卡链接以确保服务器激活归因
+        # 真人点击抽屉内的激活链接以确保服务器激活归因 (仅当确实为激活按钮时点击，避免误点 Search now 等普通跳转)
         try:
             new_tabs = human_click(cdp, '''(() => {
               const dialog = document.querySelector('[role="dialog"]');
               if (!dialog) return null;
               return Array.from(dialog.querySelectorAll('a, button')).find(el => {
                 const t = (el.innerText || '').toLowerCase();
-                const h = (el.getAttribute('href') || '').toLowerCase();
-                return t.includes('激活') || t.includes('activate') || h.includes('features=vsstreak');
+                return t.includes('激活') || t.includes('activate');
               });
             })()''', label='激活打卡', close_new=False)
             if new_tabs and ch:
@@ -288,6 +290,22 @@ def submit_image(cdp, image, entry, log=print):
     log('正在导航至视觉打卡入口: %s' % entry[:70])
     navigate(cdp, entry)
     time.sleep(random.uniform(3.0, 4.5))
+
+    # 清理可能遮挡搜索栏与镜头的浮动横幅、未登录诱导框或隐私通知
+    try:
+        ev(cdp, '''(() => {
+          const sels = ['.b_siprov2_body', '.b_siprov2', '#bnp_container', '#b_notificationContainer', '[id*="cookie-banner" i]'];
+          for (const s of sels) {
+            const el = document.querySelector(s);
+            if (el) {
+              const cls = el.querySelector('button[aria-label*="close" i], button[aria-label*="关闭" i], .b_close, .bnp_close');
+              if (cls) cls.click();
+              else el.remove();
+            }
+          }
+        })()''')
+    except Exception:
+        pass
 
     opened = False
     for attempt in range(4):
@@ -427,8 +445,11 @@ def run(name, cdp, pr, log=print, used_path=None, max_attempts=2, ch=None):
     if st.get('complete'):
         return '今日视觉已完成, 跳过'
 
-    # 若处于未激活状态，在 earn 页面展开并激活打卡
-    entry = get_entry_and_activate(cdp, ch=ch, log=log)
+    # 仅当处于未激活状态时，在 earn 页面展开抽屉并激活打卡；已激活账号直达打卡入口，避免多余开关标签页
+    if st.get('unactivated'):
+        entry = get_entry_and_activate(cdp, ch=ch, log=log)
+    else:
+        entry = 'https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES'
     log('视觉任务入口就绪: %s' % entry[:70])
 
     pool = image_pool(8)
