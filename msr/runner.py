@@ -286,81 +286,93 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
         else:
             edge_worker()
 
-    # 3. 前台启动单个浏览器会话，真人流转依次执行该账号的所有浏览器阶段
-    if browser_phases:
-        b_results = executor.run_browser_session(name, browser_phases, token, pr, p, config,
-                                                 proxy=proxy, cdp_port=cdp_port)
-        results_map.update(b_results)
+    bsess = None
+    try:
+        # 3. 前台启动单个浏览器会话，真人流转依次执行该账号的所有浏览器阶段
+        if browser_phases:
+            bsess = executor.BrowserSession(name, token, pr, p, config,
+                                            proxy=proxy, cdp_port=cdp_port)
+            bsess.start()
+            b_results = bsess.run_phases(browser_phases)
+            results_map.update(b_results)
 
-    # 4. 若有后台 Edge 打卡心跳线程，等待其 30 分钟周期结束
-    if edge_thread is not None:
-        config.log(name, '前台浏览器任务已全部就绪，等待后台 Edge 30分钟打卡结束...')
-        edge_thread.join()
+        # 4. 若有后台 Edge 打卡心跳线程，等待其 30 分钟周期结束 (仅在后台线程仍在运行时等待)
+        if edge_thread is not None and edge_thread.is_alive():
+            config.log(name, '前台浏览器任务已全部就绪，等待后台 Edge 30分钟打卡结束...')
+            edge_thread.join()
 
-    # 4.1 新手首次激活联动：若最初未下发跳过，但前台浏览器刚刚完成了 Edge 打卡任务激活，则触发补跑
-    newly_activated = b_results.get('_newly_activated', []) if browser_phases else []
-    if 'edge' in newly_activated and results_map.get(edge_ph) == '未下发Edge任务(跳过)':
-        config.log(name, '检测到浏览器刚刚完成了 Edge 浏览打卡的新手激活，正在启动今日打卡心跳...')
-        try:
-            r = executor.run_api_phase(name, edge_ph, token, pr, p, config, api, proxy=proxy)
-            results_map[edge_ph] = r
-            config.log(name, '<<< Edge 30分钟新手初次打卡完成: %s' % r)
-        except Exception as ex:
-            results_map[edge_ph] = '失败(%s)' % str(ex)[:60]
-            config.log(name, '!!! Edge 30分钟打卡异常: %s' % str(ex)[:120])
-
-    # 5. 按照原始 plan 顺序组装结果
-    results = ['%s:%s' % (w['phase'], results_map.get(w['phase'], '未执行')) for w in plan]
-
-    # 阶段 10 · 容错核查与智能回补修复 (repair)
-    # 深度达标审计：全方位核查未满额(如 9/15, 25/50)、未完成、部分完成或残留未做卡片
-    bad = []
-    for r in results:
-        ph, _, val = r.partition(':')
-        is_bad = False
-        if val.startswith('失败') or val.startswith('未完成') or val.startswith('未满额') or val.startswith('部分完成'):
-            is_bad = True
-        elif '未complete' in val or '未出现' in val or '待完成' in val or '待做' in val:
-            is_bad = True
-        elif ph in ('search', 'pcsearch') and ('/' in val):
-            m = re.search(r'(\d+)\s*/\s*(\d+)', val)
-            if m and int(m.group(1)) < int(m.group(2)):
-                is_bad = True
-        elif ph in ('visual', 'visualsearch') and ('未完成' in val):
-            is_bad = True
-
-        if is_bad:
-            bad.append(ph)
-
-    if bad and not args.dry_run:
-        from msr import settings as S
-        st_runner = S.load_settings()
-        retry_mins = int(st_runner.get('schedule', {}).get('retry_wait_minutes', 4))
-        fast_mode = bool(st_runner.get('schedule', {}).get('fast_mode', False))
-        wait_s = 5 if fast_mode else retry_mins * 60
-        config.log(name, '[阶段 10 · 容错核查] 发现未满分/未完成项目: %s, 冷却等待 %.1f 分钟后启动精准回补...' % (bad, wait_s / 60))
-        time.sleep(wait_s)
-        bad_api = [ph for ph in bad if next((t['needs'] for t in planner.TASK_TABLE.values() if t['phase'] == ph), 'api') == 'api']
-        bad_browser = [ph for ph in bad if ph not in bad_api]
-        for ph in bad_api:
+        # 4.1 新手首次激活联动：若最初未下发跳过，但前台浏览器刚刚完成了 Edge 打卡任务激活，则触发补跑
+        newly_activated = b_results.get('_newly_activated', []) if browser_phases else []
+        if 'edge' in newly_activated and results_map.get(edge_ph) == '未下发Edge任务(跳过)':
+            config.log(name, '检测到浏览器刚刚完成了 Edge 浏览打卡的新手激活，正在启动今日打卡心跳...')
             try:
-                r = executor.run_api_phase(name, ph, token, pr, p, config, api, proxy=proxy)
-                results_map[ph] = '回补成功(%s)' % r
-                config.log(name, '[阶段 10 自动回补] %s: %s' % (ph, r))
+                r = executor.run_api_phase(name, edge_ph, token, pr, p, config, api, proxy=proxy)
+                results_map[edge_ph] = r
+                config.log(name, '<<< Edge 30分钟新手初次打卡完成: %s' % r)
             except Exception as ex:
-                results_map[ph] = '回补仍失败(%s)' % str(ex)[:50]
-                config.log(name, '[阶段 10 自动回补] %s 仍失败: %s' % (ph, str(ex)[:100]))
-        if bad_browser:
-            # 若有浏览器任务回补，自动附带 claim 阶段以保证补全后新释放的待存入积分能被立即结算入账
-            if 'claim' not in bad_browser:
-                bad_browser.append('claim')
-            b_fixes = executor.run_browser_session(name, bad_browser, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
-            for ph, r in b_fixes.items():
-                results_map[ph] = '回补(%s)' % r
-                config.log(name, '[阶段 10 自动回补] %s: %s' % (ph, r))
+                results_map[edge_ph] = '失败(%s)' % str(ex)[:60]
+                config.log(name, '!!! Edge 30分钟打卡异常: %s' % str(ex)[:120])
 
-        # 重新生成更新后的最终结果列表
+        # 5. 按照原始 plan 顺序组装结果
         results = ['%s:%s' % (w['phase'], results_map.get(w['phase'], '未执行')) for w in plan]
+
+        # 阶段 10 · 容错核查与智能回补修复 (repair)
+        # 深度达标审计：全方位核查未满额(如 9/15, 25/50)、未完成、部分完成或残留未做卡片
+        bad = []
+        for r in results:
+            ph, _, val = r.partition(':')
+            is_bad = False
+            if val.startswith('失败') or val.startswith('未完成') or val.startswith('未满额') or val.startswith('部分完成'):
+                is_bad = True
+            elif '未complete' in val or '未出现' in val or '待完成' in val or '待做' in val:
+                is_bad = True
+            elif ph in ('search', 'pcsearch') and ('/' in val):
+                m = re.search(r'(\d+)\s*/\s*(\d+)', val)
+                if m and int(m.group(1)) < int(m.group(2)):
+                    is_bad = True
+            elif ph in ('visual', 'visualsearch') and ('未完成' in val):
+                is_bad = True
+
+            if is_bad:
+                bad.append(ph)
+
+        if bad and not args.dry_run:
+            from msr import settings as S
+            st_runner = S.load_settings()
+            fast_mode = bool(st_runner.get('schedule', {}).get('fast_mode', False))
+            # 阶段9到阶段10中间的等待时间改成随机1-3分钟
+            wait_s = 5 if fast_mode else random.uniform(60, 180)
+            config.log(name, '[阶段 10 · 容错核查] 发现未满分/未完成项目: %s, 冷却等待 %.1f 秒后启动同会话精准回补...' % (bad, wait_s))
+            time.sleep(wait_s)
+            bad_api = [ph for ph in bad if next((t['needs'] for t in planner.TASK_TABLE.values() if t['phase'] == ph), 'api') == 'api']
+            bad_browser = [ph for ph in bad if ph not in bad_api]
+            for ph in bad_api:
+                try:
+                    r = executor.run_api_phase(name, ph, token, pr, p, config, api, proxy=proxy)
+                    results_map[ph] = '回补成功(%s)' % r
+                    config.log(name, '[阶段 10 自动回补] %s: %s' % (ph, r))
+                except Exception as ex:
+                    results_map[ph] = '回补仍失败(%s)' % str(ex)[:50]
+                    config.log(name, '[阶段 10 自动回补] %s 仍失败: %s' % (ph, str(ex)[:100]))
+            if bad_browser:
+                # 若有浏览器任务回补，自动附带 claim 阶段以保证补全后新释放的待存入积分能被立即结算入账
+                if 'claim' not in bad_browser:
+                    bad_browser.append('claim')
+                if bsess is not None and bsess.ch is not None:
+                    # 复用当前已开启的浏览器会话，杜绝重新拉起 Chromium 的低效开销
+                    b_fixes = bsess.run_phases(bad_browser, is_retry=True)
+                else:
+                    b_fixes = executor.run_browser_session(name, bad_browser, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
+                for ph, r in b_fixes.items():
+                    results_map[ph] = '回补(%s)' % r
+                    config.log(name, '[阶段 10 自动回补] %s: %s' % (ph, r))
+
+            # 重新生成更新后的最终结果列表
+            results = ['%s:%s' % (w['phase'], results_map.get(w['phase'], '未执行')) for w in plan]
+    finally:
+        # 在阶段10全部结束（包括回补完成）后再彻底关闭浏览器释放内存
+        if bsess is not None:
+            bsess.close()
 
     # 获取运行后最新余额
     bal_after = bal_before

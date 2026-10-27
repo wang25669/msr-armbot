@@ -1030,7 +1030,8 @@ def phase_explore(name, cdp, pr, ch=None, log=print):
           text: text,
           href: href,
           isDone: isDone,
-          isLocked: isLocked
+          isLocked: isLocked,
+          isActivated: /activated|已激活/i.test(text)
         };
       }).filter(c => !c.isDone && !c.isLocked && c.text.length > 5);
     })()"""
@@ -1042,17 +1043,18 @@ def phase_explore(name, cdp, pr, ch=None, log=print):
 
     log('发现 %d 张待打卡探索卡片' % len(cards))
 
-    # 3. 逐张卡片执行真人点击与主题词搜索归因
+    # 3. 逐张卡片执行真人激活与主标签真实主题词搜索归因
     done_count = 0
     for c in cards:
         idx = c['idx']
         text = c['text']
         href = c['href']
+        is_activated = c.get('isActivated', False)
 
         # 从卡片文本语义推导主题搜索词
         clean_text = text.lower()
         if 'flight' in clean_text or 'vacation' in clean_text or 'getaway' in clean_text or '机票' in clean_text or '度假' in clean_text:
-            query = 'cheap flights and vacation deals'
+            query = 'flights to your perfect vacation'
         elif 'insurance' in clean_text or 'protect' in clean_text or '保险' in clean_text:
             query = 'compare best insurance plans'
         elif 'loan' in clean_text or 'student' in clean_text or 'future' in clean_text or '贷款' in clean_text:
@@ -1073,64 +1075,38 @@ def phase_explore(name, cdp, pr, ch=None, log=print):
 
         log('执行探索打卡[%d/%d]: %s -> 主题词: "%s"' % (done_count + 1, len(cards), text[:35], query))
 
-        # 3.1 真实点击展开/唤起卡片链接 (触发微软服务端点击追踪归因)
-        try:
-            click_selector = f"""(() => {{
-              const headings = Array.from(document.querySelectorAll("h2, h3, button, span, div")).filter(el => {{
-                const t = (el.innerText || "").replace(/\\s+/g, " ").trim();
-                return /^(?:Explore on Bing|在必应上探索|探索必应)/i.test(t) && t.length < 50;
-              }});
-              if (!headings.length) return null;
-              const disc = headings[0].closest(".react-aria-Disclosure, [class*=Disclosure]") || headings[0].parentElement;
-              const panel = disc ? (disc.querySelector(".react-aria-DisclosurePanel, [class*=DisclosurePanel]") || disc) : null;
-              return panel ? panel.querySelectorAll("a[href]")[{idx}] : null;
-            }})()"""
-            new_tabs = human_click(cdp, click_selector, label='探索卡片', close_new=False, timeout=6.0)
-            if new_tabs and ch:
-                for tid in new_tabs:
-                    try:
-                        ch.close_tab(tid)
-                    except Exception:
-                        pass
-        except Exception as ex:
-            log('探索卡片点击追踪容错: %s' % str(ex)[:60])
+        # 3.1 若卡片尚未处于 Activated 状态，点击卡片展开/激活 (触发微软服务端点击追踪归因)
+        if not is_activated:
+            try:
+                click_selector = f"""(() => {{
+                  const headings = Array.from(document.querySelectorAll("h2, h3, button, span, div")).filter(el => {{
+                    const t = (el.innerText || "").replace(/\\s+/g, " ").trim();
+                    return /^(?:Explore on Bing|在必应上探索|探索必应)/i.test(t) && t.length < 50;
+                  }});
+                  if (!headings.length) return null;
+                  const disc = headings[0].closest(".react-aria-Disclosure, [class*=Disclosure]") || headings[0].parentElement;
+                  const panel = disc ? (disc.querySelector(".react-aria-DisclosurePanel, [class*=DisclosurePanel]") || disc) : null;
+                  return panel ? panel.querySelectorAll("a[href]")[{idx}] : null;
+                }})()"""
+                human_click(cdp, click_selector, label='探索卡片激活', close_new=True, timeout=6.0)
+            except Exception as ex:
+                log('探索卡片点击追踪容错: %s' % str(ex)[:60])
+            time.sleep(random.uniform(1.5, 2.5))
 
-        time.sleep(random.uniform(1.5, 2.5))
-
-        # 3.2 在新标签页打开携带官方跟踪参数的必应搜索结果页并停留归因，保持主标签在 /earn 页面
+        # 3.2 在主工作标签直接导航至携带官方跟踪参数的必应搜索结果页并停留归因 (经实测，必须在主活动标签执行真实搜索才能被微软准确结算)
         import urllib.parse
         search_url = f'https://www.bing.com/search?q={urllib.parse.quote_plus(query)}&form=ML2PCR&OCID=ML2PCR&PUBL=RewardsDO&CREA=ML2PCR&PC=ML2PCR'
-        dwell = random.uniform(12.0, 18.0)
-        if ch:
-            stab = ch.new_tab(search_url)
-            if stab and stab.get('id'):
-                try:
-                    log('在新标签搜索页停留 %.1f 秒等待服务器归因积分...' % dwell)
-                    time.sleep(dwell)
-                finally:
-                    try:
-                        ch.close_tab(stab['id'])
-                    except Exception:
-                        pass
-            else:
-                navigate(cdp, search_url)
-                log('在搜索结果页停留 %.1f 秒等待服务器归因积分...' % dwell)
-                time.sleep(dwell)
-                navigate(cdp, 'https://rewards.bing.com/earn')
-                time.sleep(random.uniform(2.0, 3.0))
-        else:
-            navigate(cdp, search_url)
-            log('在搜索结果页停留 %.1f 秒等待服务器归因积分...' % dwell)
-            time.sleep(dwell)
-            navigate(cdp, 'https://rewards.bing.com/earn')
-            time.sleep(random.uniform(2.0, 3.0))
+        dwell = random.uniform(16.0, 20.0)
+        navigate(cdp, search_url)
+        log('在搜索结果页停留 %.1f 秒等待服务器归因积分...' % dwell)
+        time.sleep(dwell)
 
         done_count += 1
         time.sleep(random.uniform(2.0, 3.5))
 
     # 4. 重新返回 /earn 回读最新指标
     navigate(cdp, 'https://rewards.bing.com/earn')
-    time.sleep(random.uniform(2.5, 4.0))
+    time.sleep(random.uniform(3.0, 5.0))
     final_info = ev(cdp, find_explore_js) or {}
     prog_after = final_info.get('prog', done_count * 10)
     max_after = final_info.get('max', 40)

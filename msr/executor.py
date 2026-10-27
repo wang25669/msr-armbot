@@ -198,65 +198,80 @@ def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger, t
     return '未知浏览器阶段 %s' % phase
 
 
-def run_browser_session(name, phases, token, pr, profile_path, config, proxy=None, cdp_port=None):
-    """单浏览器会话: 起独立 profile headless chromium -> 注入账号专属指纹与 cookie -> 连续执行所有浏览器阶段 -> 彻底终结。
+class BrowserSession:
+    """账号专属独立 Chromium 会话生命周期管理。
 
-    返回 dict: {phase: result}。
+    支持阶段 3-9 连续执行及阶段 10 容错回补共用同一浏览器会话，
+    避免频繁起停浏览器造成的系统开销与延迟。
     """
-    from msr import browser, fingerprint
-    bc = browser_cfg(config)
-    chrome_dir = profile_path + '/chrome'
-    logger = lambda msg: config.log(name, msg)
 
-    # 1. 账号级反检测指纹加载/生成 (不同账号独立显卡/核心/内存/分辨率/时区)
-    fp = fingerprint.load_or_create(name, country=pr.get('country'))
-    logger('应用账号专属硬件指纹: %s (%s, %s, %s核%dG, %dx%d, %s)' % (
-        name, fp.get('os_name'), fp.get('webgl_renderer', '').split('Direct3D')[0].strip(),
-        fp.get('hardware_concurrency'), fp.get('device_memory'),
-        fp.get('screen_width'), fp.get('screen_height'), fp.get('timezone')
-    ))
+    def __init__(self, name, token, pr, profile_path, config, proxy=None, cdp_port=None):
+        self.name = name
+        self.token = token
+        self.pr = pr
+        self.profile_path = profile_path
+        self.config = config
+        self.proxy = proxy
+        self.cdp_port = cdp_port
+        self.logger = lambda msg: config.log(name, msg)
+        self.ch = None
+        self.cdp = None
+        self.tab = None
+        self.bc = None
+        self.newly_activated = []
 
-    ch = browser.Chromium(binary=bc['binary'], user_data_dir=chrome_dir,
-                          version=fp.get('edge_version', bc['version']), log=logger,
-                          proxy=proxy, cdp_port=cdp_port, fingerprint=fp,
-                          headless=bc.get('headless', True),
-                          disable_webrtc_leak=bc.get('disable_webrtc_leak', True))
-    tabs = ch.start()
-    # 优先复用 start 创建好的首个标签，避免多余空白标签占用 ARM 内存
-    tab = tabs[0] if tabs else ch.new_tab('about:blank')
-    results = {}
-    try:
-        cdp = ch.attach(tab)
-        # 清除其余多余标签，保证仅当前 1 个工作标签在运行
-        ch.cleanup_extra_tabs(keep_tab_id=tab.get('id'))
+    def start(self):
+        from msr import browser, fingerprint
+        self.bc = browser_cfg(self.config)
+        chrome_dir = self.profile_path + '/chrome'
 
-        cookies = config.load_json(config.pfile(name, 'cookie.json'))
+        fp = fingerprint.load_or_create(self.name, country=self.pr.get('country'))
+        self.logger('应用账号专属硬件指纹: %s (%s, %s, %s核%dG, %dx%d, %s)' % (
+            self.name, fp.get('os_name'), fp.get('webgl_renderer', '').split('Direct3D')[0].strip(),
+            fp.get('hardware_concurrency'), fp.get('device_memory'),
+            fp.get('screen_width'), fp.get('screen_height'), fp.get('timezone')
+        ))
+
+        self.ch = browser.Chromium(binary=self.bc['binary'], user_data_dir=chrome_dir,
+                                   version=fp.get('edge_version', self.bc['version']), log=self.logger,
+                                   proxy=self.proxy, cdp_port=self.cdp_port, fingerprint=fp,
+                                   headless=self.bc.get('headless', True),
+                                   disable_webrtc_leak=self.bc.get('disable_webrtc_leak', True))
+        tabs = self.ch.start()
+        self.tab = tabs[0] if tabs else self.ch.new_tab('about:blank')
+        self.cdp = self.ch.attach(self.tab)
+        self.ch.cleanup_extra_tabs(keep_tab_id=self.tab.get('id'))
+
+        cookies = self.config.load_json(self.config.pfile(self.name, 'cookie.json'))
         if cookies:
-            browser.inject_cookies(cdp, cookies, log=logger)
+            browser.inject_cookies(self.cdp, cookies, log=self.logger)
 
-        # 账号启动时先自动扫描并激活所有连续打卡任务 (Streak，如 Visual Search Streak, Edge Browsing Streak)
         from msr import tasks_browser as tb
         try:
-            newly_activated = tb.auto_activate_streaks(cdp, ch=ch, log=logger)
-            if newly_activated:
-                results['_newly_activated'] = newly_activated
+            self.newly_activated = tb.auto_activate_streaks(self.cdp, ch=self.ch, log=self.logger)
         except Exception as ex:
-            logger('自动激活 Streak 检查异常: %s' % str(ex)[:80])
+            self.logger('自动激活 Streak 检查异常: %s' % str(ex)[:80])
 
-        for phase in phases:
-            logger('>>> 开始浏览器阶段: %s' % phase)
+    def run_phases(self, phases, is_retry=False):
+        results = {}
+        if not is_retry and self.newly_activated:
+            results['_newly_activated'] = self.newly_activated
+
+        for idx, phase in enumerate(phases):
+            prefix = ' [回补]' if is_retry else ''
+            self.logger('>>> 开始浏览器阶段%s: %s' % (prefix, phase))
             try:
-                r = execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger,
-                                                 token=token, proxy=proxy)
+                r = execute_single_browser_phase(phase, self.name, self.cdp, self.pr, self.ch, self.bc, self.config, self.logger,
+                                                 token=self.token, proxy=self.proxy)
                 results[phase] = r
-                logger('<<< 浏览器阶段 %s 完成: %s' % (phase, r))
+                self.logger('<<< 浏览器阶段%s %s 完成: %s' % (prefix, phase, r))
             except Exception as ex:
                 results[phase] = '失败(%s)' % str(ex)[:60]
-                logger('!!! 浏览器阶段 %s 异常: %s' % (phase, str(ex)[:120]))
+                self.logger('!!! 浏览器阶段%s %s 异常: %s' % (prefix, phase, str(ex)[:120]))
             finally:
-                # 每个阶段完成后，立即关闭所有可能产生的子标签，及时释放 ARM 内存并保护当前活跃标签
-                cur_tid = cdp.path.split('/')[-1].split('?')[0] if (hasattr(cdp, 'path') and cdp.path) else tab.get('id')
-                ch.cleanup_extra_tabs(keep_tab_id=cur_tid)
+                cur_tid = self.cdp.path.split('/')[-1].split('?')[0] if (hasattr(self.cdp, 'path') and self.cdp.path) else (self.tab.get('id') if self.tab else None)
+                if cur_tid:
+                    self.ch.cleanup_extra_tabs(keep_tab_id=cur_tid)
 
                 if phase != phases[-1]:
                     from msr import settings as S
@@ -265,19 +280,38 @@ def run_browser_session(name, phases, token, pr, profile_path, config, proxy=Non
                     s_min = 2 if fast_mode else int(st_cfg.get('schedule', {}).get('inter_stage_wait_min', 3)) * 60
                     s_max = 5 if fast_mode else int(st_cfg.get('schedule', {}).get('inter_stage_wait_max', 5)) * 60
                     wait_stage = random.uniform(s_min, s_max)
-                    logger('阶段过渡: 等待 %.1f 秒后进入下一阶段...' % wait_stage)
+                    self.logger('阶段过渡: 等待 %.1f 秒后进入下一阶段...' % wait_stage)
                     time.sleep(wait_stage)
 
         return results
+
+    def close(self):
+        if self.ch:
+            try:
+                cur_tid = self.cdp.path.split('/')[-1].split('?')[0] if (hasattr(self.cdp, 'path') and self.cdp.path) else (self.tab.get('id') if self.tab else None)
+                if cur_tid:
+                    self.ch.close_tab(cur_tid)
+            except Exception:
+                pass
+            try:
+                self.ch.stop()
+            except Exception:
+                pass
+            self.ch = None
+            self.logger('已完全关闭浏览器并释放当前账号 Profile 与系统内存')
+
+
+def run_browser_session(name, phases, token, pr, profile_path, config, proxy=None, cdp_port=None):
+    """单浏览器会话: 起独立 profile headless chromium -> 注入账号专属指纹与 cookie -> 连续执行所有浏览器阶段 -> 彻底终结。
+
+    返回 dict: {phase: result}。
+    """
+    sess = BrowserSession(name, token, pr, profile_path, config, proxy=proxy, cdp_port=cdp_port)
+    try:
+        sess.start()
+        return sess.run_phases(phases)
     finally:
-        try:
-            cur_tid = cdp.path.split('/')[-1].split('?')[0] if (hasattr(cdp, 'path') and cdp.path) else tab.get('id')
-            ch.close_tab(cur_tid)
-        except Exception:
-            pass
-        # 彻底终结 Chromium 整个进程树并释放 profile 锁与系统内存
-        ch.stop()
-        logger('已完全关闭浏览器并释放当前账号 Profile 与系统内存')
+        sess.close()
 
 
 def run_browser_phase(name, phase, token, pr, profile_path, config, proxy=None, cdp_port=None):
