@@ -961,6 +961,42 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     return '处理%d个打卡步骤' % total_steps_done
 
 
+def extract_semantic_explore_query(title, desc):
+    """从 Explore on Bing 卡片的标题与描述中抽象语义规律，自动提取最优搜索词。
+
+    适用于未来任何新出现的卡片与不同语言环境，摆脱硬编码枚举。
+    """
+    text = (desc or title or '').strip()
+
+    # 1. 英文语法模式: Search on Bing (to <verb>|for|about) <target_phrase>
+    m = re.search(r'(?:search\s+on\s+bing|search\s+bing|search)\s+(?:to\s+(?:find|explore|compare|check|see\s+if|see|discover|get|browse|view|read|learn\s+about)|for|about)\s+(?:a|an|the|your\s+next|your|our|some)?\s*(.+)', text, re.IGNORECASE)
+    if m:
+        raw_phrase = m.group(1).strip()
+        raw_phrase = re.sub(r'[\.\?\!\;]+$', '', raw_phrase).strip()
+        raw_phrase = re.sub(r'^if\s+', '', raw_phrase, flags=re.IGNORECASE).strip()
+        if len(raw_phrase) >= 3:
+            return raw_phrase
+
+    # 2. 中文语法模式: 在必应[上/中]?(搜索|查找|探索|了解)[关于]? <目标短语>
+    m_cn = re.search(r'(?:在(?:必应|bing)(?:上|中)?|通过(?:必应|bing))?\s*(?:搜索|查找|探索|查询|了解|查看)\s*(?:关于)?\s*(.+)', text, re.IGNORECASE)
+    if m_cn:
+        raw_cn = m_cn.group(1).strip()
+        raw_cn = re.sub(r'[。？！；]+$', '', raw_cn).strip()
+        if len(raw_cn) >= 2:
+            return raw_cn
+
+    # 3. 泛化模式: 移除常规引导词前缀
+    cleaned = re.sub(r'^(?:search\s+on\s+bing\s+(?:for|to\s+\w+)?|在必应上搜索)\s*', '', text, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r'[\.\?\!\;]+$', '', cleaned).strip()
+    if len(cleaned) >= 4 and not re.search(r'^(?:completed|activated|unlocks)', cleaned, re.I):
+        return cleaned
+
+    # 4. 兜底策略: 从 title 和 desc 过滤系统停用词，保留最具代表性的核心主题词
+    stop_words = {'search', 'bing', 'on', 'for', 'to', 'the', 'a', 'an', 'and', 'or', 'in', 'of', 'with', 'your', 'my', 'points', 'activated', 'completed', 'unlocks', 'tomorrow', 'today', 'quick', 'find', 'get', 'check'}
+    words = [w for w in re.findall(r'[a-zA-Z\u4e00-\u9fa5]+', f'{title} {desc}') if w.lower() not in stop_words and len(w) > 2]
+    return ' '.join(words[:5]) if words else (title or 'trending searches')
+
+
 # ---------- 必应探索打卡 (Explore on Bing，美区及部分新版区域 40 分模块) ----------
 
 def phase_explore(name, cdp, pr, ch=None, log=print):
@@ -1021,6 +1057,9 @@ def phase_explore(name, cdp, pr, ch=None, log=print):
       const links = Array.from(panel.querySelectorAll("a[href]"));
       return links.map((a, idx) => {
         const text = (a.innerText || "").replace(/\\s+/g, " ").trim();
+        const paragraphs = Array.from(a.querySelectorAll("p")).map(p => (p.innerText || "").trim());
+        const title = paragraphs[0] || text.split("\\n")[0] || "";
+        const desc = paragraphs[1] || text || "";
         const href = a.href || "";
         const isDone = /completed|已完成/i.test(text) || 
                        Boolean(a.querySelector(".mee-icon-SkypeCircleCheck, svg.text-fgSuccess, img[src*='check']"));
@@ -1028,6 +1067,8 @@ def phase_explore(name, cdp, pr, ch=None, log=print):
         return {
           idx: idx,
           text: text,
+          title: title,
+          desc: desc,
           href: href,
           isDone: isDone,
           isLocked: isLocked,
@@ -1048,32 +1089,15 @@ def phase_explore(name, cdp, pr, ch=None, log=print):
     for c in cards:
         idx = c['idx']
         text = c['text']
+        title = c.get('title') or ''
+        desc = c.get('desc') or ''
         href = c['href']
         is_activated = c.get('isActivated', False)
 
-        # 从卡片文本语义推导主题搜索词
-        clean_text = text.lower()
-        if 'flight' in clean_text or 'vacation' in clean_text or 'getaway' in clean_text or '机票' in clean_text or '度假' in clean_text:
-            query = 'flights to your perfect vacation'
-        elif 'insurance' in clean_text or 'protect' in clean_text or '保险' in clean_text:
-            query = 'compare best insurance plans'
-        elif 'loan' in clean_text or 'student' in clean_text or 'future' in clean_text or '贷款' in clean_text:
-            query = 'student and personal loan options'
-        elif 'deal' in clean_text or 'shopping' in clean_text or 'item' in clean_text or '购物' in clean_text or '优惠' in clean_text:
-            query = 'top online shopping deals discounts'
-        elif 'beauty' in clean_text or 'haircare' in clean_text or 'fragrance' in clean_text:
-            query = 'popular beauty and fragrance products'
-        elif 'cell phone' in clean_text or 'phone plans' in clean_text:
-            query = 'best cell phone plans comparison'
-        elif 'cruise' in clean_text:
-            query = 'cruise deals and top destinations'
-        elif 'internet' in clean_text:
-            query = 'high speed internet plans in my area'
-        else:
-            words = [w for w in re.findall(r'[a-zA-Z\u4e00-\u9fa5]+', text) if len(w) > 3 and w.lower() not in ('search', 'bing', 'points', 'activated', 'protect', 'matters')]
-            query = ' '.join(words[:4]) if words else 'explore trending topics'
+        # 从卡片标题和描述中基于通用语法规律提炼核心搜索词 (支持未来各种未知卡片与中英文)
+        query = extract_semantic_explore_query(title, desc)
 
-        log('执行探索打卡[%d/%d]: %s -> 主题词: "%s"' % (done_count + 1, len(cards), text[:35], query))
+        log('执行探索打卡[%d/%d]: %s -> 提取搜索词: "%s"' % (done_count + 1, len(cards), (title or text)[:35], query))
 
         # 3.1 若卡片尚未处于 Activated 状态，点击卡片展开/激活 (触发微软服务端点击追踪归因)
         if not is_activated:
