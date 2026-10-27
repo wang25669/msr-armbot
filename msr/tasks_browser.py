@@ -961,6 +961,183 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     return '处理%d个打卡步骤' % total_steps_done
 
 
+# ---------- 必应探索打卡 (Explore on Bing，美区及部分新版区域 40 分模块) ----------
+
+def phase_explore(name, cdp, pr, ch=None, log=print):
+    """必应探索打卡 (Explore on Bing / 在必应上探索，通常包含 4 张 10 分主题搜索卡片)。"""
+    navigate(cdp, 'https://rewards.bing.com/earn')
+    time.sleep(random.uniform(2.5, 4.0))
+
+    # 1. 探测是否存在 Explore on Bing 折叠容器
+    find_explore_js = """(() => {
+      const headings = Array.from(document.querySelectorAll("h2, h3, button, span, div")).filter(el => {
+        const t = (el.innerText || "").replace(/\\s+/g, " ").trim();
+        return /^(?:Explore on Bing|在必应上探索|探索必应)/i.test(t) && t.length < 50;
+      });
+      if (!headings.length) return null;
+
+      const heading = headings[0];
+      const disc = heading.closest(".react-aria-Disclosure, [class*=Disclosure]") || heading.parentElement;
+      const text = disc ? (disc.innerText || "").replace(/\\s+/g, " ").trim() : (heading.innerText || "");
+      const m = text.match(/(\\d+)\\s*\\/\\s*(\\d+)/);
+      const prog = m ? parseInt(m[1], 10) : 0;
+      const max = m ? parseInt(m[2], 10) : 40;
+
+      // 若处于折叠状态，点击触发器展开面板
+      if (disc) {
+        const btn = disc.querySelector("button[aria-expanded='false']");
+        if (btn) btn.click();
+      }
+
+      return { found: true, prog: prog, max: max, isDone: prog >= max && max > 0 };
+    })()"""
+
+    info = ev(cdp, find_explore_js)
+    if not info or not info.get('found'):
+        log('当前页面未检测到 Explore on Bing 模块(跳过)')
+        return '无此模块(跳过)'
+
+    if info.get('isDone'):
+        log('Explore on Bing 今日已满额 (%d/%d)' % (info.get('prog', 40), info.get('max', 40)))
+        return '已满额(%d/%d)' % (info.get('prog', 40), info.get('max', 40))
+
+    log('发现 Explore on Bing 模块 (当前进度 %d/%d)，提取可用打卡卡片...' % (
+        info.get('prog', 0), info.get('max', 40)))
+    time.sleep(random.uniform(1.5, 2.5))
+
+    # 2. 提取面板内所有未完成卡片
+    extract_cards_js = """(() => {
+      const headings = Array.from(document.querySelectorAll("h2, h3, button, span, div")).filter(el => {
+        const t = (el.innerText || "").replace(/\\s+/g, " ").trim();
+        return /^(?:Explore on Bing|在必应上探索|探索必应)/i.test(t) && t.length < 50;
+      });
+      if (!headings.length) return [];
+
+      const heading = headings[0];
+      const disc = heading.closest(".react-aria-Disclosure, [class*=Disclosure]") || heading.parentElement;
+      const panel = disc ? (disc.querySelector(".react-aria-DisclosurePanel, [class*=DisclosurePanel]") || disc) : null;
+      if (!panel) return [];
+
+      const links = Array.from(panel.querySelectorAll("a[href]"));
+      return links.map((a, idx) => {
+        const text = (a.innerText || "").replace(/\\s+/g, " ").trim();
+        const href = a.href || "";
+        const isDone = /completed|已完成/i.test(text) || 
+                       Boolean(a.querySelector(".mee-icon-SkypeCircleCheck, svg.text-fgSuccess, img[src*='check']"));
+        const isLocked = /unlocks tomorrow|明天解锁|locked/i.test(text);
+        return {
+          idx: idx,
+          text: text,
+          href: href,
+          isDone: isDone,
+          isLocked: isLocked
+        };
+      }).filter(c => !c.isDone && !c.isLocked && c.text.length > 5);
+    })()"""
+
+    cards = ev(cdp, extract_cards_js) or []
+    if not cards:
+        log('Explore on Bing 暂无可用待打卡卡片(均已完成或处于未解锁状态)')
+        return '无可用卡片(跳过)'
+
+    log('发现 %d 张待打卡探索卡片' % len(cards))
+
+    # 3. 逐张卡片执行真人点击与主题词搜索归因
+    done_count = 0
+    for c in cards:
+        idx = c['idx']
+        text = c['text']
+        href = c['href']
+
+        # 从卡片文本语义推导主题搜索词
+        clean_text = text.lower()
+        if 'flight' in clean_text or 'vacation' in clean_text or 'getaway' in clean_text or '机票' in clean_text or '度假' in clean_text:
+            query = 'cheap flights and vacation deals'
+        elif 'insurance' in clean_text or 'protect' in clean_text or '保险' in clean_text:
+            query = 'compare best insurance plans'
+        elif 'loan' in clean_text or 'student' in clean_text or 'future' in clean_text or '贷款' in clean_text:
+            query = 'student and personal loan options'
+        elif 'deal' in clean_text or 'shopping' in clean_text or 'item' in clean_text or '购物' in clean_text or '优惠' in clean_text:
+            query = 'top online shopping deals discounts'
+        elif 'beauty' in clean_text or 'haircare' in clean_text or 'fragrance' in clean_text:
+            query = 'popular beauty and fragrance products'
+        elif 'cell phone' in clean_text or 'phone plans' in clean_text:
+            query = 'best cell phone plans comparison'
+        elif 'cruise' in clean_text:
+            query = 'cruise deals and top destinations'
+        elif 'internet' in clean_text:
+            query = 'high speed internet plans in my area'
+        else:
+            words = [w for w in re.findall(r'[a-zA-Z\u4e00-\u9fa5]+', text) if len(w) > 3 and w.lower() not in ('search', 'bing', 'points', 'activated', 'protect', 'matters')]
+            query = ' '.join(words[:4]) if words else 'explore trending topics'
+
+        log('执行探索打卡[%d/%d]: %s -> 主题词: "%s"' % (done_count + 1, len(cards), text[:35], query))
+
+        # 3.1 真实点击展开/唤起卡片链接 (触发微软服务端点击追踪归因)
+        try:
+            click_selector = f"""(() => {{
+              const headings = Array.from(document.querySelectorAll("h2, h3, button, span, div")).filter(el => {{
+                const t = (el.innerText || "").replace(/\\s+/g, " ").trim();
+                return /^(?:Explore on Bing|在必应上探索|探索必应)/i.test(t) && t.length < 50;
+              }});
+              if (!headings.length) return null;
+              const disc = headings[0].closest(".react-aria-Disclosure, [class*=Disclosure]") || headings[0].parentElement;
+              const panel = disc ? (disc.querySelector(".react-aria-DisclosurePanel, [class*=DisclosurePanel]") || disc) : null;
+              return panel ? panel.querySelectorAll("a[href]")[{idx}] : null;
+            }})()"""
+            new_tabs = human_click(cdp, click_selector, label='探索卡片', close_new=False, timeout=6.0)
+            if new_tabs and ch:
+                for tid in new_tabs:
+                    try:
+                        ch.close_tab(tid)
+                    except Exception:
+                        pass
+        except Exception as ex:
+            log('探索卡片点击追踪容错: %s' % str(ex)[:60])
+
+        time.sleep(random.uniform(1.5, 2.5))
+
+        # 3.2 在新标签页打开携带官方跟踪参数的必应搜索结果页并停留归因，保持主标签在 /earn 页面
+        import urllib.parse
+        search_url = f'https://www.bing.com/search?q={urllib.parse.quote_plus(query)}&form=ML2PCR&OCID=ML2PCR&PUBL=RewardsDO&CREA=ML2PCR&PC=ML2PCR'
+        dwell = random.uniform(12.0, 18.0)
+        if ch:
+            stab = ch.new_tab(search_url)
+            if stab and stab.get('id'):
+                try:
+                    log('在新标签搜索页停留 %.1f 秒等待服务器归因积分...' % dwell)
+                    time.sleep(dwell)
+                finally:
+                    try:
+                        ch.close_tab(stab['id'])
+                    except Exception:
+                        pass
+            else:
+                navigate(cdp, search_url)
+                log('在搜索结果页停留 %.1f 秒等待服务器归因积分...' % dwell)
+                time.sleep(dwell)
+                navigate(cdp, 'https://rewards.bing.com/earn')
+                time.sleep(random.uniform(2.0, 3.0))
+        else:
+            navigate(cdp, search_url)
+            log('在搜索结果页停留 %.1f 秒等待服务器归因积分...' % dwell)
+            time.sleep(dwell)
+            navigate(cdp, 'https://rewards.bing.com/earn')
+            time.sleep(random.uniform(2.0, 3.0))
+
+        done_count += 1
+        time.sleep(random.uniform(2.0, 3.5))
+
+    # 4. 重新返回 /earn 回读最新指标
+    navigate(cdp, 'https://rewards.bing.com/earn')
+    time.sleep(random.uniform(2.5, 4.0))
+    final_info = ev(cdp, find_explore_js) or {}
+    prog_after = final_info.get('prog', done_count * 10)
+    max_after = final_info.get('max', 40)
+    log('Explore on Bing 打卡后回读进度: %d/%d' % (prog_after, max_after))
+    return '完成%d个探索打卡(进度%d/%d)' % (done_count, prog_after, max_after)
+
+
 # ---------- 日常任务卡 (More Activities) ----------
 
 def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
@@ -1210,8 +1387,8 @@ def auto_activate_streaks(cdp, ch=None, log=print):
         const aria = (b.getAttribute('aria-label') || '').toLowerCase();
         const pText = (b.parentElement ? b.parentElement.innerText || '' : '').toLowerCase();
         const combined = t + ' ' + aria + ' ' + pText;
-        if (/如何激活|how to activate|activate\\s*streak|activate\\s*now|立即激活|待激活|inactive|pending activation|开始连续打卡|start streak|join streak/i.test(combined) || 
-            (/activate|激活|开启|加入/i.test(t) && /streak|打卡|edge|visual|search|browsing/i.test(combined))) {
+        if (/\\b(?:activate\\s*streak|activate\\s*now|how to activate|如何激活|立即激活|待激活|inactive|pending activation|开始连续打卡|start streak|join streak)\\b/i.test(combined) || 
+            (/\\b(?:activate|激活|开启|加入)\\b/i.test(t) && !/\\bactivated\\b/i.test(t) && /streak|打卡/i.test(combined))) {
           const cardTitle = b.querySelector('p, h2, h3, div')?.innerText || b.innerText.slice(0, 30);
           results.push({
             id: b.id,

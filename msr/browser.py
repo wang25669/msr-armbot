@@ -299,15 +299,16 @@ def ev(cdp, expr, timeout=WS_TIMEOUT):
 
 def navigate(cdp, url):
     cdp.call('Page.navigate', {'url': url})
-    time.sleep(3)
-    for _ in range(40):
+    time.sleep(2)
+    # 放宽页面加载完成等待时间 (从 20s 延长至 30s，适应高延迟代理)
+    for _ in range(60):
         try:
             if ev(cdp, 'document.readyState') == 'complete':
                 break
         except StepError:
             break
         time.sleep(0.5)
-    time.sleep(random.uniform(1.5, 3.5))
+    time.sleep(random.uniform(1.5, 3.0))
 
 
 # ---------- Edge 伪装(可配置版本号, 默认随 chromium 版本走) ----------
@@ -509,7 +510,7 @@ def capture_screenshot(cdp, quality=60):
         return ''
 
 
-def human_click(cdp, find_js, label='', close_new=False):
+def human_click(cdp, find_js, label='', close_new=False, timeout=8.0):
     """真人式点击: 滚动到可见 -> 随机轨迹接近 -> 按压释放。返回新标签 id 列表。
 
     2026-10-15 从现网 bing_daily_v2.human_click 移植。MSR 卡片的归因
@@ -517,29 +518,44 @@ def human_click(cdp, find_js, label='', close_new=False):
     所以卡片任务必须走真实鼠标点击。
     """
     before = set(tab_ids(cdp))
-    time.sleep(random.uniform(0.8, 2.0))
-    pt = ev(cdp, ("(() => { const el = (%s); if (!el) return null;"
-                  " el.scrollIntoView({block:'center'});"
-                  " const r = el.getBoundingClientRect();"
-                  " return {x: r.x + r.width/2, y: r.y + r.height/2}; })()" % find_js))
+    time.sleep(random.uniform(0.5, 1.2))
+
+    # 网络与渲染延迟自适应容错：在 timeout 窗口内轮询直到目标出现且具有可见尺寸
+    t_end = time.time() + max(1.0, timeout)
+    pt = None
+    query_js = ("(() => { const el = (%s); if (!el) return null;"
+                " const r = el.getBoundingClientRect();"
+                " if (r.width <= 0 || r.height <= 0) return null;"
+                " el.scrollIntoView({block:'center'});"
+                " const r2 = el.getBoundingClientRect();"
+                " return {x: r2.x + r2.width/2, y: r2.y + r2.height/2}; })()" % find_js)
+    while time.time() < t_end:
+        try:
+            pt = ev(cdp, query_js)
+            if pt and 'x' in pt and 'y' in pt:
+                break
+        except Exception:
+            pass
+        time.sleep(0.4)
+
     if not pt:
         raise StepError('点击目标不存在: %s' % label)
     x, y = float(pt['x']), float(pt['y'])
-    time.sleep(random.uniform(0.5, 1.2))
-    sx, sy = x + random.uniform(-400, 400), y + random.uniform(-300, 300)
-    for _ in range(random.randint(4, 7)):
-        sx += (x - sx) * random.uniform(0.3, 0.6) + random.uniform(-25, 25)
-        sy += (y - sy) * random.uniform(0.3, 0.6) + random.uniform(-25, 25)
+    time.sleep(random.uniform(0.3, 0.8))
+    sx, sy = x + random.uniform(-300, 300), y + random.uniform(-200, 200)
+    for _ in range(random.randint(4, 6)):
+        sx += (x - sx) * random.uniform(0.3, 0.6) + random.uniform(-20, 20)
+        sy += (y - sy) * random.uniform(0.3, 0.6) + random.uniform(-20, 20)
         mouse_move(cdp, round(sx, 1), round(sy, 1))
-        time.sleep(random.uniform(0.08, 0.2))
+        time.sleep(random.uniform(0.06, 0.15))
     mouse_move(cdp, round(x, 1), round(y, 1))
-    time.sleep(random.uniform(0.15, 0.4))
+    time.sleep(random.uniform(0.12, 0.3))
     cdp.call('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': x, 'y': y,
                                           'button': 'left', 'clickCount': 1})
-    time.sleep(random.uniform(0.05, 0.15))
+    time.sleep(random.uniform(0.05, 0.12))
     cdp.call('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': x, 'y': y,
                                           'button': 'left', 'clickCount': 1})
-    time.sleep(random.uniform(1.0, 2.0))
+    time.sleep(random.uniform(0.8, 1.8))
     new = [t for t in tab_ids(cdp) if t not in before]
     if close_new:
         for tid in new:

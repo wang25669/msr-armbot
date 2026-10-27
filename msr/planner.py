@@ -17,6 +17,7 @@ TASK_TABLE = {
     'pcSearch':                      {'phase': 'search',         'needs': 'browser'},
     'dailySetPromotions':            {'phase': 'dailyset',       'needs': 'browser'},
     'quests':                        {'phase': 'quests',         'needs': 'browser'},
+    'explore':                       {'phase': 'explore',        'needs': 'browser', 'optional': True},
     'morePromotions':                {'phase': 'moreactivities', 'needs': 'browser'},
     'visualSearch':                  {'phase': 'visual',         'needs': 'browser', 'optional': True},
     'pointClaim':                    {'phase': 'claim',          'needs': 'browser', 'optional': True},
@@ -45,6 +46,8 @@ ALIAS_MAP = {
     'quest': 'quests',
     'quests': 'quests',
     'punchcard': 'quests',
+    'explore': 'explore',
+    'exploreonbing': 'explore',
     'search': 'search',
     'visual': 'visual',
     'claim': 'claim',
@@ -101,7 +104,7 @@ def plan(probe_result, force_phases=None):
             have.add(c)
 
     # 浏览器侧阶段: 默认按顺序尝试, 由 executor 在浏览器里按当天实际卡片执行
-    BROWSER_ALWAYS = ['dailyset', 'quests', 'moreactivities', 'search', 'visual', 'claim']
+    BROWSER_ALWAYS = ['dailyset', 'quests', 'explore', 'moreactivities', 'search', 'visual', 'claim']
 
     want_phases = [
         {'phase': 'appcheckin', 'needs': 'api'},          # type103 签到总是有效

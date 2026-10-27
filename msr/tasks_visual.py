@@ -382,8 +382,8 @@ def submit_image(cdp, image, entry, log=print):
       if (go && go.getBoundingClientRect().width > 0) go.click();
     })()''')
 
-    # 等待落页确认
-    deadline = time.time() + 25
+    # 等待落页确认 (放宽至 35 秒以容忍网络高延迟代理)
+    deadline = time.time() + 35
     landed = False
     while time.time() < deadline:
         if ev(cdp, LAND):
@@ -394,8 +394,9 @@ def submit_image(cdp, image, entry, log=print):
     if not landed:
         raise StepError('视觉提交完成但落页未确认(LAND超时)')
 
-    log('视觉搜索已成功落页，在结果页停留 15 秒归因...')
-    time.sleep(15.0)
+    dwell = random.uniform(18.0, 25.0)
+    log('视觉搜索已成功落页，在结果页停留 %.1f 秒归因...' % dwell)
+    time.sleep(dwell)
     return 'success'
 
 
@@ -436,7 +437,7 @@ def _mark_used(path, url):
         pass
 
 
-def run(name, cdp, pr, log=print, used_path=None, max_attempts=2, ch=None):
+def run(name, cdp, pr, log=print, used_path=None, max_attempts=3, ch=None):
     """视觉搜索任务执行。优先激活连续打卡，识图落页归因。"""
     st = read_status(cdp)
     log('视觉状态: %s' % st)
@@ -465,13 +466,22 @@ def run(name, cdp, pr, log=print, used_path=None, max_attempts=2, ch=None):
             submit_image(cdp, img, entry, log=log)
             _mark_used(used_path, img)
 
-            # 回读状态确认
-            st2 = read_status(cdp)
+            # 回读状态确认 (多次回读以吸收网络端延迟与服务端统计延迟)
+            st2 = None
+            for r_read in range(3):
+                time.sleep(random.uniform(3.0, 5.0))
+                st2 = read_status(cdp)
+                if st2 and st2.get('complete'):
+                    break
             log('视觉第%d轮提交后回读: %s' % (i + 1, st2))
-            if st2.get('complete'):
+            if st2 and st2.get('complete'):
                 return '视觉搜索完成(第%d轮)' % (i + 1)
-            # 即使回读存在服务端延迟，只要落页停留 15s 成功归因且已激活，记录完成
-            return '视觉搜索完成(第%d轮, 已归因)' % (i + 1)
+
+            # 若服务端未立即标记完成且仍有重试机会，继续下一轮
+            if i < max_attempts - 1:
+                log('视觉第%d轮提交后回读未满额，等待冷却后进入第%d轮重试...' % (i + 1, i + 2))
+                time.sleep(random.uniform(15.0, 25.0))
+                continue
         except Exception as ex:
             log('视觉第%d轮失败: %s' % (i + 1, str(ex)[:90]))
             if i < max_attempts - 1:

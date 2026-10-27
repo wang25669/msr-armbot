@@ -179,6 +179,8 @@ def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger, t
         return tb.phase_quests(name, cdp, pr, ch=ch,
                                budget_seconds=bc['cards_budget_min'] * 60,
                                log=logger)
+    if p in ('explore', 'exploreonbing'):
+        return tb.phase_explore(name, cdp, pr, ch=ch, log=logger)
     if p in ('moreactivities', 'earn', 'more'):
         return tb.phase_moreactivities(name, cdp, pr, ch=ch,
                                       budget_seconds=bc['cards_budget_min'] * 60,
