@@ -961,71 +961,32 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     return '处理%d个打卡步骤' % total_steps_done
 
 
-EXPLORE_KNOWN_TOPICS = {
-    'freshen up your routine': 'haircare products',
-    'talk, text, save': 'cell phone plans',
-    'set sail': 'cruise deals and locations',
-    'check options': 'internet plans near me',
-    'bank smarter': 'checking and savings account',
-    'catch the show': 'concert tickets near me',
-    'learn song lyrics': 'song lyrics',
-    'drive your way': 'rental cars deals',
-    'find somewhere new to explore': 'maps',
-    'stream your favorites': 'streaming services',
-    'take off soon': 'flights deals',
-    'glow up': 'skincare products',
-    'relax completely': 'spa resorts near me',
-}
-
-
 def extract_semantic_explore_query(title, desc):
-    """从 Explore on Bing 卡片的标题与描述中提炼最优商业搜索关键词。
+    """从 Explore on Bing 卡片中通用提炼搜索短语。
 
-    优先匹配高频已知活动库，兜底基于通用语义规则剥离修饰从句提取核心商业意图词。
+    不使用任何硬编码关键词；直接剥离引导前缀（如 'Search on Bing' / '在必应上搜索'），
+    原汁原味使用后续完整描述内容作为搜索词，确保对未来任意新卡片及多语言环境天然通用。
     """
-    clean_title = re.sub(r'[\u200b\s]+', ' ', title or '').strip().lower()
-    if clean_title in EXPLORE_KNOWN_TOPICS:
-        return EXPLORE_KNOWN_TOPICS[clean_title]
-
-    for k, v in EXPLORE_KNOWN_TOPICS.items():
-        if k in clean_title:
-            return v
-
     text = (desc or title or '').strip()
+    if not text:
+        return title or 'trending searches'
 
-    # 1. 英文语法模式: Search on Bing (to <verb>|for|about) <target_phrase>
-    m = re.search(r'(?:search\s+on\s+bing|search\s+bing|search)\s+(?:to\s+(?:find|explore|compare|check|see\s+if|see|discover|get|browse|view|read|learn\s+about)|for|about)\s+(?:a|an|the|your\s+next|your|our|some)?\s*(.+)', text, re.IGNORECASE)
-    if m:
-        raw_phrase = m.group(1).strip()
-        raw_phrase = re.sub(r'[\.\?\!\;]+$', '', raw_phrase).strip()
-        raw_phrase = re.sub(r'^if\s+', '', raw_phrase, flags=re.IGNORECASE).strip()
-        # 剥离修饰从句 (例如 "that fit your lifestyle", "in your area", "near you")
-        raw_phrase = re.split(r'\s+(?:that|which|where|in\s+your|near\s+you|near\s+me|around\s+you|to\s+fit|to\s+book)\b', raw_phrase, flags=re.IGNORECASE)[0].strip()
-        # 逗号或 or 并列项取第1项
-        if ',' in raw_phrase or ' or ' in raw_phrase:
-            raw_phrase = re.split(r'[,]|(?:\s+or\s+)', raw_phrase)[0].strip()
-        if len(raw_phrase) >= 3:
-            return raw_phrase
+    # 1. 剥离中英文常见搜索引导前缀（如 'Search on Bing', 'Search Bing', '在必应上搜索' 等）
+    cleaned = re.sub(
+        r'^(?:search\s+on\s+bing\s*|search\s+bing\s*|在必应(?:上|中)?搜索\s*|通过必应搜索\s*|在必应(?:上|中)?查找\s*|在必应(?:上|中)?探索\s*)',
+        '',
+        text,
+        flags=re.IGNORECASE
+    ).strip()
 
-    # 2. 中文语法模式: 在必应[上/中]?(搜索|查找|探索|了解)[关于]? <目标短语>
-    m_cn = re.search(r'(?:在(?:必应|bing)(?:上|中)?|通过(?:必应|bing))?\s*(?:搜索|查找|探索|查询|了解|查看)\s*(?:关于)?\s*(.+)', text, re.IGNORECASE)
-    if m_cn:
-        raw_cn = m_cn.group(1).strip()
-        raw_cn = re.sub(r'[。？！；]+$', '', raw_cn).strip()
-        raw_cn = re.split(r'[，,]|(?:\s*或者\s*)', raw_cn)[0].strip()
-        if len(raw_cn) >= 2:
-            return raw_cn
+    # 2. 去除末尾标点符号 (句号、问号、叹号等)
+    cleaned = re.sub(r'[\.\?\!\;。？！；]+$', '', cleaned).strip()
 
-    # 3. 泛化模式: 移除常规引导词前缀
-    cleaned = re.sub(r'^(?:search\s+on\s+bing\s+(?:for|to\s+\w+)?|在必应上搜索)\s*', '', text, flags=re.IGNORECASE).strip()
-    cleaned = re.sub(r'[\.\?\!\;]+$', '', cleaned).strip()
-    if len(cleaned) >= 4 and not re.search(r'^(?:completed|activated|unlocks)', cleaned, re.I):
+    # 3. 兜底保护：若剥离后内容有效则直接使用，否则退回使用卡片标题 title
+    if len(cleaned) >= 2 and not re.search(r'^(?:completed|activated|unlocks|已完成|明天解锁)', cleaned, re.I):
         return cleaned
 
-    # 4. 兜底策略: 从 title 和 desc 过滤系统停用词，保留最具代表性的核心主题词
-    stop_words = {'search', 'bing', 'on', 'for', 'to', 'the', 'a', 'an', 'and', 'or', 'in', 'of', 'with', 'your', 'my', 'points', 'activated', 'completed', 'unlocks', 'tomorrow', 'today', 'quick', 'find', 'get', 'check'}
-    words = [w for w in re.findall(r'[a-zA-Z\u4e00-\u9fa5]+', f'{title} {desc}') if w.lower() not in stop_words and len(w) > 2]
-    return ' '.join(words[:5]) if words else (title or 'trending searches')
+    return (title or desc or 'trending searches').strip()
 
 
 # ---------- 必应探索打卡 (Explore on Bing，美区及部分新版区域 40 分模块) ----------
