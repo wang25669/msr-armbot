@@ -961,11 +961,36 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     return '处理%d个打卡步骤' % total_steps_done
 
 
-def extract_semantic_explore_query(title, desc):
-    """从 Explore on Bing 卡片的标题与描述中抽象语义规律，自动提取最优搜索词。
+EXPLORE_KNOWN_TOPICS = {
+    'freshen up your routine': 'haircare products',
+    'talk, text, save': 'cell phone plans',
+    'set sail': 'cruise deals and locations',
+    'check options': 'internet plans near me',
+    'bank smarter': 'checking and savings account',
+    'catch the show': 'concert tickets near me',
+    'learn song lyrics': 'song lyrics',
+    'drive your way': 'rental cars deals',
+    'find somewhere new to explore': 'maps',
+    'stream your favorites': 'streaming services',
+    'take off soon': 'flights deals',
+    'glow up': 'skincare products',
+    'relax completely': 'spa resorts near me',
+}
 
-    适用于未来任何新出现的卡片与不同语言环境，摆脱硬编码枚举。
+
+def extract_semantic_explore_query(title, desc):
+    """从 Explore on Bing 卡片的标题与描述中提炼最优商业搜索关键词。
+
+    优先匹配高频已知活动库，兜底基于通用语义规则剥离修饰从句提取核心商业意图词。
     """
+    clean_title = re.sub(r'[\u200b\s]+', ' ', title or '').strip().lower()
+    if clean_title in EXPLORE_KNOWN_TOPICS:
+        return EXPLORE_KNOWN_TOPICS[clean_title]
+
+    for k, v in EXPLORE_KNOWN_TOPICS.items():
+        if k in clean_title:
+            return v
+
     text = (desc or title or '').strip()
 
     # 1. 英文语法模式: Search on Bing (to <verb>|for|about) <target_phrase>
@@ -974,6 +999,11 @@ def extract_semantic_explore_query(title, desc):
         raw_phrase = m.group(1).strip()
         raw_phrase = re.sub(r'[\.\?\!\;]+$', '', raw_phrase).strip()
         raw_phrase = re.sub(r'^if\s+', '', raw_phrase, flags=re.IGNORECASE).strip()
+        # 剥离修饰从句 (例如 "that fit your lifestyle", "in your area", "near you")
+        raw_phrase = re.split(r'\s+(?:that|which|where|in\s+your|near\s+you|near\s+me|around\s+you|to\s+fit|to\s+book)\b', raw_phrase, flags=re.IGNORECASE)[0].strip()
+        # 逗号或 or 并列项取第1项
+        if ',' in raw_phrase or ' or ' in raw_phrase:
+            raw_phrase = re.split(r'[,]|(?:\s+or\s+)', raw_phrase)[0].strip()
         if len(raw_phrase) >= 3:
             return raw_phrase
 
@@ -982,6 +1012,7 @@ def extract_semantic_explore_query(title, desc):
     if m_cn:
         raw_cn = m_cn.group(1).strip()
         raw_cn = re.sub(r'[。？！；]+$', '', raw_cn).strip()
+        raw_cn = re.split(r'[，,]|(?:\s*或者\s*)', raw_cn)[0].strip()
         if len(raw_cn) >= 2:
             return raw_cn
 
@@ -1084,57 +1115,84 @@ def phase_explore(name, cdp, pr, ch=None, log=print):
 
     log('发现 %d 张待打卡探索卡片' % len(cards))
 
-    # 3. 逐张卡片执行真人激活与主标签真实主题词搜索归因
+    # 3. 逐张卡片在新标签页中打开并执行精准搜索归因，主 /earn 标签页保持常驻监听
     done_count = 0
+    import urllib.parse
     for c in cards:
         idx = c['idx']
         text = c['text']
         title = c.get('title') or ''
         desc = c.get('desc') or ''
-        href = c['href']
-        is_activated = c.get('isActivated', False)
 
-        # 从卡片标题和描述中基于通用语法规律提炼核心搜索词 (支持未来各种未知卡片与中英文)
+        # 从卡片标题和描述中提炼最优搜索词
         query = extract_semantic_explore_query(title, desc)
-
         log('执行探索打卡[%d/%d]: %s -> 提取搜索词: "%s"' % (done_count + 1, len(cards), (title or text)[:35], query))
 
-        # 3.1 若卡片尚未处于 Activated 状态，点击卡片展开/激活 (触发微软服务端点击追踪归因)
-        if not is_activated:
-            try:
-                click_selector = f"""(() => {{
-                  const headings = Array.from(document.querySelectorAll("h2, h3, button, span, div")).filter(el => {{
-                    const t = (el.innerText || "").replace(/\\s+/g, " ").trim();
-                    return /^(?:Explore on Bing|在必应上探索|探索必应)/i.test(t) && t.length < 50;
-                  }});
-                  if (!headings.length) return null;
-                  const disc = headings[0].closest(".react-aria-Disclosure, [class*=Disclosure]") || headings[0].parentElement;
-                  const panel = disc ? (disc.querySelector(".react-aria-DisclosurePanel, [class*=DisclosurePanel]") || disc) : null;
-                  return panel ? panel.querySelectorAll("a[href]")[{idx}] : null;
-                }})()"""
-                human_click(cdp, click_selector, label='探索卡片激活', close_new=True, timeout=6.0)
-            except Exception as ex:
-                log('探索卡片点击追踪容错: %s' % str(ex)[:60])
-            time.sleep(random.uniform(1.5, 2.5))
+        t_before = set(tab_ids(cdp))
 
-        # 3.2 在主工作标签直接导航至携带官方跟踪参数的必应搜索结果页并停留归因 (经实测，必须在主活动标签执行真实搜索才能被微软准确结算)
-        import urllib.parse
+        # 点击卡片，在新标签页打开（绝不直接覆盖或导航主 /earn 标签，以保持 Rewards 会话与事件监听）
+        click_card_js = f"""(() => {{
+          const headings = Array.from(document.querySelectorAll("h2, h3, button, span, div")).filter(el => {{
+            const t = (el.innerText || "").replace(/\\s+/g, " ").trim();
+            return /^(?:Explore on Bing|在必应上探索|探索必应)/i.test(t) && t.length < 50;
+          }});
+          if (!headings.length) return false;
+          const disc = headings[0].closest(".react-aria-Disclosure, [class*=Disclosure]") || headings[0].parentElement;
+          const panel = disc ? (disc.querySelector(".react-aria-DisclosurePanel, [class*=DisclosurePanel]") || disc) : null;
+          if (!panel) return false;
+          const links = panel.querySelectorAll("a[href]");
+          if (links && links[{idx}]) {{
+              links[{idx}].target = "_blank";
+              links[{idx}].click();
+              return true;
+          }}
+          return false;
+        }})()"""
+        ev(cdp, click_card_js)
+        time.sleep(random.uniform(2.5, 3.5))
+
+        # 抓取新打开的子标签页
+        new_tabs = []
+        if hasattr(cdp, 'port'):
+            try:
+                all_tabs = _http_json(f'http://127.0.0.1:{cdp.port}/json/list', timeout=3)
+                new_tabs = [t for t in all_tabs if t.get('id') not in t_before and t.get('type') == 'page']
+            except Exception:
+                pass
+
+        target_cdp = cdp
+        new_tab_id = None
+        if new_tabs and ch:
+            new_tab_id = new_tabs[0].get('id')
+            try:
+                target_cdp = ch.attach(new_tabs[0])
+            except Exception:
+                target_cdp = cdp
+                new_tab_id = None
+
         search_url = f'https://www.bing.com/search?q={urllib.parse.quote_plus(query)}&form=ML2PCR&OCID=ML2PCR&PUBL=RewardsDO&CREA=ML2PCR&PC=ML2PCR'
         dwell = random.uniform(16.0, 20.0)
-        navigate(cdp, search_url)
+        navigate(target_cdp, search_url)
         log('在搜索结果页停留 %.1f 秒等待服务器归因积分...' % dwell)
         time.sleep(dwell)
+        try:
+            ev(target_cdp, 'window.scrollBy(0, 400);')
+            time.sleep(2.0)
+        except Exception:
+            pass
+
+        # 归因完成，关闭子标签页，主 /earn 标签继续接收积分更新
+        if new_tab_id and ch:
+            try:
+                ch.close_tab(new_tab_id)
+            except Exception:
+                pass
+            time.sleep(1.5)
 
         done_count += 1
-        time.sleep(random.uniform(2.0, 3.5))
+        time.sleep(random.uniform(1.5, 2.5))
 
-        # 核心：处理下一张卡片前，必须导航回 /earn 页面并重新展开面板，确保后续卡片元素能被准确查询
-        navigate(cdp, 'https://rewards.bing.com/earn')
-        time.sleep(random.uniform(3.0, 4.5))
-        ev(cdp, find_explore_js)
-        time.sleep(1.0)
-
-    # 4. 重新返回 /earn 回读最新指标
+    # 4. 重新刷新 /earn 回读最新指标
     navigate(cdp, 'https://rewards.bing.com/earn')
     time.sleep(random.uniform(3.0, 5.0))
     final_info = ev(cdp, find_explore_js) or {}
