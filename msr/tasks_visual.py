@@ -158,8 +158,14 @@ BOX_READY = '''(() => {
 LAND = '''(() => {
   try {
     const u = new URL(location.href);
-    if (!u.hostname.endsWith('bing.com') || u.pathname !== '/search') return false;
-    return u.searchParams.has('bcid') || (u.searchParams.get('FORM') || '').startsWith('SBI') || (u.searchParams.get('features') || '').includes('vsstreak');
+    if (!u.hostname.endsWith('bing.com')) return false;
+    if (u.pathname === '/search' || u.pathname === '/images/search') {
+      return u.searchParams.has('bcid') || 
+             (u.searchParams.get('FORM') || '').startsWith('SBI') || 
+             (u.searchParams.get('features') || '').includes('vsstreak') ||
+             (u.searchParams.get('iss') || '') === 'sbi';
+    }
+    return false;
   } catch(e) {
     return false;
   }
@@ -351,12 +357,7 @@ def submit_image(cdp, image, entry, log=print):
       return document.querySelector('#sb_imgpst') || document.querySelector('input');
     })()'''
 
-    # 真人点击输入框 + 输入图片 URL
-    try:
-        human_click(cdp, inp_js, label='图片URL框', close_new=False)
-    except Exception:
-        pass
-
+    # 直接将壁纸链接注入输入框，派发 input 与 change 事件
     ev(cdp, '''((inp, img) => {
         if (inp) {
             inp.focus();
@@ -367,6 +368,10 @@ def submit_image(cdp, image, entry, log=print):
     })(%s, %s)''' % (inp_js, json.dumps(image)))
     time.sleep(0.8)
 
+    # 派发 Enter 键前，确保焦点紧紧锁定在 input 元素上
+    ev(cdp, '''((inp) => { if (inp) inp.focus(); })(%s)''' % inp_js)
+    time.sleep(0.2)
+
     # 派发 Enter 键并触发表单提交
     for t in ('keyDown', 'keyUp'):
         cdp.call('Input.dispatchKeyEvent', {
@@ -376,19 +381,29 @@ def submit_image(cdp, image, entry, log=print):
             'unmodifiedText': '\r' if t == 'keyDown' else ''
         })
 
-    # 触发可能的提交按钮 (#sb_sbi_gh 或 submit)
+    # 若存在专用的贴图提交按钮则点击，严禁点击普通文本搜索的 #sb_form_go (避免覆盖取消识图)
     ev(cdp, '''(() => {
-      const go = document.querySelector('#sb_sbi_gh, #sb_form_go, button.sbi_submit');
+      const go = document.querySelector('button.sbi_submit, #sb_imgpst ~ button, .pastearea button, #sbi_submit');
       if (go && go.getBoundingClientRect().width > 0) go.click();
     })()''')
 
-    # 等待落页确认 (放宽至 35 秒以容忍网络高延迟代理)
-    deadline = time.time() + 35
+    # 等待落页确认 (放宽至 40 秒以容忍网络高延迟代理，同时引入 Bing 错误横幅感知)
+    deadline = time.time() + 40
     landed = False
     while time.time() < deadline:
         if ev(cdp, LAND):
             landed = True
             break
+        # 检查是否有识图错误提示
+        err = ev(cdp, '''(() => {
+            const errEl = document.querySelector('#url-err-msg, #bcid-err-msg, .errcntr .errmsg, #url-err, #bcid-err');
+            if (errEl && errEl.getBoundingClientRect().width > 0 && errEl.innerText.trim()) {
+                return errEl.innerText.trim();
+            }
+            return null;
+        })()''')
+        if err:
+            raise StepError(f'视觉图片提交被必应拒绝: {err}')
         time.sleep(1.0)
 
     if not landed:

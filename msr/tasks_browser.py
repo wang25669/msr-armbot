@@ -1128,6 +1128,12 @@ def phase_explore(name, cdp, pr, ch=None, log=print):
         done_count += 1
         time.sleep(random.uniform(2.0, 3.5))
 
+        # 核心：处理下一张卡片前，必须导航回 /earn 页面并重新展开面板，确保后续卡片元素能被准确查询
+        navigate(cdp, 'https://rewards.bing.com/earn')
+        time.sleep(random.uniform(3.0, 4.5))
+        ev(cdp, find_explore_js)
+        time.sleep(1.0)
+
     # 4. 重新返回 /earn 回读最新指标
     navigate(cdp, 'https://rewards.bing.com/earn')
     time.sleep(random.uniform(3.0, 5.0))
@@ -1252,9 +1258,9 @@ phase_earn = phase_moreactivities
 
 def phase_claim(name, cdp, pr, ch=None, log=print):
     """检查并领取待领取积分 (两级抽屉精准交互 + 真实余额回读核销)。"""
-    dash_url = 'https://rewards.bing.com/earn'
+    # 待领取卡片主要渲染在 Rewards Dashboard 首页，部分区域在 /earn
     log('开始检查是否有可领取积分...')
-    navigate(cdp, dash_url)
+    navigate(cdp, 'https://rewards.bing.com/dashboard')
     time.sleep(random.uniform(3.5, 5.0))
 
     # 1. 读当前可用余额作为基准
@@ -1275,11 +1281,14 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
     })()'''
 
     has_card = ev(cdp, f"!!({claim_card_js})")
+    current_page = 'https://rewards.bing.com/dashboard'
     if not has_card:
-        # 也尝试 dashboard 页面 (旧版界面兜底)
-        navigate(cdp, 'https://rewards.bing.com/dashboard')
+        # 也尝试 earn 页面
+        navigate(cdp, 'https://rewards.bing.com/earn')
         time.sleep(random.uniform(2.5, 3.5))
         has_card = ev(cdp, f"!!({claim_card_js})")
+        if has_card:
+            current_page = 'https://rewards.bing.com/earn'
 
     if not has_card:
         log('今日无可领取积分 (未发现待领取卡片), 跳过')
@@ -1345,15 +1354,26 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
 
     if not clicked_confirm:
         ev(cdp, f"(() => {{ const b = ({confirm_btn_js}); if (b) b.click(); }})()")
+
+    # 等待抽屉内部响应与异步网络请求提交 (给予充足时间，严禁过早关闭弹窗打断网络请求)
+    for _ in range(8):
+        time.sleep(1.0)
+        d_closed = ev(cdp, '!document.querySelector(\'[role="dialog"], section[role="dialog"]\')')
+        if d_closed:
+            break
+
+    # 若抽屉未自动关闭，尝试点击关闭按钮
+    ev(cdp, """(() => {
+      const d = document.querySelector('[role="dialog"], section[role="dialog"]');
+      if (!d) return;
+      const cls = d.querySelector('button[aria-label*="关闭" i], button[aria-label*="close" i], button.group\\\\/ctrl, button');
+      if (cls) cls.click();
+    })()""")
+    time.sleep(1.5)
+
+    # 5. 第三步：在同一个发现卡片的页面刷新并严格回读核销 (杜绝跨页面产生虚假核销)
+    navigate(cdp, current_page)
     time.sleep(random.uniform(4.0, 6.0))
-
-    # 尝试关闭抽屉
-    ev(cdp, "(() => { const c = document.querySelector('[role=\"dialog\"] button, section[role=\"dialog\"] button'); if (c) c.click(); })()")
-    time.sleep(1.0)
-
-    # 5. 第三步：刷新页面并严格回读可用余额核销
-    navigate(cdp, dash_url)
-    time.sleep(random.uniform(3.5, 5.0))
     bal_after = ev(cdp, '''(() => {
       const t = document.body.innerText;
       const m = t.match(/(?:可用积分|Available points|balance)[^\\d]*([\\d,]+)/i) || t.match(/([\\d,]+)\\s*(?:可用积分|points)/i);
@@ -1365,12 +1385,15 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
         log(f'积分领取成功已入账！余额从 {bal_before} 增至 {bal_after} (+{gained}分)')
         return f'成功领取{gained}分(余额:{bal_after})'
 
-    card_still_there = ev(cdp, f"!!({claim_card_js})")
-    if not card_still_there:
-        log(f'已提交领取请求，卡片已核销 (预计 +{total_claimable}分，等待入账)')
-        return f'已提交领取{total_claimable}分(待入账)'
+    card_after = ev(cdp, f"({claim_card_js}) ? ({claim_card_js}).innerText.replace(/\\s+/g, ' ').trim() : ''")
+    m_after = re.search(r'(\d+)', card_after)
+    rem_pts = int(m_after.group(1)) if m_after else 0
+    if not card_after or rem_pts == 0:
+        log(f'已完成积分领取，卡片已核销 (原{total_claimable}分)')
+        return f'成功领取{total_claimable}分'
 
-    return f'领取结算中(约{total_claimable}分)'
+    log(f'卡片仍显示待领取 ({card_after})，可能由于代理网络延迟或服务端排队，将在回补阶段复检')
+    return f'领取结算中(约{rem_pts}分)'
 
 
 def auto_activate_streaks(cdp, ch=None, log=print):
