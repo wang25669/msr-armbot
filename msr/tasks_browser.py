@@ -13,7 +13,7 @@ import re
 import time
 import urllib.parse
 
-from msr.browser import ev, navigate, StepError, human_click, close_tab
+from msr.browser import ev, navigate, StepError, human_click, close_tab, tab_ids, _http_json
 
 
 def bing_domain(pr):
