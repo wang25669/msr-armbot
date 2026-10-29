@@ -167,6 +167,8 @@ def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger, t
                                 used_path=config.pfile(name, 'visual_used.json'))
     if p in ('claim', 'pointclaim', 'claimpoints'):
         return tb.phase_claim(name, cdp, pr, ch=ch, log=logger)
+    if p in ('perks', 'perk', 'activate', 'promotions', 'promotion'):
+        return tb.phase_perks(name, cdp, pr, ch=ch, log=logger)
     return '未知浏览器阶段 %s' % phase
 
 

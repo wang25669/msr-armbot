@@ -113,13 +113,15 @@ def search_counters_api(pr):
 
 
 def search_counters_dom(cdp):
-    """通过 dashboard #streaks 检查搜索打卡状态。"""
+    """通过 dashboard #streaks 或积分明细弹窗检查搜索打卡状态(兼容 2X 翻倍说明)。"""
     try:
         res = ev(cdp, """(() => {
-          const st = document.getElementById("streaks");
-          if (!st) return null;
-          const text = st.innerText;
-          const m = text.match(/(?:搜索|search|pc\\s*search|pc)\\s*[:：]?\\s*(\\d+)\\s*\\/\\s*(\\d+)/i);
+          const el = document.getElementById("streaks") || 
+                     document.querySelector('[role="dialog"], #modal-host, [class*="modal" i]') || 
+                     document.body;
+          if (!el) return null;
+          const text = el.innerText;
+          const m = text.match(/(?:搜索|search|pc\\s*search|pc)[^\\d/]*?(\\d+)\\s*\\/\\s*(\\d+)/i);
           if (m) {
             return { progress: parseInt(m[1]), max: parseInt(m[2]), complete: parseInt(m[1]) >= parseInt(m[2]) };
           }
@@ -152,6 +154,8 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
     c_api = search_counters_api(pr)
     target_max = (c_api or {}).get('max', 60)
     current_prog = (c_api or {}).get('progress', 0)
+    if target_max > 60:
+        hard_cap = max(hard_cap, int((target_max / 5) * 1.5))
     if c_api and (c_api.get('complete') or current_prog >= target_max):
         log('PC搜索已满额: %d/%d (根据促销属性)' % (current_prog, target_max))
         return '%d/%d' % (current_prog, target_max)
@@ -1474,29 +1478,80 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
     return f'领取结算中(约{rem_pts}分)'
 
 
-def auto_activate_streaks(cdp, ch=None, log=print):
-    """自动扫描并激活 rewards 页面上所有待激活的连续打卡任务 (Streak)。
+def auto_activate_promotions_and_streaks(cdp, ch=None, log=print):
+    """自动扫描并激活 rewards 页面上所有待激活的福利特权、促销活动与连续打卡任务 (Perks & Streaks)。
     
-    兼容 Visual Search Streak, Edge Browsing Streak, Bing Search Streak, Bing App Streak 等。
-    若页面卡片显示“如何激活”/“How to activate”/“Activate streak”，自动展开抽屉并点击激活。
+    通用任务信息提取与自适应处理：
+      - 任务识别: 提取标题、描述、收益类别 (如 double_search/edge_streak/visual_streak/general_promo)、CTA文字与目标URL。
+      - 任务类型覆盖:
+        1. 福利与特权解锁 (Perk Unlocked / 福利已解锁):
+           如“限时每天搜索次数翻倍，赚取更多积分” (2X search opt-in, WW_banner_optin_*) 等弹出窗口激活任务。
+        2. 连续打卡任务 (Streaks):
+           Edge Browsing Streak, Visual Search Streak, Bing Search Streak 等侧边抽屉/弹窗激活任务。
+        3. 其他未激活但可立即参与的限时特惠活动 (Limited-time Promotional Opt-ins)。
+      - 状态防护: 自动排除已完成 (Completed / 已完成 / Activated / 已激活) 的卡片，避免重复触发。
+      - 交互闭环: 模拟真人点击卡片展开弹窗 -> 提取并记录通用任务详情 -> 点击弹出窗口内的“立即激活”/“Activate” -> 处理外部/落地页跳转与原生双重触发 -> 安全关闭弹窗。
     """
-    find_streaks_js = '''(() => {
+    find_tasks_js = '''(() => {
       const results = [];
-      const btns = Array.from(document.querySelectorAll('button, div[role="button"], a'));
-      for (const b of btns) {
-        const t = (b.innerText || '').toLowerCase();
-        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-        const pText = (b.parentElement ? b.parentElement.innerText || '' : '').toLowerCase();
-        const combined = t + ' ' + aria + ' ' + pText;
-        if (/\\b(?:activate\\s*streak|activate\\s*now|how to activate|如何激活|立即激活|待激活|inactive|pending activation|开始连续打卡|start streak|join streak)\\b/i.test(combined) || 
-            (/\\b(?:activate|激活|开启|加入)\\b/i.test(t) && !/\\bactivated\\b/i.test(t) && /streak|打卡/i.test(combined))) {
-          const cardTitle = b.querySelector('p, h2, h3, div')?.innerText || b.innerText.slice(0, 30);
+      const clickables = Array.from(document.querySelectorAll('button, div[role="button"], a, span[role="link"], [data-react-aria-pressable="true"], [role="button"], [role="link"]'));
+      
+      const perkPattern = /(?:福利已解锁|福利解锁|特权已解锁|特权解锁|搜索次数翻倍|搜索翻倍|限时翻倍|每日搜索翻倍|双倍积分|限时特惠|限时福利|perk\\s*unlocked|perks\\s*unlocked|benefit\\s*unlocked|reward\\s*unlocked|double\\s*search|2x\\s*search|search\\s*2x|double\\s*daily\\s*search|2x\\s*points|opt[\\s-]?in|limited\\s*time\\s*search)/i;
+      const streakPattern = /(?:activate\\s*streak|how\\s*to\\s*activate|如何激活|开始连续打卡|start\\s*streak|join\\s*streak|inactive|pending\\s*activation)/i;
+      const activateCtaPattern = /(?:立即激活|activate\\s*now|activate|激活|开启|加入)/i;
+      const completedPattern = /(?:completed|已完成|activated|已激活|claimed|已领取)/i;
+
+      const seenIds = new Set();
+
+      for (const b of clickables) {
+        const t = (b.innerText || '').trim();
+        const aria = (b.getAttribute('aria-label') || '').trim();
+        const alt = (b.querySelector('img')?.getAttribute('alt') || '').trim();
+        const pText = (b.parentElement ? b.parentElement.innerText || '' : '').trim();
+        const combined = (t + ' ' + aria + ' ' + alt + ' ' + pText).replace(/\\s+/g, ' ');
+
+        // 排除已完成状态 (如果整个文字块明确显示已完成且无激活按钮，则跳过)
+        if (completedPattern.test(t) || (completedPattern.test(combined) && !activateCtaPattern.test(t) && !perkPattern.test(t))) {
+          continue;
+        }
+
+        const isPerk = perkPattern.test(combined);
+        const isStreak = streakPattern.test(combined) || (activateCtaPattern.test(t) && /streak|打卡/i.test(combined));
+        const isGenericActivate = activateCtaPattern.test(t) && !completedPattern.test(combined);
+
+        if (isPerk || isStreak || isGenericActivate) {
+          const cardTitle = b.querySelector('p, h1, h2, h3, [class*="title" i], [class*="Strong" i]')?.innerText || 
+                            alt || 
+                            t.split('\\n')[0] || 
+                            t.slice(0, 30);
+          const cardDesc = Array.from(b.querySelectorAll('p, span, div'))
+                            .map(el => (el.innerText || '').trim())
+                            .filter(txt => txt && txt !== cardTitle && !completedPattern.test(txt) && txt.length > 5)[0] || '';
+
+          const cid = b.id || (cardTitle + '_' + (isPerk ? 'perk' : 'streak'));
+          if (seenIds.has(cid)) continue;
+          seenIds.add(cid);
+
+          const isDouble = /翻倍|double|2x/i.test(combined);
+          const isEdge = /edge|browsing/i.test(combined);
+          const isVisual = /visual|视觉/i.test(combined);
+
+          let benefitCategory = 'general_promo';
+          if (isDouble) benefitCategory = 'double_search';
+          else if (isEdge) benefitCategory = 'edge_streak';
+          else if (isVisual) benefitCategory = 'visual_streak';
+
           results.push({
-            id: b.id,
+            id: b.id || null,
             title: cardTitle.replace(/\\n/g, ' ').trim(),
-            fullText: b.innerText.replace(/\\n/g, ' ').trim(),
-            isEdge: /edge|browsing/i.test(combined),
-            isVisual: /visual|视觉/i.test(combined)
+            description: cardDesc.replace(/\\n/g, ' ').trim(),
+            fullText: t.replace(/\\n/g, ' ').trim(),
+            isPerk: isPerk,
+            isStreak: isStreak,
+            isDoubleSearch: isDouble,
+            isEdge: isEdge,
+            isVisual: isVisual,
+            category: benefitCategory
           });
         }
       }
@@ -1505,108 +1560,183 @@ def auto_activate_streaks(cdp, ch=None, log=print):
 
     navigate(cdp, 'https://rewards.bing.com/earn')
     time.sleep(random.uniform(2.5, 4.0))
-    unactivated = ev(cdp, find_streaks_js) or []
+    unactivated = ev(cdp, find_tasks_js) or []
 
     if not unactivated:
         # 回退至 dashboard 页面进行二次扫描
         navigate(cdp, 'https://rewards.bing.com/dashboard')
         time.sleep(random.uniform(2.5, 3.5))
-        unactivated = ev(cdp, find_streaks_js) or []
+        unactivated = ev(cdp, find_tasks_js) or []
 
     if not unactivated:
         return []
 
-    log('[Streak 自动激活] 发现 %d 个待激活打卡任务: %s' % (len(unactivated), [u['title'] for u in unactivated]))
+    log('[特权与打卡自动激活] 发现 %d 个待激活任务: %s' % (
+        len(unactivated), ['%s (%s)' % (u['title'], u['category']) for u in unactivated]))
     activated_types = []
 
     for s in unactivated:
         title = s['title']
-        log('>>> 正在激活连续打卡任务: %s...' % title)
-        # 点击展开卡片抽屉
+        cat = s['category']
+        log('>>> 正在激活任务: %s (分类: %s)...' % (title, cat))
+        
+        # 提取并记录通用任务信息
+        log('[通用任务信息] 标题: "%s" | 收益描述: "%s" | 类别: %s' % (
+            title, s.get('description') or s.get('fullText', '')[:60], cat))
+
+        # 点击展开卡片抽屉/弹窗 (兼容 id、innerText、alt 匹配，并定位到真正的可点击外层元素)
         click_card_js = ('''(() => {
-          const btns = Array.from(document.querySelectorAll('button, div[role="button"], a'));
-          const btn = btns.find(b => (b.innerText || '').includes(%s) || (b.id && b.id === %s));
-          if (btn) { btn.click(); return true; }
+          const clickables = Array.from(document.querySelectorAll('button, div[role="button"], a, span[role="link"], [data-react-aria-pressable="true"], [role="button"], [role="link"]'));
+          const targetTitle = %s;
+          const targetId = %s;
+          for (const b of clickables) {
+            const t = (b.innerText || '');
+            const alt = b.querySelector('img')?.getAttribute('alt') || '';
+            if ((targetId && b.id === targetId) || t.includes(targetTitle) || alt.includes(targetTitle)) {
+              let clickable = b;
+              while (clickable && clickable !== document.body) {
+                if (clickable.getAttribute('role') === 'link' || 
+                    clickable.getAttribute('role') === 'button' ||
+                    clickable.tagName === 'BUTTON' ||
+                    clickable.tagName === 'A' ||
+                    clickable.getAttribute('tabindex') === '0' ||
+                    clickable.getAttribute('data-react-aria-pressable') === 'true') {
+                  break;
+                }
+                clickable = clickable.parentElement;
+              }
+              const target = clickable || b;
+              target.scrollIntoView({behavior: 'instant', block: 'center'});
+              target.click();
+              return true;
+            }
+          }
           return false;
         })()''' % (json.dumps(title), json.dumps(s.get('id') or '')))
-        
-        opened = ev(cdp, click_card_js)
-        time.sleep(random.uniform(1.8, 2.8))
 
+        opened = ev(cdp, click_card_js)
+        time.sleep(random.uniform(2.0, 3.0))
+
+        # 抽屉/弹窗内部目标激活按钮扫描与元数据提取
         act_target_js = '''(() => {
-          const dialog = document.querySelector('[role="dialog"], section[role="dialog"]');
+          const dialog = document.querySelector('dialog, [role="dialog"], [role="alertdialog"], section[role="dialog"], [class*="modal" i]');
           if (!dialog) return null;
-          const cand = Array.from(dialog.querySelectorAll('a, button')).find(el => {
+          const cand = Array.from(dialog.querySelectorAll('a, button, [role="button"]')).find(el => {
             const t = (el.innerText || '').toLowerCase();
             const h = (el.getAttribute('href') || '').toLowerCase();
-            return t.includes('激活') || t.includes('activate') || t.includes('start') || t.includes('开启') || t.includes('加入') || h.includes('features=vsstreak') || h.includes('features=') || h.includes('streak');
+            return t.includes('激活') || t.includes('activate') || t.includes('start') || t.includes('开启') || t.includes('加入') || 
+                   h.includes('features=vsstreak') || h.includes('features=') || h.includes('streak') || 
+                   h.includes('modal=pointbreakdown') || h.includes('form=ML2XVP') || h.includes('optin');
           });
           if (cand) {
-            return {tag: cand.tagName, href: cand.href || null, text: (cand.innerText || '').trim()};
+            return {
+              tag: cand.tagName, 
+              href: cand.href || cand.getAttribute('href') || null, 
+              text: (cand.innerText || '').trim(),
+              dialogTitle: dialog.querySelector('h1, h2, h3, p, [class*="title" i]')?.innerText || '',
+              dialogText: (dialog.innerText || '').slice(0, 300)
+            };
           }
           return null;
         })()'''
         target = ev(cdp, act_target_js)
         if target:
-            log('检测到激活操作: %s -> %s' % (target.get('text'), target.get('href') or '按钮'))
+            log('[弹窗任务确认] 检测到激活操作: %s -> %s (弹窗标题: "%s")' % (
+                target.get('text'), target.get('href') or 'DOM按钮', target.get('dialogTitle') or title))
             target_url = target.get('href')
-            if target_url and ch:
-                try:
-                    if target_url.lower().startswith('microsoft-edge:'):
-                        target_url = re.sub(r'^microsoft-edge:(?://)?', '', target_url, flags=re.I)
-                        if not target_url.startswith('http'):
-                            target_url = 'https://' + target_url
-                    new_tab = ch.new_tab(target_url)
-                    time.sleep(random.uniform(4.0, 6.0))
-                    # 若落地页包含进一步确认激活按钮 (如 Edge 打卡落地页的“开始在 Edge 上浏览”按钮)，模拟真人点击
-                    try:
-                        new_cdp = ch.attach(new_tab)
-                        ev(new_cdp, '''(() => {
-                          const a = Array.from(document.querySelectorAll('a, button')).find(el => {
-                            const h = el.getAttribute('href') || el.href || '';
-                            const t = (el.innerText || '').trim();
-                            return h.includes('rwgbopen=1') || t === '开始' || t === 'Get started' || t.includes('开始在 Edge 上浏览');
-                          });
-                          if (a) a.click();
-                        })()''')
-                        time.sleep(random.uniform(2.5, 4.0))
-                    except Exception:
-                        pass
-                    ch.close_tab(new_tab.get('id'))
-                except Exception as ex:
-                    log('激活访问新标签异常: %s' % ex)
-            
-            # 双重保障：在当前抽屉 DOM 中触发原生点击事件以确保 React 状态同步
+
+            # 优先在当前弹窗中触发原生点击
             try:
                 ev(cdp, '''(() => {
-                  const dialog = document.querySelector('[role="dialog"], section[role="dialog"]');
+                  const dialog = document.querySelector('dialog, [role="dialog"], [role="alertdialog"], section[role="dialog"], [class*="modal" i]');
                   if (!dialog) return;
-                  const cand = Array.from(dialog.querySelectorAll('button, a')).find(el => {
+                  const cand = Array.from(dialog.querySelectorAll('button, a, [role="button"]')).find(el => {
                     const t = (el.innerText || '').toLowerCase();
-                    return t.includes('激活') || t.includes('activate') || t.includes('start') || t.includes('开启') || t.includes('加入');
+                    const h = (el.getAttribute('href') || '').toLowerCase();
+                    return t.includes('激活') || t.includes('activate') || t.includes('start') || t.includes('开启') || t.includes('加入') ||
+                           h.includes('features=vsstreak') || h.includes('features=') || h.includes('streak') || 
+                           h.includes('modal=pointbreakdown') || h.includes('form=ML2XVP') || h.includes('optin');
                   });
                   if (cand) cand.click();
                 })()''')
-                time.sleep(3.0)
+                time.sleep(2.5)
             except Exception as ex:
                 log('点击激活按钮异常: %s' % ex)
 
+            # 若激活目标包含特定链接，执行新标签或直接导航兜底
+            if target_url:
+                try:
+                    if target_url.lower().startswith('microsoft-edge:'):
+                        real_url = re.sub(r'^microsoft-edge:(?://)?', '', target_url, flags=re.I)
+                        if not real_url.startswith('http'):
+                            real_url = 'https://' + real_url
+                        if ch:
+                            new_tab = ch.new_tab(real_url)
+                            time.sleep(random.uniform(4.0, 6.0))
+                            try:
+                                new_cdp = ch.attach(new_tab)
+                                ev(new_cdp, '''(() => {
+                                  const a = Array.from(document.querySelectorAll('a, button')).find(el => {
+                                    const h = el.getAttribute('href') || el.href || '';
+                                    const t = (el.innerText || '').trim();
+                                    return h.includes('rwgbopen=1') || t === '开始' || t === 'Get started' || t.includes('开始在 Edge 上浏览');
+                                  });
+                                  if (a) a.click();
+                                })()''')
+                                time.sleep(random.uniform(2.5, 4.0))
+                            except Exception:
+                                pass
+                            ch.close_tab(new_tab.get('id'))
+                    elif 'modal=pointbreakdown' in target_url or 'form=ML2XVP' in target_url or 'optin' in target_url:
+                        curr_url = ev(cdp, 'window.location.href') or ''
+                        if 'form=ML2XVP' not in curr_url and 'modal=pointbreakdown' not in curr_url:
+                            navigate(cdp, target_url)
+                            time.sleep(random.uniform(3.0, 5.0))
+                    elif ch:
+                        new_tab = ch.new_tab(target_url)
+                        time.sleep(random.uniform(3.0, 5.0))
+                        ch.close_tab(new_tab.get('id'))
+                except Exception as ex:
+                    log('激活访问目标URL异常: %s' % ex)
+
+            # 记录激活类型
+            if s.get('isDoubleSearch') or cat == 'double_search' or '翻倍' in title or '2x' in title.lower():
+                activated_types.extend(['double_search', 'search_2x', 'perk'])
             if s.get('isEdge') or 'edge' in title.lower() or 'browsing' in title.lower():
                 activated_types.append('edge')
             if s.get('isVisual') or 'visual' in title.lower() or '视觉' in title:
                 activated_types.append('visual')
-            log('已成功激活 Streak: %s' % title)
-            
-            # 关闭抽屉
-            ev(cdp, '''(() => {
-              const dialog = document.querySelector('[role="dialog"], section[role="dialog"]');
-              if (!dialog) return;
-              const cls = dialog.querySelector('button[aria-label*="关闭" i], button[aria-label*="close" i], button.group\\\\/ctrl');
-              if (cls) cls.click();
-            })()''')
-            time.sleep(1.0)
+            if s.get('isPerk') or 'perk' in title.lower() or '福利' in title:
+                activated_types.append('perk')
+
+            log('已成功激活特权/任务: %s' % title)
+
+            # 关闭抽屉/弹窗
+            try:
+                ev(cdp, '''(() => {
+                  const dialog = document.querySelector('dialog, [role="dialog"], [role="alertdialog"], section[role="dialog"], [class*="modal" i]');
+                  if (!dialog) return;
+                  const cls = dialog.querySelector('button[aria-label*="关闭" i], button[aria-label*="close" i], button.group\\\\/ctrl') ||
+                              Array.from(dialog.querySelectorAll('button')).find(b => (b.innerText || '').trim().toLowerCase() === 'close');
+                  if (cls) cls.click();
+                })()''')
+                time.sleep(1.0)
+            except Exception:
+                pass
         else:
-            log('未能定位到抽屉激活按钮或该卡片已激活')
+            log('未能定位到弹窗激活按钮或该卡片已激活')
 
     return list(set(activated_types))
+
+
+auto_activate_streaks = auto_activate_promotions_and_streaks
+
+
+def phase_perks(name, cdp, pr, ch=None, log=print):
+    """浏览器阶段: 扫描并激活所有待激活的福利特权与促销活动 (Perks & Promotions)。"""
+    activated = auto_activate_promotions_and_streaks(cdp, ch=ch, log=log)
+    if activated:
+        return '成功激活%d项特权/促销(%s)' % (len(activated), ', '.join(activated))
+    return '无可激活福利/特权(跳过)'
+
 

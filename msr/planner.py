@@ -21,6 +21,7 @@ TASK_TABLE = {
     'morePromotions':                {'phase': 'moreactivities', 'needs': 'browser'},
     'visualSearch':                  {'phase': 'visual',         'needs': 'browser', 'optional': True},
     'pointClaim':                    {'phase': 'claim',          'needs': 'browser', 'optional': True},
+    'perks':                         {'phase': 'perks',          'needs': 'browser', 'optional': True},
     'edge_browsing_streak_flight':   {'phase': 'edge30m',        'needs': 'api'},
     'edge_browsing_streak_eligible': {'phase': 'edge30m',        'needs': 'api'},
     'app_checkin':                   {'phase': 'appcheckin',     'needs': 'api'},
@@ -52,7 +53,12 @@ ALIAS_MAP = {
     'visual': 'visual',
     'claim': 'claim',
     'pointclaim': 'claim',
-    'claimpoints': 'claim'
+    'claimpoints': 'claim',
+    'perk': 'perks',
+    'perks': 'perks',
+    'activate': 'perks',
+    'promotion': 'perks',
+    'promotions': 'perks'
 }
 
 
@@ -80,6 +86,8 @@ def classify(promo_name):
         return promo_name
     if 'readarticle' in promo_name:
         return 'ENUS_readarticle3_30points'
+    if 'optin' in promo_name.lower() or 'perk' in promo_name.lower() or 'banner_optin' in promo_name.lower():
+        return 'perks'
     return None
 
 

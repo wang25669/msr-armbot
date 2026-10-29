@@ -292,9 +292,17 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
             if bsess and bsess.is_authenticated:
                 try:
                     from msr import tasks_browser as tb
-                    bsess.newly_activated = tb.auto_activate_streaks(bsess.cdp, ch=bsess.ch, log=bsess.logger)
+                    bsess.newly_activated = tb.auto_activate_promotions_and_streaks(bsess.cdp, ch=bsess.ch, log=bsess.logger)
+                    if any(a in ('double_search', 'search_2x', 'perk') for a in bsess.newly_activated):
+                        bsess.logger('检测到已激活搜索翻倍等特权，正在刷新账户促销状态以生效新的搜索上限...')
+                        try:
+                            from msr import probe
+                            pr = probe.probe_account(name, token, proxy=proxy)
+                            bsess.pr = pr
+                        except Exception as ex_pr:
+                            bsess.logger(f'刷新账户促销状态异常(容忍): {ex_pr}')
                 except Exception as ex_act:
-                    bsess.logger(f'自动激活 Streak 检查异常: {ex_act}')
+                    bsess.logger(f'自动激活福利与 Streak 检查异常: {ex_act}')
 
         except Exception as ex_b_pre:
             config.log(name, f'前置浏览器检测异常: {ex_b_pre}')
@@ -362,6 +370,19 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
             bsess = executor.BrowserSession(name, token, pr, p, config,
                                             proxy=proxy, cdp_port=cdp_port)
             bsess.start()
+            try:
+                from msr import tasks_browser as tb
+                bsess.newly_activated = tb.auto_activate_promotions_and_streaks(bsess.cdp, ch=bsess.ch, log=bsess.logger)
+                if any(a in ('double_search', 'search_2x', 'perk') for a in bsess.newly_activated):
+                    bsess.logger('检测到已激活搜索翻倍等特权，正在刷新账户促销状态以生效新的搜索上限...')
+                    try:
+                        from msr import probe
+                        pr = probe.probe_account(name, token, proxy=proxy)
+                        bsess.pr = pr
+                    except Exception as ex_pr:
+                        bsess.logger(f'刷新账户促销状态异常(容忍): {ex_pr}')
+            except Exception as ex_act:
+                bsess.logger(f'自动激活福利与 Streak 检查异常: {ex_act}')
             b_results = bsess.run_phases(browser_phases)
             results_map.update(b_results)
 
