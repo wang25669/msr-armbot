@@ -139,43 +139,11 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
     proxy = acc_cfg.get('proxy')
     cdp_port = acc_cfg.get('cdp_port')
 
-    # 1. 自动凭据自愈：若无 Token 但有 Cookie，自动尝试静默换取并固化
-    if not tok.get('refresh_token') and has_cookie:
-        config.log(name, '检测到缺少 OAuth Token，正在利用 Cookie 静默自动生成...')
-        new_tok = auth.exchange_token_from_cookies(name, proxy=proxy)
-        if new_tok:
-            tok = new_tok
-            rg = config.load_json(config.pfile(name, 'region.json')) or {}
-
-    has_token = bool(tok.get('refresh_token') or tok.get('access_token'))
-    if not has_token:
-        # 若仍无有效 Token（无 Cookie 或 Cookie 换取 Token 失败），尝试使用保存的 MSR 账号密码进行后台重登自愈
-        cred = config.get_credential(name)
-        if cred and cred.get('username') and cred.get('password'):
-            config.log(name, '检测到 Token 与可用会话均缺失，正在使用保存的 MSR 凭据尝试后台全自动登录自愈...')
-            try:
-                res = auth.login_with_credential(name, cred['username'], cred['password'], proxy=proxy,
-                                                 log_cb=lambda m: config.log(name, m))
-                if res.get('status') == 'success':
-                    config.log(name, '全自动登录自愈成功！凭据与 Cookie 已刷新就绪。')
-                    tok = config.load_json(config.pfile(name, 'token.json')) or {}
-                    rg = config.load_json(config.pfile(name, 'region.json')) or {}
-                    has_cookie = os.path.isfile(ck_path) and bool(config.load_json(ck_path))
-                    has_token = bool(tok.get('refresh_token') or tok.get('access_token'))
-                else:
-                    config.log(name, f'后台静默重登未完成: {res.get("error")}')
-                    if notify:
-                        notify.notify(f'MSR 凭据需接管 [{name}]', f'账号 {name} 自动重登需用户配合质询: {res.get("error")}\n请前往 Web 控制台接管登录。', level='warning')
-            except Exception as ex_relogin:
-                config.log(name, f'后台自愈重登异常: {ex_relogin}')
-
-    if not has_token and not has_cookie:
-        raise RuntimeError('无可用登录凭据 (未配置账号密码、Cookie 或 Token)，先 msr login %s' % name)
-
-    config.log(name, '=== 运行开始 (proxy=%s cdp_port=%s) ===' % (proxy or '直连', cdp_port or '内置'))
-
+    # 1. 前置 Token 获取与验证 (OAuth 2.0 REST 凭据体系)
     token = None
     pr = None
+    has_token = bool(tok.get('refresh_token') or tok.get('access_token'))
+
     if has_token:
         try:
             token = api.refresh_access(name, p, rg, proxy=proxy)
@@ -183,52 +151,59 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
             pr['probed_at'] = time.strftime('%F %T')
             config.save_json(config.pfile(name, 'region.json'), pr)
             config.log(name, 'region=%s balance=%s' % (pr['country'], pr.get('balance')))
-        except Exception as ex:
-            config.log(name, f'Token 刷新/探测失败: {ex}')
-            repaired = False
+        except Exception as ex_tok:
+            config.log(name, f'Token 刷新/探测失败: {ex_tok}')
+            token = None
+            has_token = False
 
-            # 第一级自愈：Token 失效时，优先尝试拿本地现有 Cookie 静默换取新 Token
-            if has_cookie:
-                config.log(name, 'Token 失效，优先尝试使用现有 Cookie 静默换取新 Token...')
+    # 若初始无 Token 或 Token 刷新失败，尝试自愈：优先 Cookie 静默换取，次选账号密码登录
+    if not token:
+        if has_cookie:
+            config.log(name, 'Token 失效，优先尝试使用现有 Cookie 静默换取新 Token...')
+            try:
+                new_tok = auth.exchange_token_from_cookies(name, proxy=proxy)
+                if new_tok and (new_tok.get('refresh_token') or new_tok.get('access_token')):
+                    tok = new_tok
+                    rg = config.load_json(config.pfile(name, 'region.json'), {}) or {}
+                    token = api.refresh_access(name, p, rg, proxy=proxy)
+                    pr = probe.probe_account(name, token, proxy=proxy)
+                    pr['probed_at'] = time.strftime('%F %T')
+                    config.save_json(config.pfile(name, 'region.json'), pr)
+                    has_token = True
+                    config.log(name, '通过 Cookie 静默换取 Token 自愈成功！重新获取 region=%s balance=%s' % (pr['country'], pr.get('balance')))
+                else:
+                    config.log(name, '通过 Cookie 静默换取 Token 未能成功 (可能 Cookie 亦已失效或会话过期)')
+            except Exception as ex_ck:
+                config.log(name, f'通过 Cookie 静默换取 Token 异常: {ex_ck}')
+
+        if not token:
+            cred = config.get_credential(name)
+            if cred and cred.get('username') and cred.get('password'):
+                config.log(name, 'Cookie 亦不可用，正在使用保存的凭据尝试全自动重新登录并自愈...')
                 try:
-                    new_tok = auth.exchange_token_from_cookies(name, proxy=proxy)
-                    if new_tok and (new_tok.get('refresh_token') or new_tok.get('access_token')):
-                        tok = new_tok
+                    res = auth.login_with_credential(name, cred['username'], cred['password'], proxy=proxy,
+                                                     log_cb=lambda m: config.log(name, m))
+                    if res.get('status') in ('ok', 'success'):
+                        tok = config.load_json(config.pfile(name, 'token.json')) or {}
                         rg = config.load_json(config.pfile(name, 'region.json')) or {}
+                        has_cookie = os.path.isfile(ck_path) and bool(config.load_json(ck_path))
                         token = api.refresh_access(name, p, rg, proxy=proxy)
                         pr = probe.probe_account(name, token, proxy=proxy)
                         pr['probed_at'] = time.strftime('%F %T')
                         config.save_json(config.pfile(name, 'region.json'), pr)
-                        config.log(name, '通过 Cookie 静默换取 Token 自愈成功！重新获取 region=%s balance=%s' % (pr['country'], pr.get('balance')))
-                        repaired = True
+                        has_token = True
+                        config.log(name, '自愈重登成功！重新获取 region=%s balance=%s' % (pr['country'], pr.get('balance')))
                     else:
-                        config.log(name, '通过 Cookie 静默换取 Token 未能成功 (可能 Cookie 亦已失效或会话过期)')
-                except Exception as ex_ck:
-                    config.log(name, f'通过 Cookie 静默换取 Token 异常: {ex_ck}')
+                        config.log(name, f'后台静默重登未完成: {res.get("error") or res.get("message")}')
+                        if notify:
+                            notify.notify(f'MSR 凭据需接管 [{name}]', f'账号 {name} 自动重登需用户配合质询: {res.get("error") or res.get("message")}\n请前往 Web 控制台接管登录。', level='warning')
+                except Exception as ex2:
+                    config.log(name, f'自愈重登尝试未成功: {ex2}')
 
-            # 第二级自愈：若 Cookie 也失效或未能换取成功，再使用保存的账号密码重新登录
-            if not repaired:
-                cred = config.get_credential(name)
-                if cred and cred.get('username') and cred.get('password'):
-                    config.log(name, 'Cookie 亦不可用，正在使用保存的凭据尝试全自动重新登录并自愈...')
-                    try:
-                        res = auth.login_with_credential(name, cred['username'], cred['password'], proxy=proxy,
-                                                         log_cb=lambda m: config.log(name, m))
-                        if res.get('status') == 'success':
-                            tok = config.load_json(config.pfile(name, 'token.json')) or {}
-                            rg = config.load_json(config.pfile(name, 'region.json')) or {}
-                            has_cookie = os.path.isfile(ck_path) and bool(config.load_json(ck_path))
-                            token = api.refresh_access(name, p, rg, proxy=proxy)
-                            pr = probe.probe_account(name, token, proxy=proxy)
-                            pr['probed_at'] = time.strftime('%F %T')
-                            config.save_json(config.pfile(name, 'region.json'), pr)
-                            config.log(name, '自愈重登成功！重新获取 region=%s balance=%s' % (pr['country'], pr.get('balance')))
-                            repaired = True
-                    except Exception as ex2:
-                        config.log(name, f'自愈重登尝试未成功: {ex2}')
+    if not has_token and not has_cookie:
+        raise RuntimeError('无可用登录凭据 (未配置账号密码、Cookie 或 Token)，先 msr login %s' % name)
 
-            if not has_cookie and not token:
-                raise
+    config.log(name, '=== 运行开始 (proxy=%s cdp_port=%s) ===' % (proxy or '直连', cdp_port or '内置'))
 
     if not pr:
         # 纯 Cookie 模式：跳过 API 阶段，全额执行浏览器搜索与卡片活动
@@ -251,6 +226,98 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
 
     api_phases = [w['phase'] for w in plan if w['needs'] == 'api']
     browser_phases = [w['phase'] for w in plan if w['needs'] == 'browser']
+
+    bsess = None
+    degraded_mode = False
+
+    # 浏览器前置测活与自愈门禁 (单进程原地自愈 + 优雅降级)
+    if browser_phases:
+        try:
+            bsess = executor.BrowserSession(name, token, pr or rg, p, config,
+                                            proxy=proxy, cdp_port=cdp_port)
+            bsess.start()
+            is_healthy, bal_or_none, reason = bsess.check_login_state(timeout=25, max_retries=1)
+            if is_healthy:
+                bsess.is_authenticated = True
+                config.log(name, f'浏览器会话确认健康有效 (当前余额: {bal_or_none})')
+            elif reason == 'SESSION_EXPIRED':
+                config.log(name, '检测到浏览器会话已失效 (Cookie过期或重定向至登录页)，正在执行原地自动登录自愈...')
+                cred = config.get_credential(name)
+                relogin_ok = False
+                if cred and cred.get('username') and cred.get('password'):
+                    relogin_ok, relogin_res = bsess.in_situ_relogin(cred['username'], cred['password'], timeout=180)
+                    if relogin_ok:
+                        config.log(name, '原地自动登录自愈成功！全套凭据已刷新就绪。')
+                        try:
+                            token = api.refresh_access(name, p, rg, proxy=proxy)
+                            pr = probe.probe_account(name, token, proxy=proxy)
+                            bsess.token = token
+                            bsess.pr = pr
+                        except Exception as ex_ref:
+                            config.log(name, f'重登后Token刷新容错: {ex_ref}')
+                    else:
+                        err_detail = (relogin_res.get('error') or relogin_res.get('message') or '未知')[:80]
+                        config.log(name, f'原地自愈重登未能完成: {err_detail}')
+                        if notify:
+                            notify.notify(f'MSR 需接管登录 [{name}]', f'账号 {name} 自动重登需人工质询: {err_detail}\n请前往 Web 控制台接管登录。', level='warning')
+                else:
+                    config.log(name, '未配置账号密码凭据，无法执行原地全自动重登')
+                    if notify:
+                        notify.notify(f'MSR 会话过期 [{name}]', f'账号 {name} 浏览器 Cookie 已失效，且未配置账号密码。请前往控制台重新登录。', level='warning')
+
+                if not relogin_ok:
+                    if token:
+                        config.log(name, 'Cookie 会话失效且重登未成，但 OAuth Token 仍有效：优雅降级仅执行 API 阶段')
+                        degraded_mode = True
+                        bsess.degraded_mode = True
+                        try:
+                            bsess.close()
+                        except Exception:
+                            pass
+                        bsess = None
+                        for bph in browser_phases:
+                            results_map[bph] = '失败(会话失效)'
+                        browser_phases = []
+                    else:
+                        try:
+                            bsess.close()
+                        except Exception:
+                            pass
+                        bsess = None
+                        raise RuntimeError('无可用登录凭据 (Token 与 Cookie 均已失效，自动重登未成功)')
+
+            elif reason == 'NETWORK_ERROR':
+                config.log(name, '前置测活遇到网络/代理超时或连接故障，按网络环境异常容错处理 (不触发重登)')
+
+            if bsess and bsess.is_authenticated:
+                try:
+                    from msr import tasks_browser as tb
+                    bsess.newly_activated = tb.auto_activate_streaks(bsess.cdp, ch=bsess.ch, log=bsess.logger)
+                except Exception as ex_act:
+                    bsess.logger(f'自动激活 Streak 检查异常: {ex_act}')
+
+        except Exception as ex_b_pre:
+            config.log(name, f'前置浏览器检测异常: {ex_b_pre}')
+            if token and not degraded_mode:
+                config.log(name, '浏览器前置异常但 Token 有效，已降级为仅执行 API 阶段')
+                degraded_mode = True
+                if bsess:
+                    try:
+                        bsess.close()
+                    except Exception:
+                        pass
+                bsess = None
+                for bph in browser_phases:
+                    results_map[bph] = '失败(会话失效)'
+                browser_phases = []
+            elif not token:
+                if bsess:
+                    try:
+                        bsess.close()
+                    except Exception:
+                        pass
+                bsess = None
+                raise
 
     # 1. 优先串行执行极速 API 任务 (appcheckin, appread)
     fast_api = [ph for ph in api_phases if ph not in ('edge30m', 'edge_api', 'edge')]
@@ -286,10 +353,12 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
         else:
             edge_worker()
 
-    bsess = None
     try:
         # 3. 前台启动单个浏览器会话，真人流转依次执行该账号的所有浏览器阶段
-        if browser_phases:
+        if browser_phases and bsess is not None:
+            b_results = bsess.run_phases(browser_phases)
+            results_map.update(b_results)
+        elif browser_phases and bsess is None and not degraded_mode:
             bsess = executor.BrowserSession(name, token, pr, p, config,
                                             proxy=proxy, cdp_port=cdp_port)
             bsess.start()
@@ -336,6 +405,10 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
             if is_bad:
                 bad.append(ph)
 
+        # 降级模式下浏览器会话不可用，过滤掉所有浏览器阶段的回补尝试
+        if degraded_mode:
+            bad = [ph for ph in bad if next((t['needs'] for t in planner.TASK_TABLE.values() if t['phase'] == ph), 'api') == 'api']
+
         if bad and not args.dry_run:
             from msr import settings as S
             st_runner = S.load_settings()
@@ -354,7 +427,7 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
                 except Exception as ex:
                     results_map[ph] = '回补仍失败(%s)' % str(ex)[:50]
                     config.log(name, '[阶段 10 自动回补] %s 仍失败: %s' % (ph, str(ex)[:100]))
-            if bad_browser:
+            if bad_browser and not degraded_mode:
                 # 若有浏览器任务回补，自动附带 claim 阶段以保证补全后新释放的待存入积分能被立即结算入账
                 if 'claim' not in bad_browser:
                     bad_browser.append('claim')

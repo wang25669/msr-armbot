@@ -63,38 +63,10 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
         flight = api.find_promo(promos, 'edge_browsing_streak_flight')
         elig = api.find_promo(promos, 'edge_browsing_streak_eligible')
 
-        # 严禁直接发送伪造激活信令！若处于待激活状态，必须且只能启动浏览器通过真实页面交互点击激活卡片
+        # 若处于未激活状态，统一交由前台主浏览器执行页面交互激活，严禁在后台线程私起第二个 Chromium 造成锁冲突
         if flight is None or elig is None or str(elig.get('complete', '')).lower() != 'true':
-            config.log(name, '检测到本账号 Edge 浏览打卡尚未激活，正在启动浏览器执行页面交互点击激活...')
-            from msr import tasks_browser as tb
-            bc = browser_cfg(config)
-            chrome_dir = profile_path + '/chrome'
-            fp = fingerprint.load_or_create(name, country=rg.get('country', 'US'))
-            ch_tmp = browser.Chromium(binary=bc['binary'], user_data_dir=chrome_dir,
-                                      version=bc['version'], proxy=proxy, fingerprint=fp,
-                                      headless=bc['headless'],
-                                      disable_webrtc_leak=bc['disable_webrtc_leak'])
-            try:
-                tabs = ch_tmp.start()
-                tab = tabs[0] if tabs else ch_tmp.new_tab('about:blank')
-                cdp = ch_tmp.attach(tab)
-                browser.disguise_edge(cdp, version=bc['version'], log=lambda m: None)
-                cookies = config.load_json(config.pfile(name, 'cookie.json'))
-                if cookies:
-                    browser.inject_cookies(cdp, cookies, log=lambda m: None)
-                tb.auto_activate_streaks(cdp, ch=ch_tmp, log=lambda m: config.log(name, m))
-            except Exception as ex_browser_act:
-                config.log(name, f'浏览器页面激活 Edge 打卡异常: {ex_browser_act}')
-            finally:
-                ch_tmp.stop()
-
-            # 浏览器完成真实页面交互后，重新查询资格
-            promos = api.get_me(name, token, rg, proxy=proxy)
-            flight = api.find_promo(promos, 'edge_browsing_streak_flight')
-            elig = api.find_promo(promos, 'edge_browsing_streak_eligible')
-            if flight is None or elig is None or str(elig.get('complete', '')).lower() != 'true':
-                config.log(name, '本账号在页面未检测到可激活的 Edge 浏览卡片或页面激活未生效 (跳过)')
-                return '未激活或无任务(跳过)'
+            config.log(name, '检测到本账号 Edge 浏览打卡尚未激活 (交由主浏览器页面激活后联动补跑)')
+            return '未下发Edge任务(跳过)'
 
         if str(flight.get('complete')).lower() == 'true':
             return '已完成'
@@ -219,6 +191,8 @@ class BrowserSession:
         self.tab = None
         self.bc = None
         self.newly_activated = []
+        self.is_authenticated = False
+        self.degraded_mode = False
 
     def start(self):
         from msr import browser, fingerprint
@@ -246,11 +220,151 @@ class BrowserSession:
         if cookies:
             browser.inject_cookies(self.cdp, cookies, log=self.logger)
 
-        from msr import tasks_browser as tb
+    def check_login_state(self, timeout=25, max_retries=1):
+        """正向校验登录态：访问 rewards.bing.com 并等待水合提取可用积分。
+        
+        严格解耦网络/代理抖动与真正会话失效：
+        - 网络报错 / 代理超时：返回 (False, None, 'NETWORK_ERROR')
+        - 成功解析到可用积分 (>=0)：返回 (True, balance, 'OK')
+        - 明确重定向到 login.live.com / welcome 或出现登录 CTA：返回 (False, None, 'SESSION_EXPIRED')
+        """
+        import time
+        from msr import browser
+        for attempt in range(max_retries + 1):
+            try:
+                self.logger(f'正在执行前置登录态正向测活 (第 {attempt + 1} 次)...')
+                browser.navigate(self.cdp, 'https://rewards.bing.com/')
+            except Exception as ex:
+                self.logger(f'导航至 rewards.bing.com 异常: {ex}')
+                if attempt < max_retries:
+                    time.sleep(3)
+                    continue
+                return False, None, 'NETWORK_ERROR'
+
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    curr_url = browser.ev(self.cdp, 'location.href', timeout=5) or ''
+                    # 1. 检查 Chromium 网络/代理错误页 (如 ERR_PROXY_CONNECTION_FAILED)
+                    if curr_url.startswith('chrome-error://') or 'ERR_' in curr_url:
+                        self.logger(f'检测到 Chromium 网络/代理错误页面: {curr_url}')
+                        if attempt < max_retries:
+                            time.sleep(3)
+                            break
+                        return False, None, 'NETWORK_ERROR'
+
+                    # 2. 检查是否重定向至微软登录网关
+                    if any(k in curr_url for k in ('login.live.com', 'rewards.bing.com/welcome', 'fd/auth/signin')):
+                        # 进一步确认页面是否加载了登录表单元素
+                        is_login_page = browser.ev(self.cdp, '''(() => {
+                            return Boolean(document.querySelector('#usernameEntry, #i0116, input[name=loginfmt], #passwordEntry, input[name=passwd], #idSIButton9') ||
+                                           (document.body && (document.body.innerText.includes('Sign in') || document.body.innerText.includes('登录你的 Microsoft 帐户'))));
+                        })()''', timeout=5)
+                        if is_login_page:
+                            self.logger(f'检测到页面已明确重定向至登录网关: {curr_url}')
+                            return False, None, 'SESSION_EXPIRED'
+
+                    # 3. 正向提取用户可用积分
+                    bal = browser.ev(self.cdp, '''(() => {
+                        const t = document.body ? document.body.innerText : '';
+                        const m = t.match(/(?:可用积分|Available points|balance)[^\\d]*([\\d,]+)/i) || 
+                                  t.match(/([\\d,]+)\\s*(?:可用积分|points)/i);
+                        if (m) return parseInt(m[1].replace(/,/g, ''), 10);
+                        const el = document.querySelector('#balance-card, [class*="balance"], [class*="pointsBreakdown"], #id_rc, [data-testid="user-points"]');
+                        if (el) {
+                            const m2 = (el.innerText || '').match(/([\\d,]+)/);
+                            if (m2) return parseInt(m2[1].replace(/,/g, ''), 10);
+                        }
+                        return null;
+                    })()''', timeout=5)
+
+                    if bal is not None:
+                        self.is_authenticated = True
+                        self.logger(f'前置登录态测活成功: 账户当前积分={bal}')
+                        return True, bal, 'OK'
+
+                    # 4. 检查是否出现明确的游客提示 (未水合且显示登录按钮)
+                    is_guest = browser.ev(self.cdp, '''(() => {
+                        return Boolean(document.querySelector('#id_s, a[href*="fd/auth/signin"], a[href*="windows_live_id"]') &&
+                                       !document.querySelector('#id_rh, #id_rc, #id_n, #b_idRh, .mee-icon-SkypeCircleCheck'));
+                    })()''', timeout=5)
+                    if is_guest and time.time() - (deadline - timeout) > 8:
+                        self.logger('页面渲染完成但未包含用户身份信息且仅展示登录入口，确诊会话失效')
+                        return False, None, 'SESSION_EXPIRED'
+
+                except Exception:
+                    pass
+                time.sleep(1.5)
+
+            if attempt < max_retries:
+                self.logger('首轮测活未能提取积分，正在刷新页面重试...')
+                time.sleep(2)
+                continue
+
+        return False, None, 'SESSION_EXPIRED'
+
+    def in_situ_relogin(self, username, password, timeout=180):
+        """在当前浏览器实例中原地执行全自动登录自愈 (不关进程、不重新拉起、零锁竞争)。"""
+        from msr import auth
+        self.logger(f'正在当前浏览器中原地执行自愈登录 (账号: {username})...')
         try:
-            self.newly_activated = tb.auto_activate_streaks(self.cdp, ch=self.ch, log=self.logger)
+            try:
+                self.cdp.call('Network.clearBrowserCookies')
+                self.cdp.call('Network.clearBrowserCache')
+            except Exception:
+                pass
+
+            res = auth.login_with_credential(
+                self.name, username, password,
+                proxy=self.proxy,
+                log_cb=self.logger,
+                ch=self.ch,
+                cdp=self.cdp,
+                timeout=timeout
+            )
+            if res.get('status') == 'ok':
+                self.is_authenticated = True
+                self.logger('原地自愈登录成功！全套凭据已刷新就绪。')
+                return True, res
+            else:
+                self.logger(f'原地自愈登录未成功: {res.get("message") or res.get("error")}')
+                return False, res
         except Exception as ex:
-            self.logger('自动激活 Streak 检查异常: %s' % str(ex)[:80])
+            self.logger(f'原地自愈登录异常: {ex}')
+            return False, {'status': 'error', 'error': str(ex)}
+
+    def safe_writeback_cookies(self):
+        """在会话结束时，安全提取最新多域 Cookie 并写回 cookie.json。"""
+        if getattr(self, 'degraded_mode', False):
+            self.logger('当前为降级模式，跳过 Cookie 回写以保护已有凭据备份')
+            return False
+        if not getattr(self, 'is_authenticated', False):
+            self.logger('当前会话未处于已登录状态，跳过 Cookie 回写')
+            return False
+        if not self.cdp:
+            return False
+
+        import os
+        from msr import cookies as cookie_mod
+        try:
+            urls = [
+                'https://login.live.com',
+                'https://www.bing.com',
+                'https://account.microsoft.com',
+                'https://rewards.bing.com'
+            ]
+            res = self.cdp.call('Network.getCookies', {'urls': urls})
+            cks = res.get('cookies', [])
+            diag = cookie_mod.validate_cookies(cks)
+            if diag.get('has_auth_u'):
+                cookie_mod.save_cookies_safely(self.name, cks, config=self.config, log=self.logger)
+                return True
+            else:
+                self.logger('提取的 Cookie 缺少核心 _U 凭据，取消回写')
+                return False
+        except Exception as ex:
+            self.logger(f'Cookie 回写异常(容忍): {ex}')
+            return False
 
     def run_phases(self, phases, is_retry=False):
         results = {}
@@ -287,6 +401,10 @@ class BrowserSession:
 
     def close(self):
         if self.ch:
+            try:
+                self.safe_writeback_cookies()
+            except Exception as ex_wb:
+                self.logger(f'Cookie 回写异常(容忍): {ex_wb}')
             try:
                 cur_tid = self.cdp.path.split('/')[-1].split('?')[0] if (hasattr(self.cdp, 'path') and self.cdp.path) else (self.tab.get('id') if self.tab else None)
                 if cur_tid:

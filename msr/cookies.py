@@ -139,6 +139,30 @@ def import_content(content_str):
     return []
 
 
+def save_cookies_safely(name, cookies, config=None, log=print):
+    """安全持久化 Cookie：先备份为 cookie.json.bak，再原子写入 cookie.json 并设 0600 权限。"""
+    if config is None:
+        from msr import config as cfg_mod
+        config = cfg_mod
+    import shutil
+    dest = config.pfile(name, 'cookie.json')
+    bak = config.pfile(name, 'cookie.json.bak')
+    if os.path.isfile(dest):
+        try:
+            shutil.copy2(dest, bak)
+        except Exception as e:
+            if log:
+                log(f'备份 cookie.json.bak 异常: {e}')
+    config.save_json(dest, cookies)
+    try:
+        os.chmod(dest, 0o600)
+    except Exception:
+        pass
+    if log:
+        log(f'最新会话 Cookie 已安全回写 ({len(cookies)} 枚，已备份并设 0600 权限)')
+    return True
+
+
 def import_file(name, file_path):
     """从本地文件导入 Cookie 到指定账号 profile。"""
     from msr import config
@@ -153,7 +177,6 @@ def import_file(name, file_path):
         raise ValueError(f'无法解析 Cookie 文件内容，支持 JSON 数组或 raw 字符串: {file_path}')
     
     diag = validate_cookies(cookies)
-    dest = config.pfile(name, 'cookie.json')
-    config.save_json(dest, cookies)
+    save_cookies_safely(name, cookies, config=config, log=lambda m: config.log(name, m))
     config.log(name, f'Cookie 导入成功: 共 {len(cookies)} 条 (含 _U={diag["has_auth_u"]})')
     return diag

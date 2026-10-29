@@ -115,7 +115,8 @@ def exchange_token_from_cookies(name, proxy=None, cdp=None, ch=None, log_cb=None
         })
         cdp.call('Page.navigate', {'url': auth_url})
 
-        deadline = time.time() + 15
+        # 放宽超时等待时间至 30s，适应高延迟网络/代理
+        deadline = time.time() + 30
         while time.time() < deadline:
             if hasattr(cdp, 'pump_events'):
                 cdp.pump_events(timeout=0.1)
@@ -389,7 +390,7 @@ def inspect_login_page(cdp):
 class LoginSession:
     """账号登录多重交互与风控接管会话管理类。"""
 
-    def __init__(self, name, username, password, proxy=None, log_cb=None, save_credential_flag=True):
+    def __init__(self, name, username, password, proxy=None, log_cb=None, save_credential_flag=True, ch=None, cdp=None):
         self.name = name
         self.username = username
         self.password = password
@@ -404,8 +405,9 @@ class LoginSession:
         self.logs = []
         self.created_at = time.time()
         self.updated_at = time.time()
-        self.ch = None
-        self.cdp = None
+        self.ch = ch
+        self.cdp = cdp
+        self.own_ch = ch is None
         self.thread = None
         self.stop_requested = False
         self.result = None
@@ -438,7 +440,7 @@ class LoginSession:
         self._cleanup()
 
     def _cleanup(self):
-        if self.ch:
+        if self.own_ch and self.ch:
             try:
                 self.ch.stop()
             except Exception:
@@ -531,16 +533,19 @@ class LoginSession:
         chrome_dir = os.path.join(profile_path, 'chrome')
 
         try:
-            self.log(f'正在启动安全无头 Chromium 实例 (账号: {self.username})...')
-            self.ch = browser.Chromium(user_data_dir=chrome_dir, proxy=self.proxy, log=self.log)
-            from msr import fingerprint
-            fp = fingerprint.load_or_create(self.name)
-            self.ch.fingerprint = fp
+            if self.own_ch or not self.ch or not self.cdp:
+                self.log(f'正在启动安全无头 Chromium 实例 (账号: {self.username})...')
+                self.ch = browser.Chromium(user_data_dir=chrome_dir, proxy=self.proxy, log=self.log)
+                from msr import fingerprint
+                fp = fingerprint.load_or_create(self.name)
+                self.ch.fingerprint = fp
 
-            tabs = self.ch.start()
-            page_tabs = [t for t in tabs if t.get('type') == 'page']
-            tab = page_tabs[0] if page_tabs else self.ch.new_tab('about:blank')
-            self.cdp = self.ch.attach(tab)
+                tabs = self.ch.start()
+                page_tabs = [t for t in tabs if t.get('type') == 'page']
+                tab = page_tabs[0] if page_tabs else self.ch.new_tab('about:blank')
+                self.cdp = self.ch.attach(tab)
+            else:
+                self.log(f'复用当前活跃 Chromium 实例原地执行登录 (账号: {self.username})...')
 
             self.status = 'running'
             self.message = 'Chromium 已就绪，正在准备纯净登录环境...'
@@ -621,16 +626,16 @@ class LoginSession:
 
                             final_cks = []
                             diag2 = {'has_auth_u': False}
-                            for _ in range(8):
+                            for _ in range(12):
                                 res2 = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com', 'https://rewards.bing.com']})
                                 final_cks = res2.get('cookies', [])
                                 diag2 = cookie_mod.validate_cookies(final_cks)
                                 if diag2['has_auth_u']:
                                     break
-                                time.sleep(1.5)
+                                time.sleep(2.0)
 
                             if diag2['has_auth_u']:
-                                config.save_json(config.pfile(self.name, 'cookie.json'), final_cks)
+                                cookie_mod.save_cookies_safely(self.name, final_cks, config=config, log=self.log)
                                 self.log(f'✅ 成功捕获并保存全量 Cookie (共 {len(final_cks)} 条, 含 _U=True)')
                                 self.message = '成功捕获全量 Cookie，正在静默换取 OAuth2 Token...'
                                 self.log('正在自动通过登录会话静默换取 OAuth2 Token...')
@@ -895,14 +900,15 @@ def get_session(name):
         return _active_sessions.get(name)
 
 
-def start_session(name, username, password, proxy=None, log_cb=None, save_credential_flag=True):
+def start_session(name, username, password, proxy=None, log_cb=None, save_credential_flag=True, ch=None, cdp=None):
     with _sessions_lock:
         if name in _active_sessions:
             try:
                 _active_sessions[name].cancel()
             except Exception:
                 pass
-        sess = LoginSession(name, username, password, proxy=proxy, log_cb=log_cb, save_credential_flag=save_credential_flag)
+        sess = LoginSession(name, username, password, proxy=proxy, log_cb=log_cb,
+                            save_credential_flag=save_credential_flag, ch=ch, cdp=cdp)
         _active_sessions[name] = sess
         sess.start()
         return sess
@@ -936,10 +942,11 @@ def get_session_screenshot(name):
     return sess.get_screenshot()
 
 
-def login_with_credential(name, username, password, proxy=None, log_cb=None, save_credential_flag=True):
-    """现代化 MSR 账号密码全自动登录与多重风控质询接管。"""
-    session = start_session(name, username, password, proxy=proxy, log_cb=log_cb, save_credential_flag=save_credential_flag)
-    deadline = time.time() + 180
+def login_with_credential(name, username, password, proxy=None, log_cb=None, save_credential_flag=True, ch=None, cdp=None, timeout=180):
+    """现代化 MSR 账号密码全自动登录与多重风控质询接管。支持复用已有 Chromium 实例原地登录。"""
+    session = start_session(name, username, password, proxy=proxy, log_cb=log_cb,
+                            save_credential_flag=save_credential_flag, ch=ch, cdp=cdp)
+    deadline = time.time() + timeout
     prompted_auth_code = None
     prompted_otp = False
 
