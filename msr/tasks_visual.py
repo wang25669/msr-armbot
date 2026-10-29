@@ -383,13 +383,14 @@ def submit_image(cdp, image, entry, log=print):
 
     # 若存在专用的贴图提交按钮则点击，严禁点击普通文本搜索的 #sb_form_go (避免覆盖取消识图)
     ev(cdp, '''(() => {
-      const go = document.querySelector('button.sbi_submit, #sb_imgpst ~ button, .pastearea button, #sbi_submit');
+      const go = document.querySelector('button.sbi_submit, #sb_imgpst ~ button, .pastearea button, #sbi_submit, #sb_sbi_gh');
       if (go && go.getBoundingClientRect().width > 0) go.click();
     })()''')
 
-    # 等待落页确认 (放宽至 40 秒以容忍网络高延迟代理，同时引入 Bing 错误横幅感知)
+    # 等待落页确认 (放宽至 40 秒以容忍网络高延迟代理，同时引入 Bing 错误横幅感知与自动防吞键补偿)
     deadline = time.time() + 40
     landed = False
+    compensated = False
     while time.time() < deadline:
         if ev(cdp, LAND):
             landed = True
@@ -404,6 +405,33 @@ def submit_image(cdp, image, entry, log=print):
         })()''')
         if err:
             raise StepError(f'视觉图片提交被必应拒绝: {err}')
+
+        # 若等待超过 5 秒仍未落页，说明慢代理或 Enter 键偶发被吞，自动调用表单 requestSubmit 补偿触发
+        if not compensated and (deadline - time.time() < 35):
+            compensated = True
+            ev(cdp, '''(() => {
+              const inp = (%s);
+              if (inp) {
+                inp.focus();
+                const form = inp.closest("form") || document.querySelector("#sb_form");
+                if (form && typeof form.requestSubmit === "function") {
+                  try { form.requestSubmit(); } catch(e) {}
+                }
+                const gh = document.querySelector("#sb_sbi_gh");
+                if (gh) gh.click();
+              }
+            })()''' % inp_js)
+            for t in ('keyDown', 'keyUp'):
+                try:
+                    cdp.call('Input.dispatchKeyEvent', {
+                        'type': t, 'key': 'Enter', 'code': 'Enter',
+                        'windowsVirtualKeyCode': 13, 'nativeVirtualKeyCode': 13,
+                        'text': '\r' if t == 'keyDown' else '',
+                        'unmodifiedText': '\r' if t == 'keyDown' else ''
+                    })
+                except Exception:
+                    pass
+
         time.sleep(1.0)
 
     if not landed:

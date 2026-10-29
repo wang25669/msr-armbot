@@ -382,8 +382,8 @@ def interact_quiz(ch, tab_id, label='', log=print):
             time.sleep(random.uniform(1.0, 2.0))
 
         find_js = """(() => {
-          const sels = ['.btq_opt', '.btq_opts .acf-button-standard__link',
-                        '[class*=btq_opt]', '.btp_choice', '[class*=btp_choice]',
+          const sels = ['.btq_opt a', '.btq_opt button', '.btq_opts .acf-button-standard__link',
+                        '.btq_opt', '[class*=btq_opt]', '.btp_choice', '[class*=btp_choice]',
                         '.btp_choice_wrapper', 'acf-button-standard.btp_choice',
                         '[role=radio]', '[class*=quiz] button', '[class*=option]', '[class*=choice]'];
           for (const s of sels) {
@@ -394,25 +394,59 @@ def interact_quiz(ch, tab_id, label='', log=print):
           return null;
         })()"""
 
+        next_btn_js = """(() => {
+          const sels = ['.btq_nxtQues button', '.btq_nxtQues a', '.btq_nxtQues',
+                        '[class*=nxtQues] button', '[class*=nxtQues]',
+                        '#checkAnswerBtn', '#nextQuestionBtn', '[class*=nextQuestion]'];
+          for (const s of sels) {
+            const el = document.querySelector(s);
+            if (el && el.getBoundingClientRect().width > 0) return el;
+          }
+          return null;
+        })()"""
+
         is_poll = 'poll' in label.lower() or '投票' in label
         max_questions = 1 if is_poll else 6
 
         # 逐题点击 (通常 1-4 题，投票仅 1 题)
         for qi in range(max_questions):
-            try:
-                hit = ev(cdp_quiz, find_js + " !== null")
-            except Exception:
-                break
+            # 轮询等待选项或下一题按钮出现 (最多 8 秒以容忍动画/网络延迟)
+            hit = False
+            for _ in range(8):
+                if ev(cdp_quiz, find_js + " !== null") or ev(cdp_quiz, next_btn_js + " !== null"):
+                    hit = True
+                    break
+                time.sleep(1.0)
             if not hit:
                 if qi > 0:
-                    log('quiz交互: 已答%d题, 无更多选项 (%s)' % (qi, label))
+                    log('quiz交互: 已答%d题, 题目已全部完成 (%s)' % (qi, label))
                 break
+
+            # 若当前存在下一题/过渡按钮则先行推进
+            if ev(cdp_quiz, next_btn_js + " !== null"):
+                try:
+                    ev(cdp_quiz, f"(({next_btn_js}))?.click()")
+                    time.sleep(random.uniform(1.5, 2.5))
+                except Exception:
+                    pass
+
+            # 点击题目选项
             try:
-                human_click(cdp_quiz, find_js, label=f'quiz第{qi+1}题:{label}', close_new=True)
-                log('quiz第%d题已点击 (%s)' % (qi + 1, label))
+                if ev(cdp_quiz, find_js + " !== null"):
+                    human_click(cdp_quiz, find_js, label=f'quiz第{qi+1}题:{label}', close_new=True)
+                    log('quiz第%d题已点击 (%s)' % (qi + 1, label))
             except Exception as e:
                 log('quiz交互点击容忍: %s' % str(e)[:60])
                 break
+
+            # 答题后等待并在出现下一题按钮时自动点击推进
+            time.sleep(random.uniform(2.0, 3.5))
+            if ev(cdp_quiz, next_btn_js + " !== null"):
+                try:
+                    ev(cdp_quiz, f"(({next_btn_js}))?.click()")
+                except Exception:
+                    pass
+
             from msr import settings
             st_cfg = settings.load_settings()
             c_cfg = st_cfg.get('cards', {})
@@ -631,36 +665,45 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
         kind = dailyset_kind({'destinationUrl': href})
         log('执行抽屉每日卡片: %s [%s] -> %s' % (title, kind, href[:60]))
 
-        # 使用 human_click 真实点击抽屉内的 <a> 卡片，触发 React 与微软官方点击归因追踪
-        selector = f'document.querySelectorAll("[role=\\"dialog\\"] a[href], section[role=\\"dialog\\"] a[href]")[{idx}]'
-        new_tabs = human_click(cdp, selector, label=title[:15], close_new=False)
-        if not new_tabs and ch and href:
-            new_tab = ch.new_tab(href)
-            if new_tab and new_tab.get('id'):
-                new_tabs = [new_tab['id']]
+        try:
+            # 确保抽屉处于展开状态 (若此前卡片交互导致抽屉失焦闭合，自动重新唤醒展开)
+            is_open = ev(cdp, 'Boolean(document.querySelector("[role=\\"dialog\\"], section[role=\\"dialog\\"]"))')
+            if not is_open:
+                ev(cdp, click_drawer_js)
+                time.sleep(random.uniform(2.0, 3.0))
 
-        if new_tabs and ch:
-            target_tid = new_tabs[0]
-            try:
-                time.sleep(random.uniform(2.5, 4.0))
-                if kind == 'quiz':
-                    interact_quiz(ch, target_tid, label=title, log=log)
-                    wait = random.uniform(3, 6) if fast_mode else random.uniform(25, 45)
-                    log('%s 答题后停留 %.1f 秒等待结算' % (title, wait))
-                    time.sleep(wait)
-                else:
-                    w_min = 3 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_min', 60))
-                    w_max = 6 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_max', 120))
-                    wait = random.uniform(w_min, w_max)
-                    log('%s 停留 %.1f 秒等待归因' % (title, wait))
-                    time.sleep(wait)
-            finally:
-                for tid in new_tabs:
-                    try:
-                        ch.close_tab(tid)
-                    except Exception:
-                        pass
-        done_drawer_count += 1
+            # 使用 human_click 真实点击抽屉内的 <a> 卡片，触发 React 与微软官方点击归因追踪
+            selector = f'document.querySelectorAll("[role=\\"dialog\\"] a[href], section[role=\\"dialog\\"] a[href]")[{idx}]'
+            new_tabs = human_click(cdp, selector, label=title[:15], close_new=False)
+            if not new_tabs and ch and href:
+                new_tab = ch.new_tab(href)
+                if new_tab and new_tab.get('id'):
+                    new_tabs = [new_tab['id']]
+
+            if new_tabs and ch:
+                target_tid = new_tabs[0]
+                try:
+                    time.sleep(random.uniform(2.5, 4.0))
+                    if kind == 'quiz':
+                        interact_quiz(ch, target_tid, label=title, log=log)
+                        wait = random.uniform(3, 6) if fast_mode else random.uniform(25, 45)
+                        log('%s 答题后停留 %.1f 秒等待结算' % (title, wait))
+                        time.sleep(wait)
+                    else:
+                        w_min = 3 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_min', 60))
+                        w_max = 6 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_max', 120))
+                        wait = random.uniform(w_min, w_max)
+                        log('%s 停留 %.1f 秒等待归因' % (title, wait))
+                        time.sleep(wait)
+                finally:
+                    for tid in new_tabs:
+                        try:
+                            ch.close_tab(tid)
+                        except Exception:
+                            pass
+            done_drawer_count += 1
+        except Exception as card_err:
+            log('抽屉卡片 %s 执行容错: %s' % (title, str(card_err)[:80]))
         time.sleep(random.uniform(1.5, 3.0))
 
     # 关闭抽屉
