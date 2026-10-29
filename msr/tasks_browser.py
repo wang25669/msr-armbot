@@ -1338,28 +1338,58 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
 phase_earn = phase_moreactivities
 
 
+
+def extract_claim_points(text: str) -> int:
+    """从待领取卡片或按钮文案中精准提取待领取积分数值，杜绝匹配到用户余额或其它无关数字。"""
+    if not text:
+        return 0
+    clean = re.sub(r'(\d+),(\d+)', r'\1\2', str(text).strip())
+    patterns = [
+        r'(?:可领取|待领取|ready\s*to\s*claim|claimable)\s*[:：]?\s*(\d+)',
+        r'(\d+)\s*(?:待领取|可领取|pending\s*claim|pending)',
+        r'(?:claim|collect)\s*(\d+)',
+        r'(\d+)\s*(?:分|points|pts)\b',
+    ]
+    for pat in patterns:
+        m = re.search(pat, clean, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    clean_no_bal = re.sub(r'(?:可用积分|available\s*points|balance)\s*[:：]?\s*\d+', '', clean, flags=re.IGNORECASE)
+    m = re.search(r'\b(\d+)\b', clean_no_bal)
+    if m:
+        return int(m.group(1))
+    return 0
+
+
 def phase_claim(name, cdp, pr, ch=None, log=print):
-    """检查并领取待领取积分 (两级抽屉精准交互 + 真实余额回读核销)。"""
+    """检查并领取待领取积分 (两级抽屉精准交互 + 原地响应等待与真实余额回读核销)。"""
     # 待领取卡片主要渲染在 Rewards Dashboard 首页，部分区域在 /earn
     log('开始检查是否有可领取积分...')
     navigate(cdp, 'https://rewards.bing.com/dashboard')
     time.sleep(random.uniform(3.5, 5.0))
 
-    # 1. 读当前可用余额作为基准
-    bal_before = ev(cdp, '''(() => {
-      const t = document.body.innerText;
+    read_balance_js = '''(() => {
+      const t = document.body ? document.body.innerText : '';
       const m = t.match(/(?:可用积分|Available points|balance)[^\\d]*([\\d,]+)/i) || t.match(/([\\d,]+)\\s*(?:可用积分|points)/i);
       return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
-    })()''')
+    })()'''
+
+    # 1. 读当前可用余额作为基准
+    bal_before = ev(cdp, read_balance_js)
 
     # 2. 定位外层待领取卡片/按钮 (中英文适配，如 "可领取 6 领取", "Ready to claim 15 Claim")
+    # 限制文案长度并按最精确的子元素匹配，防止选中包裹用户资料的大容器
     claim_card_js = '''(() => {
       const btns = Array.from(document.querySelectorAll('button, [role="button"], a'));
-      return btns.find(b => {
+      const candidates = btns.filter(b => {
         const t = (b.innerText || '').trim().replace(/\\s+/g, ' ');
-        return (/可领取|待领取|ready to claim|claimable/i.test(t) || (/^claim\\b/i.test(t) && /\\d+/.test(t))) &&
-               /\\d+/.test(t) && !/已领取/i.test(t);
-      }) || null;
+        if (!t || t.length > 80) return false;
+        return (/可领取|待领取|ready\\s*to\\s*claim|claimable/i.test(t) || (/^claim\\b/i.test(t) && /\\d+/.test(t))) &&
+               /\\d+/.test(t) && !/已领取|completed/i.test(t);
+      });
+      if (!candidates.length) return null;
+      candidates.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+      return candidates[0];
     })()'''
 
     has_card = ev(cdp, f"!!({claim_card_js})")
@@ -1377,8 +1407,7 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
         return '无可领取积分(跳过)'
 
     card_text = ev(cdp, f"({claim_card_js}) ? ({claim_card_js}).innerText.replace(/\\s+/g, ' ').trim() : ''")
-    m_pts = re.search(r'(\d+)', card_text)
-    total_claimable = int(m_pts.group(1)) if m_pts else 0
+    total_claimable = extract_claim_points(card_text)
     if total_claimable == 0:
         log(f'待领取卡片显示 0 分可领 ("{card_text}"), 跳过')
         return '无可领取积分(跳过)'
@@ -1402,8 +1431,9 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
     confirm_btn_js = '''(() => {
       const d = document.querySelector('[role="dialog"], section[role="dialog"], [role="alertdialog"], .modal');
       const scope = d ? Array.from(d.querySelectorAll('button, a, [role="button"]')) : Array.from(document.querySelectorAll('button, a'));
-      return scope.find(el => {
+      const candidates = scope.filter(el => {
         const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+        if (!t || t.length > 60) return false;
         return (
           t.includes('领取积分') ||
           /claim\\s*points/i.test(t) ||
@@ -1411,13 +1441,18 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
           /\\d+\\s*(?:待领取|pending)\\s*(?:领取积分|claim)/i.test(t) ||
           /^(?:领取|claim|collect)$/i.test(t)
         );
-      }) || null;
+      });
+      if (!candidates.length) return null;
+      candidates.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+      return candidates[0];
     })()'''
 
-    has_confirm = ev(cdp, f"!!({confirm_btn_js})")
-    if not has_confirm:
-        time.sleep(2.0)
-        has_confirm = ev(cdp, f"!!({confirm_btn_js})")
+    has_confirm = False
+    for _ in range(8):
+        if ev(cdp, f"!!({confirm_btn_js})"):
+            has_confirm = True
+            break
+        time.sleep(1.0)
 
     if not has_confirm:
         log('未在抽屉内找到可执行领取的确认按钮 (积分可能处于锁定期或待满足条件)')
@@ -1437,41 +1472,65 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
     if not clicked_confirm:
         ev(cdp, f"(() => {{ const b = ({confirm_btn_js}); if (b) b.click(); }})()")
 
-    # 等待抽屉内部响应与异步网络请求提交 (给予充足时间，严禁过早关闭弹窗打断网络请求)
-    for _ in range(8):
+    # 关键：等待异步网络请求提交与服务端入账
+    # 注意：严禁在点击确认后因抽屉关闭而立刻调用 navigate() 强刷！
+    # Next.js Server Action 异步 POST /dashboard 与 RSC 渲染通常需要 2~8 秒，强刷会中断进行中的网络请求。
+    # 我们在此优先原地轮询 DOM 变化与余额增长，最长耐心等待 12 秒。
+    settled = False
+    claimed_points = total_claimable
+
+    for i in range(12):
         time.sleep(1.0)
-        d_closed = ev(cdp, '!document.querySelector(\'[role="dialog"], section[role="dialog"]\')')
-        if d_closed:
+        bal_now = ev(cdp, read_balance_js)
+        if bal_before is not None and bal_now is not None and bal_now > bal_before:
+            claimed_points = bal_now - bal_before
+            log(f'积分领取已在页面原地结算入账！余额从 {bal_before} 增至 {bal_now} (+{claimed_points}分)')
+            settled = True
             break
 
-    # 若抽屉未自动关闭，尝试点击关闭按钮
+        card_t = ev(cdp, f"({claim_card_js}) ? ({claim_card_js}).innerText.replace(/\\s+/g, ' ').trim() : ''")
+        if card_t:
+            rem = extract_claim_points(card_t)
+            if rem == 0:
+                log(f'待领取卡片已原地核销为 0 分 ("{card_t}")')
+                settled = True
+                break
+        elif not ev(cdp, f"!!({claim_card_js})"):
+            log('待领取卡片已从页面消失 (已核销)')
+            settled = True
+            break
+
+    # 若抽屉仍未自动关闭，尝试点击关闭按钮收起弹窗
     ev(cdp, """(() => {
       const d = document.querySelector('[role="dialog"], section[role="dialog"]');
       if (!d) return;
       const cls = d.querySelector('button[aria-label*="关闭" i], button[aria-label*="close" i], button.group\\\\/ctrl, button');
       if (cls) cls.click();
     })()""")
-    time.sleep(1.5)
+    time.sleep(1.0)
 
-    # 5. 第三步：在同一个发现卡片的页面刷新并严格回读核销 (杜绝跨页面产生虚假核销)
+    if settled:
+        # 已原地结算完成
+        bal_now = ev(cdp, read_balance_js)
+        if bal_now is not None:
+            return f'成功领取{claimed_points}分(余额:{bal_now})'
+        return f'成功领取{claimed_points}分'
+
+    # 若 12 秒内未原地结算，此时网络 POST 请求已充分完成传输，刷新当前页面进行严格二次核销
+    log('页面尚未原地更新，正在刷新页面以回读服务端积分状态...')
     navigate(cdp, current_page)
     time.sleep(random.uniform(4.0, 6.0))
-    bal_after = ev(cdp, '''(() => {
-      const t = document.body.innerText;
-      const m = t.match(/(?:可用积分|Available points|balance)[^\\d]*([\\d,]+)/i) || t.match(/([\\d,]+)\\s*(?:可用积分|points)/i);
-      return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
-    })()''')
 
+    bal_after = ev(cdp, read_balance_js)
     if bal_before is not None and bal_after is not None and bal_after > bal_before:
         gained = bal_after - bal_before
-        log(f'积分领取成功已入账！余额从 {bal_before} 增至 {bal_after} (+{gained}分)')
+        log(f'刷新后确认积分领取成功！余额从 {bal_before} 增至 {bal_after} (+{gained}分)')
         return f'成功领取{gained}分(余额:{bal_after})'
 
     card_after = ev(cdp, f"({claim_card_js}) ? ({claim_card_js}).innerText.replace(/\\s+/g, ' ').trim() : ''")
-    m_after = re.search(r'(\d+)', card_after)
-    rem_pts = int(m_after.group(1)) if m_after else 0
+    rem_pts = extract_claim_points(card_after) if card_after else 0
     if not card_after or rem_pts == 0:
-        log(f'已完成积分领取，卡片已核销 (原{total_claimable}分)')
+        log(f'刷新后待领取卡片已核销 (原{total_claimable}分)')
         return f'成功领取{total_claimable}分'
 
     log(f'卡片仍显示待领取 ({card_after})，可能由于代理网络延迟或服务端排队，将在回补阶段复检')

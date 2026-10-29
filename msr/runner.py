@@ -422,6 +422,8 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
                     is_bad = True
             elif ph in ('visual', 'visualsearch') and ('未完成' in val):
                 is_bad = True
+            elif ph == 'claim' and ('结算中' in val or '待存入' in val):
+                is_bad = True
 
             if is_bad:
                 bad.append(ph)
@@ -449,8 +451,9 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
                     results_map[ph] = '回补仍失败(%s)' % str(ex)[:50]
                     config.log(name, '[阶段 10 自动回补] %s 仍失败: %s' % (ph, str(ex)[:100]))
             if bad_browser and not degraded_mode:
-                # 若有浏览器任务回补，自动附带 claim 阶段以保证补全后新释放的待存入积分能被立即结算入账
-                if 'claim' not in bad_browser:
+                # 若有可产生待存入积分的浏览器任务(dailyset/moreactivities/quests)回补，或 claim 本身待回补，自动附带 claim 阶段
+                claim_needed = ('claim' in bad) or any(t in bad_browser for t in ('dailyset', 'moreactivities', 'quests'))
+                if claim_needed and 'claim' not in bad_browser:
                     bad_browser.append('claim')
                 if bsess is not None and bsess.ch is not None:
                     # 复用当前已开启的浏览器会话，杜绝重新拉起 Chromium 的低效开销
@@ -458,6 +461,25 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
                 else:
                     b_fixes = executor.run_browser_session(name, bad_browser, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
                 for ph, r in b_fixes.items():
+                    if ph == 'claim':
+                        prev_claim = results_map.get('claim', '')
+                        if prev_claim.startswith('成功领取'):
+                            if r == '无可领取积分(跳过)':
+                                config.log(name, '[阶段 10 自动回补] claim: 前序已成功领取，回补无可增量积分，保留原成功状态 (%s)' % prev_claim)
+                                continue
+                            elif r.startswith('成功领取'):
+                                results_map[ph] = '%s + 回补(%s)' % (prev_claim, r)
+                                config.log(name, '[阶段 10 自动回补] claim 增量领取成功: %s' % r)
+                                continue
+                        elif prev_claim == '无可领取积分(跳过)' and r == '无可领取积分(跳过)':
+                            results_map[ph] = '无可领取积分(跳过)'
+                            config.log(name, '[阶段 10 自动回补] claim: 无可领取积分(跳过)')
+                            continue
+                        elif r.startswith('成功领取'):
+                            results_map[ph] = '回补成功(%s)' % r
+                            config.log(name, '[阶段 10 自动回补] claim 回补成功: %s' % r)
+                            continue
+
                     results_map[ph] = '回补(%s)' % r
                     config.log(name, '[阶段 10 自动回补] %s: %s' % (ph, r))
 
