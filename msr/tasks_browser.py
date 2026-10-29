@@ -788,57 +788,73 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             navigate(cdp, q_url)
             time.sleep(random.uniform(2, 4))
 
-            # 检测可点击的活跃步骤
-            step_info = ev(cdp, """(() => {
-              const anchors = Array.from(document.querySelectorAll("main a[href], main button")).filter(a => {
-                const row = a.closest("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]") || a.parentElement;
-                if (row && (row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess], svg[aria-label*=complete i], svg[aria-label*=已完成]") || /已完成|completed/i.test(row.innerText))) {
-                  return false;
-                }
+            # 智能等待打卡步骤组件水合渲染 (最多 15 秒)
+            step_info = None
+            step_deadline = time.time() + 15
+            while time.time() < step_deadline:
+                res = ev(cdp, """(() => {
+                  const mainEl = document.querySelector("main");
+                  if (!mainEl) return { ready: false, step: null };
+                  const anchors = Array.from(mainEl.querySelectorAll("a[href], button")).filter(a => {
+                    const row = a.closest("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]") || a.parentElement;
+                    if (row && (row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess], svg[aria-label*=complete i], svg[aria-label*=已完成]") || /已完成|completed/i.test(row.innerText))) {
+                      return false;
+                    }
 
-                const t = a.innerText || "";
-                const h = a.href || "";
-                if (h.includes("/dashboard") || h.includes("/earn") || h.includes("/redeem") || h.includes("/pointsbreakdown") || h.includes("terms") || h.includes("privacy")) return false;
-                return true;
-              });
-              if (anchors.length === 0) return null;
-              const target = anchors[0];
-              const p = target.closest("div.flex.flex-col.gap-3, div.flex.flex-row") || target.parentElement;
-              const pTitle = p?.querySelector("h2, h3, h4, [class*=title]")?.innerText?.replace(/\\n/g, ' ')?.trim() || "";
-              const pText = p?.innerText?.replace(/\\n/g, ' ')?.trim() || "";
+                    const t = a.innerText || "";
+                    const h = a.href || "";
+                    if (h.includes("/dashboard") || h.includes("/earn") || h.includes("/redeem") || h.includes("/pointsbreakdown") || h.includes("terms") || h.includes("privacy")) return false;
+                    return true;
+                  });
+                  if (anchors.length === 0) {
+                    const allRows = mainEl.querySelectorAll("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]");
+                    if (allRows.length > 0) return { ready: true, step: null };
+                    return { ready: false, step: null };
+                  }
+                  const target = anchors[0];
+                  const p = target.closest("div.flex.flex-col.gap-3, div.flex.flex-row") || target.parentElement;
+                  const pTitle = p?.querySelector("h2, h3, h4, [class*=title]")?.innerText?.replace(/\\n/g, ' ')?.trim() || "";
+                  const pText = p?.innerText?.replace(/\\n/g, ' ')?.trim() || "";
 
-              let href = target.href || "";
-              if (href.startsWith("ms-search://")) {
-                let q = "";
-                try {
-                  const u = new URL(href);
-                  q = u.searchParams.get("q") || "";
-                } catch(e) {
-                  const m = href.match(/[?&]q=([^&]+)/);
-                  if (m) q = decodeURIComponent(m[1]);
-                }
-                href = "https://www.bing.com/search?q=" + encodeURIComponent(q || "today news");
-                target.href = href;
-                target.target = "_blank";
-              }
-              let hasQ = false;
-              try {
-                const u = new URL(href, location.href);
-                hasQ = !!u.searchParams.get("q");
-              } catch(e) {}
+                  let href = target.href || "";
+                  if (href.startsWith("ms-search://")) {
+                    let q = "";
+                    try {
+                      const u = new URL(href);
+                      q = u.searchParams.get("q") || "";
+                    } catch(e) {
+                      const m = href.match(/[?&]q=([^&]+)/);
+                      if (m) q = decodeURIComponent(m[1]);
+                    }
+                    href = "https://www.bing.com/search?q=" + encodeURIComponent(q || "today news");
+                    target.href = href;
+                    target.target = "_blank";
+                  }
+                  let hasQ = false;
+                  try {
+                    const u = new URL(href, location.href);
+                    hasQ = !!u.searchParams.get("q");
+                  } catch(e) {}
 
-              const multiDayMatch = pText.match(/(\\d+\\s*\\/\\s*\\d+\\s*(?:天已完成|days?(?:\\s+completed)?))/i) || pText.match(/(\\d+\\s*of\\s*\\d+\\s*days?(?:\\s+completed)?)/i);
+                  const multiDayMatch = pText.match(/(\\d+\\s*\\/\\s*\\d+\\s*(?:天已完成|days?(?:\\s+completed)?))/i) || pText.match(/(\\d+\\s*of\\s*\\d+\\s*days?(?:\\s+completed)?)/i);
 
-              return {
-                text: target.innerText.replace(/\\n/g, ' ').trim() || pTitle,
-                title: pTitle,
-                href: href,
-                hasQuery: hasQ,
-                cardText: pText,
-                isMultiDay: !!multiDayMatch,
-                multiDayProg: multiDayMatch ? multiDayMatch[1] : null
-              };
-            })()""")
+                  return {
+                    ready: true,
+                    step: {
+                      text: target.innerText.replace(/\\n/g, ' ').trim() || pTitle,
+                      title: pTitle,
+                      href: href,
+                      hasQuery: hasQ,
+                      cardText: pText,
+                      isMultiDay: !!multiDayMatch,
+                      multiDayProg: multiDayMatch ? multiDayMatch[1] : null
+                    }
+                  };
+                })()""")
+                if res and res.get('ready'):
+                    step_info = res.get('step')
+                    break
+                time.sleep(1.0)
 
             if not step_info:
                 log('%s 今日无更多待做步骤' % q_name)
