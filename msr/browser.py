@@ -577,7 +577,7 @@ class Chromium:
                     break
         self.binary = binary
         self.cdp_port = cdp_port
-        self.port = port or cdp_port or self._free_port()
+        self.port = port or cdp_port or 0
         self.is_external = bool(cdp_port)
         self.user_data_dir = user_data_dir
         self.version = version
@@ -608,9 +608,10 @@ class Chromium:
                 pass
             self.log(f'外部端口 {self.port} 未响应, 自动启动内置 headless chromium')
             self.is_external = False
-            self.port = self._free_port()
+            self.port = 0
 
-        # 启动前清理当前账号 Profile 目录下残留的 Singleton 锁文件，防止因上次异常退出导致启动挂死
+        # 启动前清理当前账号 Profile 目录下残留的 Singleton 锁文件与旧 CDP 端口记录
+        active_port_file = os.path.join(self.user_data_dir, 'DevToolsActivePort') if self.user_data_dir else None
         if self.user_data_dir and os.path.isdir(self.user_data_dir):
             for lock_name in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
                 f = os.path.join(self.user_data_dir, lock_name)
@@ -619,6 +620,11 @@ class Chromium:
                         os.unlink(f)
                     except Exception:
                         pass
+            if active_port_file and os.path.isfile(active_port_file):
+                try:
+                    os.remove(active_port_file)
+                except Exception:
+                    pass
 
         w = self.fingerprint.get('screen_width', 1280)
         h = self.fingerprint.get('screen_height', 900)
@@ -659,12 +665,24 @@ class Chromium:
                                      stderr=subprocess.DEVNULL, preexec_fn=preexec)
         deadline = time.time() + 20
         while time.time() < deadline:
-            try:
-                tabs = _http_json(f'http://127.0.0.1:{self.port}/json/list', timeout=3)
-                if tabs:
-                    return tabs
-            except Exception:
-                pass
+            # 若使用 0 端口动态分配，从 Chromium 写入的 DevToolsActivePort 提取真实端口
+            if self.port == 0 and active_port_file and os.path.isfile(active_port_file):
+                try:
+                    with open(active_port_file, 'r', encoding='utf-8') as f:
+                        lines = [l.strip() for l in f if l.strip()]
+                    if lines and lines[0].isdigit():
+                        self.port = int(lines[0])
+                        self.log(f'Chromium 内核已原子绑定独立 CDP 端口: {self.port}')
+                except Exception:
+                    pass
+
+            if self.port != 0:
+                try:
+                    tabs = _http_json(f'http://127.0.0.1:{self.port}/json/list', timeout=3)
+                    if tabs:
+                        return tabs
+                except Exception:
+                    pass
             time.sleep(0.5)
         raise StepError('chromium 启动超时(CDP 无响应)')
 

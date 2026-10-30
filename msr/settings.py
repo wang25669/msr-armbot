@@ -37,15 +37,13 @@ DEFAULT_SETTINGS = {
         "edge30m_interval": 305,        # 两次心跳上报间隔秒数
     },
 
-    # 4. 多账号编排与调度参数
+    # 4. 多账号编排与调度参数 (各账号独立配置专属每日定时，此处管理全局调度与并发安全)
     "schedule": {
-        "daily_enabled": True,          # 每日自动循环定时开关
-        "daily_time": "01:30",          # 每日定时启动时间 (24小时制 HH:MM)
-        "inter_account_wait_min": 15,   # 账号间最小随机等待时间 (分钟，防批量并发风控)
-        "inter_account_wait_max": 40,   # 账号间最大随机等待时间 (分钟)
+        "daily_enabled": True,          # 每日自动循环定时总开关
+        "max_concurrency": 2,           # 最大任务并发上限 (同时拉起运行的最大浏览器实例数，默认 2，防爆内存)
         "inter_stage_wait_min": 3,      # 阶段间随机过渡等待最小时间 (分钟)
         "inter_stage_wait_max": 5,      # 阶段间随机过渡等待最大时间 (分钟)
-        "random_start_delay_max": 25,   # 定时任务启动时的随机抖动延迟上限 (分钟)
+        "random_start_delay_max": 25,   # 定时任务到达时的随机抖动延迟上限 (分钟，防整点固定特征)
         "retry_wait_minutes": 4,        # 失败任务自动修复重试前等待时间 (分钟)
         "fast_mode": False,             # 极速测试模式 (开启后所有等待压缩至 3-6 秒)
     },

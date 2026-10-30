@@ -192,6 +192,7 @@ def sync_logs_from_disk(force=False):
                     LIVE_LOGS_SET.discard(removed)
 
 
+ACTIVE_RUNNERS = {}
 RUNNER_STATE = {
     'running': False,
     'target': '',
@@ -200,6 +201,17 @@ RUNNER_STATE = {
     'exit_code': None,
 }
 RUNNER_STATE_LOCK = threading.Lock()
+
+
+def _sync_runner_state():
+    running_names = list(ACTIVE_RUNNERS.keys())
+    RUNNER_STATE['running'] = bool(running_names)
+    RUNNER_STATE['target'] = ', '.join(running_names) if running_names else ''
+    if running_names:
+        RUNNER_STATE['started_at'] = min(v['started_at'] for v in ACTIVE_RUNNERS.values())
+        RUNNER_STATE['last_line'] = ACTIVE_RUNNERS[running_names[-1]].get('last_line', '')
+    else:
+        RUNNER_STATE['last_line'] = ''
 
 
 HTML_CONTENT = """<!DOCTYPE html>
@@ -612,10 +624,14 @@ HTML_CONTENT = """<!DOCTYPE html>
     <div id="tab-accounts" class="tab-content">
       <div class="card">
         <div class="card-title">添加 / 编辑 MSR 账号</div>
-        <div class="grid" style="grid-template-columns: 1fr 1.6fr 1fr auto; align-items: flex-end;">
+        <div class="grid" style="grid-template-columns: 1.2fr 1fr 1.6fr auto; align-items: flex-end;">
           <div class="form-group">
             <label>账号名称 (唯一标识)</label>
             <input type="text" id="acc-name-input" placeholder="例如: sg_user, cn_main">
+          </div>
+          <div class="form-group">
+            <label>每日定时时间 (24小时制 HH:MM，必填)</label>
+            <input type="text" id="acc-time-input" placeholder="例如: 02:30" maxlength="5">
           </div>
           <div class="form-group">
             <label>独立出口代理 (支持 HTTP / SOCKS5，留空直连)</label>
@@ -751,15 +767,15 @@ HTML_CONTENT = """<!DOCTYPE html>
               ⏱️ 多账号编排与调度参数 (Schedule)
             </h4>
             <div class="form-group">
-              <label>每日自动定时执行总开关 (到点自动唤醒拉起浏览器执行全部账号)</label>
+              <label>每日自动定时调度总开关 (总闸门：关闭后所有账号定时均不自动触发)</label>
               <select id="sch-daily-enabled">
-                <option value="true">开启 (每日自动定时循环运行)</option>
+                <option value="true">开启 (各账号按设定的每日时间自动执行)</option>
                 <option value="false">关闭 (仅手动触发)</option>
               </select>
             </div>
             <div class="form-group">
-              <label>每日定时启动时间 (24小时制 HH:MM，默认 01:30)</label>
-              <input type="text" id="sch-daily-time" placeholder="01:30">
+              <label>最大任务并发上限 (max_concurrency，限制同时启动的 Chromium 实例数，默认 2)</label>
+              <input type="number" id="sch-max-concurrency" min="1" max="10" placeholder="2">
             </div>
             <div class="form-group">
               <label>极速测试模式 (fast_mode, 开启后等待压缩至 3-6 秒)</label>
@@ -767,14 +783,6 @@ HTML_CONTENT = """<!DOCTYPE html>
                 <option value="false">关闭 (真实真人节奏，约2小时/号)</option>
                 <option value="true">开启 (极速调试，仅测试流程连通性)</option>
               </select>
-            </div>
-            <div class="form-group">
-              <label>多账号间随机等待最小分钟数 (防批量并发风控，默认 15 分钟)</label>
-              <input type="number" id="sch-acc-min">
-            </div>
-            <div class="form-group">
-              <label>多账号间随机等待最大分钟数 (默认 40 分钟)</label>
-              <input type="number" id="sch-acc-max">
             </div>
             <div class="form-group">
               <label>阶段间过渡等待最小分钟数 (默认 3 分钟)</label>
@@ -785,7 +793,7 @@ HTML_CONTENT = """<!DOCTYPE html>
               <input type="number" id="sch-stage-max">
             </div>
             <div class="form-group">
-              <label>定时启动随机延迟上限 (分钟，默认 25 分钟防固定时间特征)</label>
+              <label>定时启动随机延迟上限 (分钟，默认 25 分钟防整点特征)</label>
               <input type="number" id="sch-start-delay">
             </div>
             <div class="form-group">
@@ -1343,17 +1351,22 @@ HTML_CONTENT = """<!DOCTYPE html>
   <div id="edit-proxy-modal" class="modal-overlay">
     <div class="modal">
       <div class="card-title">
-        <span id="edit-proxy-title">✏️ 修改账号代理配置</span>
+        <span id="edit-proxy-title">✏️ 修改账号代理与定时配置</span>
         <button class="btn btn-secondary btn-sm" onclick="closeEditProxyModal()">关闭</button>
       </div>
 
       <p style="font-size:13px; color:var(--text-sub); margin-bottom:14px; line-height:1.5;">
-        为该账号单独指定出口代理（支持 HTTP / SOCKS5，留空即为直连）。修改代理后可直接现场测试连通性，保存后旧出口缓存将自动失效刷新。
+        为该账号单独指定每日定时执行时间与出口代理（支持 HTTP / SOCKS5，留空为直连）。修改保存后立即生效。
       </p>
 
       <div class="form-group">
         <label>账号名称 (唯一标识)</label>
         <input type="text" id="edit-proxy-name" readonly style="background:#0f172a; color:#94a3b8; cursor:not-allowed;">
+      </div>
+
+      <div class="form-group">
+        <label>每日定时执行时间 (24小时制 HH:MM，必填，例如: 02:30)</label>
+        <input type="text" id="edit-proxy-time" placeholder="例如: 02:30" maxlength="5">
       </div>
 
       <div class="form-group">
@@ -1472,11 +1485,15 @@ HTML_CONTENT = """<!DOCTYPE html>
         document.getElementById('stat-summary').innerText = `总账号数: ${data.accounts?.length || 0} | 服务器时间: ${data.time || ''}`;
         if (data.scheduler) {
           const sch = data.scheduler;
+          const runner = data.runner || {};
           const badge = document.getElementById('scheduler-badge');
           if (badge) {
-            badge.innerHTML = sch.daily_enabled
-              ? `⏰ 每日定时: <b style="color:var(--primary); font-family:monospace;">${sch.daily_time}</b> <span style="color:#10b981;">(自动唤醒)</span>`
-              : `⏰ 每日定时: <span style="color:var(--text-sub);">已暂停</span>`;
+            const runningCount = runner.running_count || (runner.running ? 1 : 0);
+            const maxConc = sch.max_concurrency || runner.max_concurrency || 2;
+            const schText = sch.daily_enabled
+              ? `<span style="color:#10b981;">自动调度生效中</span>`
+              : `<span style="color:var(--text-sub);">已暂停</span>`;
+            badge.innerHTML = `⏰ 定时引擎: ${schText} | ⚡ 运行并发: <b style="color:var(--primary); font-family:monospace;">${runningCount}/${maxConc}</b>`;
           }
         }
       } catch(err) {
@@ -1542,13 +1559,23 @@ HTML_CONTENT = """<!DOCTYPE html>
           </div>
         `;
 
+        const cdp = a.cdp_status || { status: 'idle', desc: '动态闲置' };
+        let cdpBadge = `<span class="badge badge-disabled" style="font-size:11px;" title="未启动时自动动态分配空闲端口">🔌 CDP: ${cdp.desc}</span>`;
+        if (cdp.status === 'running') {
+          cdpBadge = `<span class="badge badge-success" style="font-size:11px;" title="正在运行中的 Chromium CDP 端口">🔌 CDP: ${cdp.desc}</span>`;
+        } else if (cdp.status === 'external') {
+          cdpBadge = `<span class="badge badge-info" style="font-size:11px;" title="配置的外部固定 Chrome 调试端口">🔌 CDP: ${cdp.desc}</span>`;
+        }
+
         const runBtn = a.enabled
-          ? `<button class="btn btn-sm" onclick="runSingle('${a.name}')">立即运行</button>`
+          ? (cdp.status === 'running'
+             ? `<button class="btn btn-sm" style="background:#f59e0b; cursor:wait;" disabled>⏳ 运行中</button>`
+             : `<button class="btn btn-sm" onclick="runSingle('${a.name}')">立即运行</button>`)
           : `<button class="btn btn-secondary btn-sm" style="opacity:0.65;" onclick="toast('账号 [${a.name}] 当前处于停用状态，请先在“账号管理”中启用')">⏸️ 已停用</button>`;
 
         let actionButtons = `
           ${runBtn}
-          <button class="btn btn-secondary btn-sm" onclick="openEditProxyModal('${a.name}', '${a.proxy || ''}')">✏️ 改代理</button>
+          <button class="btn btn-secondary btn-sm" onclick="openEditProxyModal('${a.name}', '${a.proxy || ''}', '${a.schedule_time || ''}')">✏️ 改配置</button>
           <button class="btn btn-secondary btn-sm" onclick="openFingerprintModal('${a.name}')">专属指纹</button>
         `;
         if (isAuthValid) {
@@ -1582,10 +1609,12 @@ HTML_CONTENT = """<!DOCTYPE html>
               <span class="acc-name">${a.name}</span>
               <div class="flex-row">
                 ${authBadge}
+                ${cdpBadge}
                 <span class="badge ${a.enabled ? 'badge-success' : 'badge-disabled'}">${a.enabled ? '启用' : '停用'}</span>
               </div>
             </div>
             <div class="acc-meta">
+              <div>⏰ 每日定时: <strong style="color:#38bdf8; font-family:monospace;">${a.schedule_time || '未设置'}</strong> | 🔌 CDP: <strong style="color:#a7f3d0;">${cdp.desc}</strong></div>
               <div>💰 当前积分: <strong style="color:var(--primary); font-size:16px;">${a.balance || 0}</strong> <span style="font-size:12px; color:var(--success); margin-left:6px;">(今日: +${todayGained}分)</span></div>
 
               <!-- MSR 三区架构与代理一致性诊断 -->
@@ -1634,6 +1663,14 @@ HTML_CONTENT = """<!DOCTYPE html>
           ? `<span class="badge badge-success" style="font-size:11px;">🟢 登录有效</span>`
           : `<span class="badge badge-disabled" style="font-size:11px;">🔴 凭据失效</span>`;
 
+        const cdp = a.cdp_status || { status: 'idle', desc: '动态闲置' };
+        let cdpBadge = `<span class="badge badge-disabled" style="font-size:11px;">🔌 CDP: ${cdp.desc}</span>`;
+        if (cdp.status === 'running') {
+          cdpBadge = `<span class="badge badge-success" style="font-size:11px;">🔌 CDP: ${cdp.desc}</span>`;
+        } else if (cdp.status === 'external') {
+          cdpBadge = `<span class="badge badge-info" style="font-size:11px;">🔌 CDP: ${cdp.desc}</span>`;
+        }
+
         const diag = a.roaming_diagnosis || { code: 'unknown', text: '⚪ 待探测', desc: '' };
         let diagBadgeClass = 'badge-disabled';
         if (diag.code === 'matched') diagBadgeClass = 'badge-success';
@@ -1672,19 +1709,20 @@ HTML_CONTENT = """<!DOCTYPE html>
               <strong style="font-size:16px; color:#fff;">${a.name}</strong>
               ${a.saved_username ? `<span style="font-size:12px; color:var(--text-sub); font-family:monospace;">(${a.saved_username})</span>` : ''}
               ${authBadge}
+              ${cdpBadge}
               ${credBadge}
               <span class="badge ${diagBadgeClass}" style="font-size:11px;">${diag.text}</span>
               <span class="badge badge-info" style="font-size:11px;">近7天 +${a.history_7d?.total_gained || 0}分</span>
             </div>
             <div style="color:var(--text-sub); font-size:13px; margin-top:4px;">
-              代理: <code>${a.proxy || '直连'}</code> | 👤 资料: <b>${a.account_country || '-'}</b> | 🎁 市场: <b>${a.rewards_market || a.country || '-'}</b> | 🌐 出口: <b>${pGeoShort}</b>
+              ⏰ 每日执行: <b style="color:#38bdf8; font-family:monospace;">${a.schedule_time || '未设置'}</b> | 代理: <code>${a.proxy || '直连'}</code> | 👤 资料: <b>${a.account_country || '-'}</b> | 🎁 市场: <b>${a.rewards_market || a.country || '-'}</b> | 🌐 出口: <b>${pGeoShort}</b>
             </div>
             <div style="color:#64748b; font-size:12px; margin-top:2px;">
               指纹: <code style="color:#a7f3d0; font-size:11px;">${a.fingerprint_summary || '默认'}</code>
             </div>
           </div>
           <div class="flex-row">
-            <button class="btn btn-primary-sub btn-sm" onclick="openEditProxyModal('${a.name}', '${a.proxy || ''}')">✏️ 修改代理</button>
+            <button class="btn btn-primary-sub btn-sm" onclick="openEditProxyModal('${a.name}', '${a.proxy || ''}', '${a.schedule_time || ''}')">✏️ 修改配置</button>
             ${a.proxy ? `<button class="btn btn-secondary btn-sm" onclick="testAccountProxy('${a.name}', '${a.proxy}')">⚡ 测代理</button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="openFingerprintModal('${a.name}')">专属指纹</button>
             ${authBtns}
@@ -1699,28 +1737,37 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     async function saveNewAccount() {
       const name = document.getElementById('acc-name-input').value.trim();
+      const schedule_time = document.getElementById('acc-time-input').value.trim();
       const proxy = document.getElementById('acc-proxy-input').value.trim() || null;
       if (!name) return toast('请输入账号标识名称');
+      if (!schedule_time) return toast('请输入每日定时执行时间 (24小时制 HH:MM，如 02:30)');
+      if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(schedule_time)) return toast('定时时间格式错误，须为 24小时制 HH:MM (如 02:30)');
 
-      await fetch('/api/accounts', {
+      const res = await fetch('/api/accounts', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name, proxy, enabled: true})
+        body: JSON.stringify({name, schedule_time, proxy, enabled: true})
       });
-      toast(`账号 ${name} 已保存`);
+      const d = await res.json().catch(() => ({}));
+      if (res.status !== 200) {
+        return toast('保存失败: ' + (d.message || '未知错误'));
+      }
+      toast(`账号 ${name} 已保存 (每日定时: ${schedule_time})`);
       document.getElementById('acc-name-input').value = '';
+      document.getElementById('acc-time-input').value = '';
       document.getElementById('acc-proxy-input').value = '';
       fetchStatus();
     }
 
     let editingAccountName = '';
 
-    function openEditProxyModal(name, currentProxy) {
+    function openEditProxyModal(name, currentProxy, currentTime) {
       editingAccountName = name;
-      document.getElementById('edit-proxy-title').innerText = `✏️ 修改账号代理: [${name}]`;
+      document.getElementById('edit-proxy-title').innerText = `✏️ 修改账号代理与定时: [${name}]`;
       document.getElementById('edit-proxy-name').value = name;
       const cleanProxy = (currentProxy && currentProxy !== 'null' && currentProxy !== 'undefined') ? currentProxy : '';
       document.getElementById('edit-proxy-val').value = cleanProxy;
+      document.getElementById('edit-proxy-time').value = (currentTime && currentTime !== 'null' && currentTime !== 'undefined') ? currentTime : '02:00';
       document.getElementById('edit-proxy-align-fp').checked = true;
 
       const box = document.getElementById('modal-proxy-test-box');
@@ -1791,8 +1838,12 @@ HTML_CONTENT = """<!DOCTYPE html>
     async function submitEditProxy() {
       const name = editingAccountName;
       const proxy = document.getElementById('edit-proxy-val').value.trim() || null;
+      const schedule_time = document.getElementById('edit-proxy-time').value.trim();
       const autoAlign = document.getElementById('edit-proxy-align-fp').checked;
       const btn = document.getElementById('btn-submit-proxy');
+
+      if (!schedule_time) return toast('请输入每日定时执行时间 (如 02:30)');
+      if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(schedule_time)) return toast('定时时间格式错误，须为 24小时制 HH:MM (如 02:30)');
 
       btn.disabled = true;
       btn.innerText = '正在保存...';
@@ -1804,6 +1855,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           body: JSON.stringify({
             name,
             proxy,
+            schedule_time,
             auto_align_proxy: autoAlign
           })
         });
@@ -2124,10 +2176,8 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         // 4. schedule
         document.getElementById('sch-daily-enabled').value = String(s.schedule?.daily_enabled !== false);
-        document.getElementById('sch-daily-time').value = s.schedule?.daily_time || '01:30';
+        document.getElementById('sch-max-concurrency').value = s.schedule?.max_concurrency ?? 2;
         document.getElementById('cfg-fast-mode').value = String(!!s.schedule?.fast_mode);
-        document.getElementById('sch-acc-min').value = s.schedule?.inter_account_wait_min ?? 15;
-        document.getElementById('sch-acc-max').value = s.schedule?.inter_account_wait_max ?? 40;
         document.getElementById('sch-stage-min').value = s.schedule?.inter_stage_wait_min ?? 3;
         document.getElementById('sch-stage-max').value = s.schedule?.inter_stage_wait_max ?? 5;
         document.getElementById('sch-start-delay').value = s.schedule?.random_start_delay_max ?? 25;
@@ -2198,10 +2248,8 @@ HTML_CONTENT = """<!DOCTYPE html>
         },
         schedule: {
           daily_enabled: document.getElementById('sch-daily-enabled').value === 'true',
-          daily_time: document.getElementById('sch-daily-time').value.trim() || '01:30',
+          max_concurrency: parseInt(document.getElementById('sch-max-concurrency').value) || 2,
           fast_mode: document.getElementById('cfg-fast-mode').value === 'true',
-          inter_account_wait_min: parseInt(document.getElementById('sch-acc-min').value) || 15,
-          inter_account_wait_max: parseInt(document.getElementById('sch-acc-max').value) || 40,
           inter_stage_wait_min: parseInt(document.getElementById('sch-stage-min').value) || 3,
           inter_stage_wait_max: parseInt(document.getElementById('sch-stage-max').value) || 5,
           random_start_delay_max: parseInt(document.getElementById('sch-start-delay').value) || 25,
@@ -3203,6 +3251,16 @@ class WebHandler(BaseHTTPRequestHandler):
             target = next((a for a in accs if a['name'] == name), None)
             old_proxy = target.get('proxy') if target else None
             new_proxy = payload.get('proxy')
+
+            import re
+            schedule_time = (payload.get('schedule_time') or '').strip()
+            if target and not schedule_time:
+                schedule_time = target.get('schedule_time')
+            if not schedule_time or not re.match(r'^([01]\d|2[0-3]):([0-5]\d)$', schedule_time):
+                self._json_resp({'status': 'error', 'message': '每日定时执行时间不能为空，格式须为 24小时制 HH:MM (如 02:30)'}, code=400)
+                return
+            payload['schedule_time'] = schedule_time
+
             if target:
                 target.update(payload)
             else:
@@ -3218,7 +3276,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
-            append_live_log(f'保存账号配置: {name} (代理: {new_proxy or "直连"})')
+            append_live_log(f'保存账号配置: {name} (每日定时: {schedule_time}, 代理: {new_proxy or "直连"})')
             self._json_resp({'status': 'ok'})
             return
 
@@ -3461,9 +3519,57 @@ class WebHandler(BaseHTTPRequestHandler):
             saved_username = (cred.get('username') if cred else None) or a.get('username')
             has_saved_password = bool(cred and cred.get('password'))
 
+            # 探测当前活跃 CDP 端口状态
+            p = config.profile(name)
+            cdp_port_configured = a.get('cdp_port')
+            active_port_file = os.path.join(p, 'chrome', 'DevToolsActivePort')
+            with RUNNER_STATE_LOCK:
+                is_task_running = name in ACTIVE_RUNNERS
+
+            p_lock = os.path.join(p, 'runner.lock')
+            if not is_task_running and os.path.isfile(p_lock):
+                try:
+                    with open(p_lock, 'r', encoding='utf-8') as f:
+                        c = f.read().strip()
+                    from msr.runner import is_runner_process_alive
+                    if c.isdigit() and is_runner_process_alive(int(c)):
+                        is_task_running = True
+                except Exception:
+                    pass
+
+            if is_task_running:
+                real_port = None
+                if os.path.isfile(active_port_file):
+                    try:
+                        with open(active_port_file, 'r', encoding='utf-8') as pf:
+                            lines = [l.strip() for l in pf if l.strip()]
+                        if lines and lines[0].isdigit():
+                            real_port = int(lines[0])
+                    except Exception:
+                        pass
+                cdp_status = {
+                    'status': 'running',
+                    'port': real_port or cdp_port_configured,
+                    'desc': f':{real_port} (运行中)' if real_port else '启动中...'
+                }
+            elif cdp_port_configured:
+                cdp_status = {
+                    'status': 'external',
+                    'port': cdp_port_configured,
+                    'desc': f':{cdp_port_configured} (外部)'
+                }
+            else:
+                cdp_status = {
+                    'status': 'idle',
+                    'port': None,
+                    'desc': '动态闲置'
+                }
+
             detailed.append({
                 'name': name,
                 'enabled': a.get('enabled', True),
+                'schedule_time': a.get('schedule_time'),
+                'cdp_status': cdp_status,
                 'saved_username': saved_username,
                 'has_saved_password': has_saved_password,
                 'proxy': a.get('proxy'),
@@ -3489,13 +3595,17 @@ class WebHandler(BaseHTTPRequestHandler):
         from msr import settings
         st_cfg = settings.load_settings()
         sch = st_cfg.get('schedule', {})
+        max_concurrency = int(sch.get('max_concurrency', 2))
         scheduler_info = {
             'daily_enabled': sch.get('daily_enabled', True),
-            'daily_time': sch.get('daily_time', '01:30'),
+            'max_concurrency': max_concurrency,
             'status': '运行中' if sch.get('daily_enabled', True) else '已暂停'
         }
         with RUNNER_STATE_LOCK:
             runner_copy = dict(RUNNER_STATE)
+            runner_copy['running_count'] = len(ACTIVE_RUNNERS)
+            runner_copy['max_concurrency'] = max_concurrency
+            runner_copy['active_tasks'] = {k: {'started_at': v['started_at'], 'last_line': v.get('last_line', '')} for k, v in ACTIVE_RUNNERS.items()}
         self._json_resp({
             'accounts': detailed,
             'scheduler': scheduler_info,
@@ -3551,7 +3661,7 @@ class WebHandler(BaseHTTPRequestHandler):
         name = payload.get('name') or urllib.parse.parse_qs(u.query).get('name', [None])[0]
         dry = 'dry_run' in u.query or payload.get('dry_run')
 
-        from msr import config
+        from msr import config, settings
         home_args = ['--home', config.HOME] if getattr(config, 'HOME', None) else []
 
         if dry:
@@ -3560,61 +3670,81 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json_resp({'status': 'ok', 'output': p.stdout})
             return
 
+        st_cfg = settings.load_settings()
+        max_conc = int(st_cfg.get('schedule', {}).get('max_concurrency', 2))
+
         with RUNNER_STATE_LOCK:
-            if RUNNER_STATE.get('running'):
-                target = RUNNER_STATE.get('target', '任务')
-                append_live_log(f'⚠️ 当前已有任务正在执行中 (目标: {target})，请等待其执行完毕')
-                self._json_resp({'status': 'busy', 'message': f'当前已有任务正在执行中 (目标: {target})，请等待完成后再提交'}, code=409)
-                return
+            if name and name != '--all':
+                if name in ACTIVE_RUNNERS:
+                    append_live_log(f'⚠️ 账号 [{name}] 当前已有任务正在执行中，请勿重复启动')
+                    self._json_resp({'status': 'busy', 'message': f'账号 [{name}] 任务正在执行中，请勿重复提交'}, code=409)
+                    return
+                if len(ACTIVE_RUNNERS) >= max_conc:
+                    append_live_log(f'⚠️ 当前并发任务已达上限 ({len(ACTIVE_RUNNERS)}/{max_conc})，拒绝启动账号 [{name}]')
+                    self._json_resp({'status': 'busy', 'message': f'当前并发运行任务数已达上限 ({len(ACTIVE_RUNNERS)}/{max_conc})，请等待空闲槽位'}, code=409)
+                    return
+            else:
+                if ACTIVE_RUNNERS:
+                    append_live_log(f'⚠️ 当前已有 {len(ACTIVE_RUNNERS)} 个账号正在并发运行中，拒绝执行批量运行')
+                    self._json_resp({'status': 'busy', 'message': f'当前已有 {len(ACTIVE_RUNNERS)} 个账号正在并发运行中，请等待完成后再触发批量执行'}, code=409)
+                    return
 
-        # 检查底层 runner.lock 文件锁 (严格核验进程指纹，避免死锁或容器 PID 误判)
-        lock_p = os.path.join(config.HOME, 'runner.lock') if getattr(config, 'HOME', None) else None
-        if lock_p and os.path.isfile(lock_p):
-            try:
-                with open(lock_p, 'r', encoding='utf-8') as f:
-                    c = f.read().strip()
-                if c.isdigit():
-                    pid = int(c)
-                    from msr.runner import is_runner_process_alive
-                    if is_runner_process_alive(pid):
-                        append_live_log(f'⚠️ 系统检测到自动化任务进程 (PID: {pid}) 正在执行中，拒绝并发启动')
-                        self._json_resp({'status': 'busy', 'message': f'已有任务进程正在执行中 (PID: {pid})'}, code=409)
-                        return
-                    else:
-                        # 属残留假死锁，主动清理以保证用户操作畅通
-                        try:
-                            os.remove(lock_p)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+        # 检查底层 runner.lock 文件锁 (细粒度单账号锁与残留核验)
+        if name and name != '--all':
+            lock_p = os.path.join(config.profile(name), 'runner.lock')
+            if os.path.isfile(lock_p):
+                try:
+                    with open(lock_p, 'r', encoding='utf-8') as f:
+                        c = f.read().strip()
+                    if c.isdigit():
+                        pid = int(c)
+                        from msr.runner import is_runner_process_alive
+                        if is_runner_process_alive(pid):
+                            append_live_log(f'⚠️ 账号 [{name}] 任务进程 (PID: {pid}) 正在执行中')
+                            self._json_resp({'status': 'busy', 'message': f'账号 [{name}] 已有进程正在执行中 (PID: {pid})'}, code=409)
+                            return
+                        else:
+                            try:
+                                os.remove(lock_p)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
 
-        def bg_runner():
+        def bg_runner(target_name):
             with RUNNER_STATE_LOCK:
-                RUNNER_STATE['running'] = True
-                RUNNER_STATE['target'] = name or '--all'
-                RUNNER_STATE['started_at'] = time.time()
-                RUNNER_STATE['last_line'] = '正在启动任务...'
-                RUNNER_STATE['exit_code'] = None
+                ACTIVE_RUNNERS[target_name] = {
+                    'started_at': time.time(),
+                    'last_line': '正在启动任务...',
+                    'proc': None
+                }
+                _sync_runner_state()
 
-            append_live_log(f'>>> 开始执行任务: {name or "--all"}', name='系统')
-            cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', name or '--all']
+            tag = target_name if target_name != '--all' else '系统'
+            append_live_log(f'>>> 开始执行任务: {target_name}', name=tag)
+            cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', target_name]
+            if st_cfg.get('schedule', {}).get('fast_mode'):
+                cmd.append('--fast')
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            with RUNNER_STATE_LOCK:
+                if target_name in ACTIVE_RUNNERS:
+                    ACTIVE_RUNNERS[target_name]['proc'] = proc
             for line in iter(proc.stdout.readline, ''):
                 line = line.strip()
                 if line:
                     with RUNNER_STATE_LOCK:
-                        RUNNER_STATE['last_line'] = line
+                        if target_name in ACTIVE_RUNNERS:
+                            ACTIVE_RUNNERS[target_name]['last_line'] = line
+                        _sync_runner_state()
                     append_live_log(line)
             proc.stdout.close()
             proc.wait()
             with RUNNER_STATE_LOCK:
-                RUNNER_STATE['running'] = False
-                RUNNER_STATE['exit_code'] = proc.returncode
-            append_live_log(f'<<< 任务执行完毕 (exit={proc.returncode})', name='系统')
+                ACTIVE_RUNNERS.pop(target_name, None)
+                _sync_runner_state()
+            append_live_log(f'<<< 任务执行完毕 (exit={proc.returncode})', name=tag)
 
-        t = threading.Thread(target=bg_runner)
-        t.daemon = True
+        t = threading.Thread(target=bg_runner, args=(name or '--all',), daemon=True)
         t.start()
         self._json_resp({'status': 'ok', 'message': '后台执行进程已启动'})
 
@@ -3677,15 +3807,15 @@ class WebHandler(BaseHTTPRequestHandler):
 def _start_scheduler_daemon():
     """轻量级内置每日定时调度引擎。
 
-    即便在无 crontab 的裸机环境(Windows/macOS/无cron的Linux)，也能保证每天到达配置的时间(如 01:30)
-    自动唤醒全账号串行执行，执行完毕后彻底杀除 Chromium 并释放内存。
+    各账号在 Web 控制台独立设置每日定时时间 (HH:MM)，到点后系统自动加上随机抖动延迟，
+    并在并发上限 (max_concurrency) 保护下安全拉起执行。
     """
-    last_trigger_date = None
+    triggered_today = {}  # map name -> today_str
 
     def scheduler_loop():
-        nonlocal last_trigger_date
+        nonlocal triggered_today
         import subprocess
-        from msr import settings
+        from msr import settings, config
         while True:
             try:
                 time.sleep(20)
@@ -3694,47 +3824,71 @@ def _start_scheduler_daemon():
                 if not sch.get('daily_enabled', sch.get('enabled', True)):
                     continue
 
-                daily_time = sch.get('daily_time', '01:30')
                 now_hm = time.strftime('%H:%M')
                 today_str = time.strftime('%Y-%m-%d')
 
-                if now_hm == daily_time and last_trigger_date != today_str:
-                    last_trigger_date = today_str
-                    with RUNNER_STATE_LOCK:
-                        RUNNER_STATE['running'] = True
-                        RUNNER_STATE['target'] = '--all (每日定时)'
-                        RUNNER_STATE['started_at'] = time.time()
-                        RUNNER_STATE['last_line'] = '到达定时时间，唤醒任务...'
-                        RUNNER_STATE['exit_code'] = None
+                # 清理过期日期的触发记录
+                triggered_today = {k: v for k, v in triggered_today.items() if v == today_str}
 
-                    append_live_log(f'到达每日预定时间 {daily_time}，正在自动唤醒全账号任务流程...', name='定时调度')
+                accs = [a for a in config.accounts() if a.get('enabled', True)]
+                max_conc = int(sch.get('max_concurrency', 2))
+                jitter_max = int(sch.get('random_start_delay_max', 25))
+                is_fast = bool(sch.get('fast_mode', False))
 
-                    jitter_max = int(sch.get('random_start_delay_max', 0))
-                    if jitter_max > 0 and not sch.get('fast_mode'):
-                        jitter_sec = random.uniform(0, jitter_max * 60)
-                        with RUNNER_STATE_LOCK:
-                            RUNNER_STATE['last_line'] = f'随机抖动等待中 ({jitter_sec / 60:.1f} 分钟)'
-                        append_live_log(f'开启随机抖动，等待 {jitter_sec / 60:.1f} 分钟后开始执行...', name='定时调度')
-                        time.sleep(jitter_sec)
+                for a in accs:
+                    name = a.get('name')
+                    sch_time = a.get('schedule_time')
+                    if not name or not sch_time:
+                        continue
+                    if sch_time == now_hm and triggered_today.get(name) != today_str:
+                        triggered_today[name] = today_str
 
-                    from msr import config
-                    home_args = ['--home', config.HOME] if getattr(config, 'HOME', None) else []
-                    cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', '--all']
-                    if sch.get('fast_mode'):
-                        cmd.append('--fast')
-                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-                    for line in iter(proc.stdout.readline, ''):
-                        line = line.strip()
-                        if line:
+                        def _spawn_task(acc_name, target_time):
+                            if jitter_max > 0 and not is_fast:
+                                jitter_sec = random.uniform(0, jitter_max * 60)
+                                append_live_log(f'[{acc_name}] 到达预定时间 {target_time}，开启随机抖动等待 {jitter_sec / 60:.1f} 分钟后开始执行...', name='定时调度')
+                                time.sleep(jitter_sec)
+
+                            # 槽位等待与防爆保护
+                            while True:
+                                with RUNNER_STATE_LOCK:
+                                    if len(ACTIVE_RUNNERS) < max_conc and acc_name not in ACTIVE_RUNNERS:
+                                        ACTIVE_RUNNERS[acc_name] = {
+                                            'started_at': time.time(),
+                                            'last_line': '定时任务唤醒启动中...',
+                                            'proc': None
+                                        }
+                                        _sync_runner_state()
+                                        break
+                                time.sleep(5)
+
+                            append_live_log(f'[{acc_name}] 开始执行每日定时自动化任务流程...', name='定时调度')
+                            home_args = ['--home', config.HOME] if getattr(config, 'HOME', None) else []
+                            cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', acc_name]
+                            if is_fast:
+                                cmd.append('--fast')
+                            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
                             with RUNNER_STATE_LOCK:
-                                RUNNER_STATE['last_line'] = line
-                            append_live_log(line)
-                    proc.stdout.close()
-                    proc.wait()
-                    with RUNNER_STATE_LOCK:
-                        RUNNER_STATE['running'] = False
-                        RUNNER_STATE['exit_code'] = proc.returncode
-                    append_live_log(f'全账号任务已完成 (exit={proc.returncode})，浏览器已完全退出并释放系统内存。下次将在明日 {daily_time} 自动执行。', name='定时调度')
+                                if acc_name in ACTIVE_RUNNERS:
+                                    ACTIVE_RUNNERS[acc_name]['proc'] = proc
+                            for line in iter(proc.stdout.readline, ''):
+                                line = line.strip()
+                                if line:
+                                    with RUNNER_STATE_LOCK:
+                                        if acc_name in ACTIVE_RUNNERS:
+                                            ACTIVE_RUNNERS[acc_name]['last_line'] = line
+                                        _sync_runner_state()
+                                    append_live_log(line)
+                            proc.stdout.close()
+                            proc.wait()
+                            with RUNNER_STATE_LOCK:
+                                ACTIVE_RUNNERS.pop(acc_name, None)
+                                _sync_runner_state()
+                            append_live_log(f'[{acc_name}] 每日定时任务执行完毕 (exit={proc.returncode})', name='定时调度')
+
+                        t = threading.Thread(target=_spawn_task, args=(name, sch_time), daemon=True, name=f'Scheduler-{name}')
+                        t.start()
+
             except Exception as ex:
                 append_live_log(f'定时调度异常: {ex}', name='定时调度')
 

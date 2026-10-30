@@ -26,9 +26,19 @@ def accounts():
         return json.load(f)
 
 
+_ACCOUNTS_LOCK = None
+
+def _get_accounts_lock():
+    global _ACCOUNTS_LOCK
+    if _ACCOUNTS_LOCK is None:
+        import threading
+        _ACCOUNTS_LOCK = threading.Lock()
+    return _ACCOUNTS_LOCK
+
 def save_accounts(accs):
-    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(accs, f, ensure_ascii=False, indent=1)
+    """原子化安全保存账号配置，防止多任务并发读写损坏。"""
+    with _get_accounts_lock():
+        save_json(ACCOUNTS_FILE, accs)
 
 
 def profile(name, create=True):

@@ -4,7 +4,7 @@ import re
 import time
 import fcntl
 
-_LOCK_FD = None
+_LOCK_FDS = {}
 
 
 def is_runner_process_alive(pid):
@@ -21,10 +21,14 @@ def is_runner_process_alive(pid):
         return False
 
 
-def acquire_runner_lock(config):
-    """跨进程内核级文件排他锁 (fcntl.flock)，进程崩溃或容器重启由操作系统内核自动解封，杜绝死锁。"""
-    global _LOCK_FD
-    lock_path = os.path.join(config.HOME, 'runner.lock')
+def acquire_runner_lock(config, name=None):
+    """跨进程内核级文件排他锁 (fcntl.flock)，支持细粒度单账号锁隔离与全局锁向下兼容。"""
+    global _LOCK_FDS
+    if name:
+        p = config.profile(name)
+        lock_path = os.path.join(p, 'runner.lock')
+    else:
+        lock_path = os.path.join(config.HOME, 'runner.lock')
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
@@ -44,7 +48,7 @@ def acquire_runner_lock(config):
 
         os.ftruncate(fd, 0)
         os.write(fd, f"{os.getpid()}\n".encode('utf-8'))
-        _LOCK_FD = fd
+        _LOCK_FDS[lock_path] = fd
         return lock_path
     except Exception:
         return None
@@ -52,14 +56,16 @@ def acquire_runner_lock(config):
 
 def release_runner_lock(lock_path):
     """释放内核排他锁并清理锁文件。"""
-    global _LOCK_FD
-    if _LOCK_FD is not None:
+    global _LOCK_FDS
+    if not lock_path:
+        return
+    fd = _LOCK_FDS.pop(lock_path, None)
+    if fd is not None:
         try:
-            fcntl.flock(_LOCK_FD, fcntl.LOCK_UN)
-            os.close(_LOCK_FD)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
         except Exception:
             pass
-        _LOCK_FD = None
     if lock_path and os.path.isfile(lock_path):
         try:
             os.remove(lock_path)
@@ -88,32 +94,48 @@ def cmd_run(args):
         if not target_acc.get('enabled', True) and not getattr(args, 'force', False):
             print(f'账号 [{args.name}] 当前处于停用状态。如需手动执行，请先在控制台启用该账号。')
             return 0
-        accs = [target_acc]
+        name = target_acc['name']
+        if not getattr(args, 'dry_run', False):
+            lock = acquire_runner_lock(config, name=name)
+            if not lock:
+                print(f'账号 [{name}] 已有任务正在运行中，跳过本次执行。')
+                return 0
+        else:
+            lock = None
+
+        try:
+            return run_one(name, args, config, planner, probe, api, executor, notify, settings) or 0
+        except Exception as ex:
+            err_msg = '运行失败: %s' % str(ex)[:150]
+            config.log(name, '!!! %s' % err_msg)
+            notify.notify(f'MSR 异常 [{name}]', err_msg, level='error')
+            return 1
+        finally:
+            if lock:
+                release_runner_lock(lock)
     else:
         accs = [a for a in all_accs if a.get('enabled', True)]
         if not accs:
             print('当前所有账号均处于停用状态，跳过本次批量执行。')
             return 0
 
-    if not getattr(args, 'dry_run', False):
-        lock = acquire_runner_lock(config)
-        if not lock:
-            print('已有自动化任务正在运行中，跳过本次并发执行以保护 Profile 与系统资源。')
-            return 0
-    else:
-        lock = None
+        max_conc = int(sch_cfg.get('max_concurrency', 2))
+        max_conc = max(1, min(max_conc, 10))
 
-    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         rc = 0
-        w_min = 10 if sch_cfg.get('fast_mode') else int(sch_cfg.get('inter_account_wait_min', 15)) * 60
-        w_max = 20 if sch_cfg.get('fast_mode') else int(sch_cfg.get('inter_account_wait_max', 40)) * 60
 
-        for i, a in enumerate(accs):
+        def _execute_account(a):
+            nonlocal rc
             name = a['name']
-            if i > 0:
-                wait = random.uniform(w_min, w_max)
-                config.log(name, '账号间随机等待 %.1f 分钟' % (wait / 60))
-                time.sleep(wait)
+            if not getattr(args, 'dry_run', False):
+                lock = acquire_runner_lock(config, name=name)
+                if not lock:
+                    config.log(name, f'账号 [{name}] 已有任务正在运行中，跳过。')
+                    return
+            else:
+                lock = None
+
             try:
                 run_one(name, args, config, planner, probe, api, executor, notify, settings)
             except Exception as ex:
@@ -121,10 +143,19 @@ def cmd_run(args):
                 config.log(name, '!!! %s' % err_msg)
                 notify.notify(f'MSR 异常 [{name}]', err_msg, level='error')
                 rc = 1
+            finally:
+                if lock:
+                    release_runner_lock(lock)
+
+        with ThreadPoolExecutor(max_workers=max_conc) as executor_pool:
+            futures = [executor_pool.submit(_execute_account, a) for a in accs]
+            for f in as_completed(futures):
+                try:
+                    f.result()
+                except Exception as ex:
+                    print(f'批量任务异常: {ex}')
+                    rc = 1
         return rc
-    finally:
-        if lock:
-            release_runner_lock(lock)
 
 
 def run_one(name, args, config, planner, probe, api, executor, notify=None, settings=None):
