@@ -1413,24 +1413,35 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
         return '无可领取积分(跳过)'
     log(f'检测到待领取卡片: "{card_text}" (约 {total_claimable} 分)')
 
-    # 3. 第一步：点击外层卡片展开 Dialog 抽屉 (单次精准点击，避免连击导致抽屉重新闭合)
+    # 3. 第一步：点击外层卡片展开 Dialog 抽屉 (单次精准点击，结合轮询等待挂载，杜绝连击反向关闭)
     log('正在点击外层待领取卡片以展开领取抽屉...')
     opened = False
     try:
         human_click(cdp, claim_card_js, label='待领取卡片', close_new=False)
-        time.sleep(random.uniform(2.0, 3.0))
-        opened = ev(cdp, '!!document.querySelector(\'[role="dialog"], section[role="dialog"]\')')
     except Exception:
         pass
 
+    # 轮询等待抽屉就绪 (React Aria 抽屉滑入动画通常需要 1~4 秒)
+    for _ in range(12):
+        time.sleep(0.5)
+        opened = ev(cdp, '!!document.querySelector(\'[role="dialog"], section[role="dialog"]\')')
+        if opened:
+            break
+
+    # 若轮询后仍未打开，尝试原生 DOM click 一次作为兜底再等待
     if not opened:
         ev(cdp, f"(() => {{ const b = ({claim_card_js}); if (b) b.click(); }})()")
-        time.sleep(random.uniform(2.5, 3.5))
+        for _ in range(8):
+            time.sleep(0.5)
+            opened = ev(cdp, '!!document.querySelector(\'[role="dialog"], section[role="dialog"]\')')
+            if opened:
+                break
 
     # 4. 第二步：在抽屉内部点击二次确认按钮 (例如 "6 待领取 领取积分" / "15 Pending Claim points")
     confirm_btn_js = '''(() => {
       const d = document.querySelector('[role="dialog"], section[role="dialog"], [role="alertdialog"], .modal');
-      const scope = d ? Array.from(d.querySelectorAll('button, a, [role="button"]')) : Array.from(document.querySelectorAll('button, a'));
+      if (!d) return null; // 严格限定在弹窗作用域内，绝不回退至全局 document，防止误选外层卡片
+      const scope = Array.from(d.querySelectorAll('button, a, [role="button"]'));
       const candidates = scope.filter(el => {
         const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
         if (!t || t.length > 60) return false;
@@ -1448,7 +1459,7 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
     })()'''
 
     has_confirm = False
-    for _ in range(8):
+    for _ in range(10):
         if ev(cdp, f"!!({confirm_btn_js})"):
             has_confirm = True
             break
@@ -1462,15 +1473,12 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
     c_text = ev(cdp, f"({confirm_btn_js}) ? ({confirm_btn_js}).innerText.replace(/\\s+/g, ' ').trim() : ''")
     log(f'抽屉内确认领取按钮已就绪: "{c_text}", 正在触发领取结算...')
 
-    clicked_confirm = False
+    # 抽屉滑入动画期间为防止坐标计算偏移，结合 human_click 与 DOM 原生 click 双重触发
     try:
         human_click(cdp, confirm_btn_js, label='确认领取按钮', close_new=False)
-        clicked_confirm = True
     except Exception:
         pass
-
-    if not clicked_confirm:
-        ev(cdp, f"(() => {{ const b = ({confirm_btn_js}); if (b) b.click(); }})()")
+    ev(cdp, f"(() => {{ const b = ({confirm_btn_js}); if (b) b.click(); }})()")
 
     # 关键：等待异步网络请求提交与服务端入账
     # 注意：严禁在点击确认后因抽屉关闭而立刻调用 navigate() 强刷！

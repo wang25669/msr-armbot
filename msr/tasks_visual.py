@@ -357,18 +357,32 @@ def submit_image(cdp, image, entry, log=print):
       return document.querySelector('#sb_imgpst') || document.querySelector('input');
     })()'''
 
-    # 直接将壁纸链接注入输入框，派发 input 与 change 事件
-    ev(cdp, '''((inp, img) => {
+    # 1. 聚焦并清空输入框
+    ev(cdp, '''((inp) => {
         if (inp) {
             inp.focus();
-            inp.value = img;
+            inp.value = '';
             inp.dispatchEvent(new Event('input', {bubbles: true}));
-            inp.dispatchEvent(new Event('change', {bubbles: true}));
         }
-    })(%s, %s)''' % (inp_js, json.dumps(image)))
-    time.sleep(0.8)
+    })(%s)''' % inp_js)
+    time.sleep(0.3)
 
-    # 派发 Enter 键前，确保焦点紧紧锁定在 input 元素上
+    # 2. 采用 CDP 原生字符输入流 (Input.insertText) 触发真实的 beforeinput/输入流水线
+    # 相比纯 DOM value 赋值，insertText 能真正被 Bing 前端内部状态机捕获并解锁提交行为
+    try:
+        cdp.call('Input.insertText', {'text': image})
+    except Exception as ex:
+        log('CDP Input.insertText 异常: %s, 降级采用 DOM 注入' % ex)
+        ev(cdp, '''((inp, img) => {
+            if (inp) {
+                inp.value = img;
+                inp.dispatchEvent(new Event('input', {bubbles: true}));
+                inp.dispatchEvent(new Event('change', {bubbles: true}));
+            }
+        })(%s, %s)''' % (inp_js, json.dumps(image)))
+    time.sleep(0.6)
+
+    # 3. 再次锁定焦点并派发 Enter 键
     ev(cdp, '''((inp) => { if (inp) inp.focus(); })(%s)''' % inp_js)
     time.sleep(0.2)
 
@@ -391,11 +405,12 @@ def submit_image(cdp, image, entry, log=print):
     deadline = time.time() + 40
     landed = False
     compensated = False
+    err_count = 0
     while time.time() < deadline:
         if ev(cdp, LAND):
             landed = True
             break
-        # 检查是否有识图错误提示
+        # 检查是否有识图错误提示 (防瞬态偶发，需持续检出方判定拒绝)
         err = ev(cdp, '''(() => {
             const errEl = document.querySelector('#url-err-msg, #bcid-err-msg, .errcntr .errmsg, #url-err, #bcid-err');
             if (errEl && errEl.getBoundingClientRect().width > 0 && errEl.innerText.trim()) {
@@ -404,7 +419,11 @@ def submit_image(cdp, image, entry, log=print):
             return null;
         })()''')
         if err:
-            raise StepError(f'视觉图片提交被必应拒绝: {err}')
+            err_count += 1
+            if err_count >= 5:
+                raise StepError(f'视觉图片提交被必应拒绝: {err}')
+        else:
+            err_count = 0
 
         # 若等待超过 5 秒仍未落页，说明慢代理或 Enter 键偶发被吞，自动调用表单 requestSubmit 补偿触发
         if not compensated and (deadline - time.time() < 35):
@@ -444,18 +463,23 @@ def submit_image(cdp, image, entry, log=print):
 
 
 def image_pool(n=8):
-    """Bing 每日壁纸直链池。"""
-    url = 'https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=%d&mkt=en-US' % n
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        d = json.loads(r.read().decode() or '{}')
+    """Bing 每日壁纸直链池。优先聚合多地区最新高清壁纸。"""
+    mkts = ['en-US', 'zh-CN']
     out = []
-    for img in d.get('images', []):
-        u = img.get('url') or img.get('urlbase') or ''
-        if u.startswith('/'):
-            u = 'https://www.bing.com' + u
-        if u:
-            out.append(u)
+    for mkt in mkts:
+        try:
+            url = 'https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=%d&mkt=%s' % (n, mkt)
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                d = json.loads(r.read().decode() or '{}')
+            for img in d.get('images', []):
+                u = img.get('url') or img.get('urlbase') or ''
+                if u.startswith('/'):
+                    u = 'https://www.bing.com' + u
+                if u and u not in out:
+                    out.append(u)
+        except Exception:
+            pass
     return out
 
 
