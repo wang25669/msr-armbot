@@ -627,8 +627,7 @@ class LoginSession:
                             final_cks = []
                             diag2 = {'has_auth_u': False}
                             for _ in range(12):
-                                res2 = self.cdp.call('Network.getCookies', {'urls': ['https://login.live.com', 'https://www.bing.com', 'https://account.microsoft.com', 'https://rewards.bing.com']})
-                                final_cks = res2.get('cookies', [])
+                                final_cks = cookie_mod.extract_cookies_from_cdp(self.cdp, log=self.log)
                                 diag2 = cookie_mod.validate_cookies(final_cks)
                                 if diag2['has_auth_u']:
                                     break

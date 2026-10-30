@@ -346,17 +346,9 @@ class BrowserSession:
         if not self.cdp:
             return False
 
-        import os
         from msr import cookies as cookie_mod
         try:
-            urls = [
-                'https://login.live.com',
-                'https://www.bing.com',
-                'https://account.microsoft.com',
-                'https://rewards.bing.com'
-            ]
-            res = self.cdp.call('Network.getCookies', {'urls': urls})
-            cks = res.get('cookies', [])
+            cks = cookie_mod.extract_cookies_from_cdp(self.cdp, log=self.logger)
             diag = cookie_mod.validate_cookies(cks)
             if diag.get('has_auth_u'):
                 cookie_mod.save_cookies_safely(self.name, cks, config=self.config, log=self.logger)

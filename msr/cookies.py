@@ -139,6 +139,75 @@ def import_content(content_str):
     return []
 
 
+# 微软生态体系白名单后缀（包含其所有子域名）
+MICROSOFT_DOMAIN_SUFFIXES = (
+    'bing.com',
+    'live.com',
+    'microsoft.com',
+    'microsoftonline.com',
+    'windows.net',
+    'msn.com',
+    'xbox.com',
+    'xboxlive.com',
+)
+
+# 降级备用 URL 列表（覆盖所有核心服务）
+FALLBACK_MS_URLS = [
+    'https://login.live.com',
+    'https://account.live.com',
+    'https://www.bing.com',
+    'https://rewards.bing.com',
+    'https://cn.bing.com',
+    'https://account.microsoft.com',
+    'https://rewards.microsoft.com',
+    'https://login.microsoft.com',
+    'https://login.microsoftonline.com',
+    'https://www.microsoft.com',
+    'https://www.msn.com',
+]
+
+
+def filter_microsoft_cookies(cookies):
+    """过滤保留微软生态体系相关的 Cookie，剔除第三方广告、跟踪器及外站网页 Cookie。"""
+    res = []
+    seen = set()
+    for c in cookies:
+        domain = (c.get('domain') or '').lower().strip('.')
+        if any(domain == s or domain.endswith('.' + s) for s in MICROSOFT_DOMAIN_SUFFIXES):
+            key = (c.get('name'), c.get('domain'), c.get('path'))
+            if key not in seen:
+                seen.add(key)
+                res.append(c)
+    return res
+
+
+def extract_cookies_from_cdp(cdp, log=None):
+    """从 CDP 中提取微软生态全量纯净 Cookie。
+
+    优先使用 Storage.getCookies 获取整个浏览器存储分区的 Cookie，并通过微软生态域名白名单过滤；
+    若 Storage 域不可用，降级使用 Network.getCookies 传入 11+ 个核心服务 URL。
+    """
+    cookies = []
+    try:
+        res = cdp.call('Storage.getCookies')
+        raw_cookies = res.get('cookies', [])
+        if raw_cookies:
+            cookies = filter_microsoft_cookies(raw_cookies)
+    except Exception as ex:
+        if log:
+            log(f'Storage.getCookies 提取异常，尝试降级: {ex}')
+
+    if not cookies:
+        try:
+            res = cdp.call('Network.getCookies', {'urls': FALLBACK_MS_URLS})
+            cookies = filter_microsoft_cookies(res.get('cookies', []))
+        except Exception as ex:
+            if log:
+                log(f'Network.getCookies 提取异常: {ex}')
+
+    return cookies
+
+
 def save_cookies_safely(name, cookies, config=None, log=print):
     """安全持久化 Cookie：先备份为 cookie.json.bak，再原子写入 cookie.json 并设 0600 权限。"""
     if config is None:
