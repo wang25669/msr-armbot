@@ -491,6 +491,19 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
                     b_fixes = bsess.run_phases(bad_browser, is_retry=True)
                 else:
                     b_fixes = executor.run_browser_session(name, bad_browser, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
+
+                # 终极靶向自愈：若同会话回补后仍有卡片任务(如 visual/dailyset)未完成，说明原会话经历长时间运行后可能存在连接衰减或必应频控，
+                # 立即销毁旧会话并重启全新独立干净会话做终极靶向兜底
+                still_bad = [ph for ph, r in b_fixes.items() if ('未完成' in r or '失败' in r) and ph != 'search']
+                if still_bad and bsess is not None:
+                    config.log(name, '[阶段 10 终极兜底] 复用会话中仍有未完成项目 %s，正在重启独立干净会话兜底...' % still_bad)
+                    try:
+                        bsess.close()
+                    except Exception:
+                        pass
+                    bsess = None
+                    fresh_fixes = executor.run_browser_session(name, still_bad, token, pr, p, config, proxy=proxy, cdp_port=cdp_port)
+                    b_fixes.update(fresh_fixes)
                 for ph, r in b_fixes.items():
                     if ph == 'claim':
                         prev_claim = results_map.get('claim', '')

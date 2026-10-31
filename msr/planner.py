@@ -112,7 +112,9 @@ def plan(probe_result, force_phases=None):
             have.add(c)
 
     # 浏览器侧阶段: 默认按顺序尝试, 由 executor 在浏览器里按当天实际卡片执行
-    BROWSER_ALWAYS = ['dailyset', 'quests', 'explore', 'moreactivities', 'search', 'visual', 'claim']
+    # 注意：visual 属于轻量级打卡任务(30秒)，必须优先于耗时1-2小时的 search 执行，
+    # 避免在连续执行几十次搜索后因会话疲劳、内存堆积或必应瞬态频控导致识图提交被阻断。
+    BROWSER_ALWAYS = ['dailyset', 'quests', 'explore', 'moreactivities', 'visual', 'search', 'claim']
 
     want_phases = [
         {'phase': 'appcheckin', 'needs': 'api'},          # type103 签到总是有效

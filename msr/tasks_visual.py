@@ -291,7 +291,7 @@ def get_entry_and_activate(cdp, ch=None, log=print):
     return default_entry
 
 
-def submit_image(cdp, image, entry, log=print):
+def submit_image(cdp, image, entry, log=print, ch=None):
     """提交图片 URL 并等落页。"""
     log('正在导航至视觉打卡入口: %s' % entry[:70])
     navigate(cdp, entry)
@@ -357,7 +357,11 @@ def submit_image(cdp, image, entry, log=print):
       return document.querySelector('#sb_imgpst') || document.querySelector('input');
     })()'''
 
-    # 1. 聚焦并清空输入框
+    # 1. 物理点击聚焦并清空输入框
+    try:
+        human_click(cdp, inp_js, label='视觉输入框', close_new=False, timeout=2.0)
+    except Exception:
+        pass
     ev(cdp, '''((inp) => {
         if (inp) {
             inp.focus();
@@ -397,7 +401,7 @@ def submit_image(cdp, image, entry, log=print):
 
     # 若存在专用的贴图提交按钮则点击，严禁点击普通文本搜索的 #sb_form_go (避免覆盖取消识图)
     ev(cdp, '''(() => {
-      const go = document.querySelector('button.sbi_submit, #sb_imgpst ~ button, .pastearea button, #sbi_submit, #sb_sbi_gh');
+      const go = document.querySelector('button.sbi_submit, #sb_imgpst ~ button, .pastearea button, #sbi_submit');
       if (go && go.getBoundingClientRect().width > 0) go.click();
     })()''')
 
@@ -410,6 +414,23 @@ def submit_image(cdp, image, entry, log=print):
         if ev(cdp, LAND):
             landed = True
             break
+
+        # 检查是否在新标签页中落页
+        if ch:
+            try:
+                cur_id = cdp.path.split('/')[-1].split('?')[0] if hasattr(cdp, 'path') else ''
+                for tid in ch.tab_ids():
+                    if tid != cur_id:
+                        tab_cdp = ch.attach({'id': tid})
+                        if ev(tab_cdp, LAND):
+                            landed = True
+                            ch.close_tab(tid)
+                            break
+            except Exception:
+                pass
+            if landed:
+                break
+
         # 检查是否有识图错误提示 (防瞬态偶发，需持续检出方判定拒绝)
         err = ev(cdp, '''(() => {
             const errEl = document.querySelector('#url-err-msg, #bcid-err-msg, .errcntr .errmsg, #url-err, #bcid-err');
@@ -425,21 +446,10 @@ def submit_image(cdp, image, entry, log=print):
         else:
             err_count = 0
 
-        # 若等待超过 5 秒仍未落页，说明慢代理或 Enter 键偶发被吞，自动调用表单 requestSubmit 补偿触发
+        # 若等待超过 5 秒仍未落页，再次聚焦输入框并重试回车键派发
         if not compensated and (deadline - time.time() < 35):
             compensated = True
-            ev(cdp, '''(() => {
-              const inp = (%s);
-              if (inp) {
-                inp.focus();
-                const form = inp.closest("form") || document.querySelector("#sb_form");
-                if (form && typeof form.requestSubmit === "function") {
-                  try { form.requestSubmit(); } catch(e) {}
-                }
-                const gh = document.querySelector("#sb_sbi_gh");
-                if (gh) gh.click();
-              }
-            })()''' % inp_js)
+            ev(cdp, '''((inp) => { if (inp) inp.focus(); })(%s)''' % inp_js)
             for t in ('keyDown', 'keyUp'):
                 try:
                     cdp.call('Input.dispatchKeyEvent', {
@@ -530,7 +540,7 @@ def run(name, cdp, pr, log=print, used_path=None, max_attempts=3, ch=None):
     for i in range(max_attempts):
         img = cand[i % len(cand)]
         try:
-            submit_image(cdp, img, entry, log=log)
+            submit_image(cdp, img, entry, log=log, ch=ch)
             _mark_used(used_path, img)
 
             # 回读状态确认 (多次回读以吸收网络端延迟与服务端统计延迟)
