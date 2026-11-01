@@ -369,10 +369,9 @@ def submit_image(cdp, image, entry, log=print, ch=None):
             inp.dispatchEvent(new Event('input', {bubbles: true}));
         }
     })(%s)''' % inp_js)
-    time.sleep(0.3)
+    time.sleep(0.2)
 
-    # 2. 采用 CDP 原生字符输入流 (Input.insertText) 触发真实的 beforeinput/输入流水线
-    # 相比纯 DOM value 赋值，insertText 能真正被 Bing 前端内部状态机捕获并解锁提交行为
+    # 2. 采用 CDP 原生字符输入流 (Input.insertText) 填入直链文本
     try:
         cdp.call('Input.insertText', {'text': image})
     except Exception as ex:
@@ -381,32 +380,30 @@ def submit_image(cdp, image, entry, log=print, ch=None):
             if (inp) {
                 inp.value = img;
                 inp.dispatchEvent(new Event('input', {bubbles: true}));
-                inp.dispatchEvent(new Event('change', {bubbles: true}));
             }
         })(%s, %s)''' % (inp_js, json.dumps(image)))
-    time.sleep(0.6)
+    time.sleep(0.3)
 
-    # 3. 再次锁定焦点并派发 Enter 键
-    ev(cdp, '''((inp) => { if (inp) inp.focus(); })(%s)''' % inp_js)
-    time.sleep(0.2)
+    # 3. 模拟真实剪贴板粘贴流水线 (ClipboardEvent + DataTransfer)
+    # 逆向证据证明：Bing 前端 ImagePaste/SbiUtil 核心绑定了 paste 事件，收到后立即触发识图并在当前标签页原地落页
+    ev(cdp, '''((inp, imgUrl) => {
+        if (!inp) return;
+        inp.focus();
+        inp.value = imgUrl;
+        const dt = new DataTransfer();
+        dt.setData('text/plain', imgUrl);
+        const evt = new ClipboardEvent('paste', {
+            clipboardData: dt,
+            bubbles: true,
+            cancelable: true
+        });
+        inp.dispatchEvent(evt);
+        inp.dispatchEvent(new Event('input', {bubbles: true}));
+        inp.dispatchEvent(new Event('change', {bubbles: true}));
+    })(%s, %s)''' % (inp_js, json.dumps(image)))
 
-    # 派发 Enter 键并触发表单提交
-    for t in ('keyDown', 'keyUp'):
-        cdp.call('Input.dispatchKeyEvent', {
-            'type': t, 'key': 'Enter', 'code': 'Enter',
-            'windowsVirtualKeyCode': 13, 'nativeVirtualKeyCode': 13,
-            'text': '\r' if t == 'keyDown' else '',
-            'unmodifiedText': '\r' if t == 'keyDown' else ''
-        })
-
-    # 若存在专用的贴图提交按钮则点击，严禁点击普通文本搜索的 #sb_form_go (避免覆盖取消识图)
-    ev(cdp, '''(() => {
-      const go = document.querySelector('button.sbi_submit, #sb_imgpst ~ button, .pastearea button, #sbi_submit');
-      if (go && go.getBoundingClientRect().width > 0) go.click();
-    })()''')
-
-    # 等待落页确认 (放宽至 40 秒以容忍网络高延迟代理，同时引入 Bing 错误横幅感知与自动防吞键补偿)
-    deadline = time.time() + 40
+    # 等待落页确认 (粘贴事件通常在 1.5~3 秒内确定性完成原地落页；设 25 秒充分容忍高延迟代理)
+    deadline = time.time() + 25
     landed = False
     compensated = False
     err_count = 0
@@ -419,9 +416,10 @@ def submit_image(cdp, image, entry, log=print, ch=None):
         if ch:
             try:
                 cur_id = cdp.path.split('/')[-1].split('?')[0] if hasattr(cdp, 'path') else ''
-                for tid in ch.tab_ids():
-                    if tid != cur_id:
-                        tab_cdp = ch.attach({'id': tid})
+                for t_item in ch.tabs():
+                    tid = t_item.get('id')
+                    if tid and tid != cur_id:
+                        tab_cdp = ch.attach(t_item)
                         if ev(tab_cdp, LAND):
                             landed = True
                             ch.close_tab(tid)
@@ -431,10 +429,10 @@ def submit_image(cdp, image, entry, log=print, ch=None):
             if landed:
                 break
 
-        # 检查是否有识图错误提示 (防瞬态偶发，需持续检出方判定拒绝)
+        # 检查是否有识图错误提示 (必须处于可见状态，排除隐藏模板节点干扰)
         err = ev(cdp, '''(() => {
             const errEl = document.querySelector('#url-err-msg, #bcid-err-msg, .errcntr .errmsg, #url-err, #bcid-err');
-            if (errEl && errEl.getBoundingClientRect().width > 0 && errEl.innerText.trim()) {
+            if (errEl && errEl.getBoundingClientRect().width > 0 && errEl.getBoundingClientRect().height > 0 && errEl.innerText.trim()) {
                 return errEl.innerText.trim();
             }
             return null;
@@ -446,10 +444,18 @@ def submit_image(cdp, image, entry, log=print, ch=None):
         else:
             err_count = 0
 
-        # 若等待超过 5 秒仍未落页，再次聚焦输入框并重试回车键派发
-        if not compensated and (deadline - time.time() < 35):
+        # 若等待超过 4 秒仍未落页，再次聚焦输入框并补发 keypress(Enter) 与按键唤醒
+        if not compensated and (deadline - time.time() < 21):
             compensated = True
-            ev(cdp, '''((inp) => { if (inp) inp.focus(); })(%s)''' % inp_js)
+            ev(cdp, '''((inp) => {
+                if (inp) {
+                    inp.focus();
+                    const kp = new KeyboardEvent('keypress', {
+                        key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+                    });
+                    inp.dispatchEvent(kp);
+                }
+            })(%s)''' % inp_js)
             for t in ('keyDown', 'keyUp'):
                 try:
                     cdp.call('Input.dispatchKeyEvent', {
@@ -461,7 +467,7 @@ def submit_image(cdp, image, entry, log=print, ch=None):
                 except Exception:
                     pass
 
-        time.sleep(1.0)
+        time.sleep(0.5)
 
     if not landed:
         raise StepError('视觉提交完成但落页未确认(LAND超时)')
