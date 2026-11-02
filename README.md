@@ -11,15 +11,60 @@ MSR 自动化, 为 ARM Linux (Armbian) 设计。Python stdlib-only, 无第三方
 - **资源占用**: API 阶段 ~30 MB; 浏览器阶段单实例 headless chromium(~400 MB), 跑完即释放
 - **多层容错**: API 指数退避重试(5/10/20s); per-task 隔离(单任务失败不连累其他); refresh_token 重试+旧 access_token 降级
 
-## 安装 (Armbian)
+## 部署方式
+
+本项目代码 **100% 仅使用 Python 标准库（零 pip 第三方依赖）**，在一台全新机器上仅需 Python 3 与 Chromium，支持原生与 Docker 两种部署方式。
+
+### 方式 1: 原生极简一键部署 (推荐，适用于 Linux / Armbian / Debian / Ubuntu)
+
+在一台全新的 Linux 机器上，无需配置虚拟环境或安装任何 Python 包，仅需 3 步即可拉起完整服务：
 
 ```bash
-git clone https://github.com/wang25669/msr-armbot.git
-cd msr-armbot
+# 1. 克隆代码
+git clone https://github.com/wang25669/msr-armbot.git && cd msr-armbot
+
+# 2. 一键安装依赖并注册常驻后台服务 (包含 Chromium、中文字体与 msr-web.service)
 sudo bash install.sh
+
+# 3. 访问控制台
+# 浏览器打开 http://<新机器IP>:8080 即可添加账号、设置各账号独立定时并开箱运行
 ```
 
-install.sh 做三件事: 装 chromium(缺才装) -> 初始化默认配置 -> 注册并启动常驻后台的 msr-web.service (内置调度引擎自动托管各账号独立定时与 2 并发执行)。
+`install.sh` 脚本自动完成闭环：
+- **依赖检查与补全**：自动安装 Chromium 及中文字体（`fonts-wqy-zenhei` / `fonts-wqy-microhei`，防止人机验证拼图画面缺字）；
+- **初始化配置**：在 `~/.msr/` 生成标准配置文件；
+- **注册常驻后台服务**：注册并启动 `msr-web.service`，内置调度引擎（`DailyScheduler`）开机自启常驻后台，自动托管各账号的独立定时错峰与默认最大 2 并发执行。
+
+---
+
+### 方式 2: Docker 容器化一键部署 (支持 ARM64 / x86_64)
+
+无需在宿主机配置 Python 或 Chromium 环境，任意机器上仅需一个 `docker-compose.yml` 即可一键启动：
+
+```yaml
+version: '3.8'
+
+services:
+  msr-bot:
+    image: ghcr.io/wang25669/msr-armbot:latest
+    container_name: msr-armbot
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - WEB_PORT=8080
+    volumes:
+      - ./data:/data
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    shm_size: '1gb'
+    security_opt:
+      - seccomp:unconfined
+```
+
+```bash
+docker compose pull && docker compose up -d
+```
 
 ## 登录账号
 
@@ -68,41 +113,14 @@ python3 -m msr status                    # 全部账号状态(含独立代理配
 python3 -m msr report                    # 当日报告
 ```
 
-## Docker 容器化一键部署 (支持 ARM64 / x86_64)
+## Web 控制中心与日常管理
 
-无需在宿主机配置 Python 或 Chromium 环境，任意机器上仅需一个 `docker-compose.yml` 即可一键启动：
-
-```yaml
-version: '3.8'
-
-services:
-  msr-bot:
-    image: ghcr.io/wang25669/msr-armbot:latest
-    container_name: msr-armbot
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    environment:
-      - WEB_PORT=8080
-    volumes:
-      - ./data:/data
-      - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
-    shm_size: '1gb'
-    security_opt:
-      - seccomp:unconfined
-```
-
-```bash
-docker compose up -d
-```
-
-启动后在浏览器打开 `http://<服务器IP>:8080` 进入 Web 控制中心：
-1. **添加账号与独立代理**：直接在网页填写名称、设置该账号专属出口代理 (HTTP/SOCKS5)；
-2. **账号在线授权**：
-   - 方式 A (推荐账号密码)：输入 MSR 账号与密码，后台无头浏览器全自动模拟登录交互，并一键换取 OAuth2 Token 与自探测区域；
+服务启动后（无论是原生 systemd 还是 Docker），在浏览器打开 `http://<服务器IP>:8080` 即可进入 Web 管理中心：
+1. **添加账号与独立代理**：直接在网页填写名称、设置专属出口代理 (HTTP/SOCKS5) 及每日定时执行时间（如 `02:30`）；
+2. **账号在线授权与风控接管**：
+   - 方式 A (推荐账号密码)：输入 MSR 账号与密码，后台全自动模拟登录交互，如遇双位数 Authenticator 匹配质询或人机验证拼图，页面直接实时串流显示；
    - 方式 B (Cookie 导入)：粘贴 Cookie-Editor 导出的 JSON 或 Raw Header，自动清洗校验并即刻触发后台静默 SSO 换取 Token；
-3. **集中风控参数调节**：可视化修改搜索停留秒数、卡片延迟、Server酱 SendKey 等；
+3. **集中风控参数调节**：可视化修改搜索停留秒数、卡片延迟、最大并发上限、Server酱 SendKey 等；
 4. **任务调度与实时日志**：一键“立即运行”、“排期预览”，实时查看任务滚屏日志。
 
 
