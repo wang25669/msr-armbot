@@ -19,7 +19,7 @@ cd msr-armbot
 sudo bash install.sh
 ```
 
-install.sh 做三件事: 装 chromium(缺才装) -> 写默认配置 -> 注册 systemd timer。不想用 systemd 就手动跑(见"定时")。
+install.sh 做三件事: 装 chromium(缺才装) -> 初始化默认配置 -> 注册并启动常驻后台的 msr-web.service (内置调度引擎自动托管各账号独立定时与 2 并发执行)。
 
 ## 登录账号
 
@@ -160,14 +160,13 @@ install.sh 自动填 binary 和 version, 之后可手改。
 
 `channels`: stdout | telegram | webhook, 可组合。`on`: error(运行失败)/summary(每日汇总)。
 
-### 5. 定时
+### 5. 定时与调度
 
-systemd(自动配): `systemctl list-timers msr*`; 改时间编辑 `/etc/systemd/system/msr.timer` 的 `OnCalendar` 后 `systemctl daemon-reload`。
-
-或 crontab:
-```
-30 1 * * * cd /path/to/msr-armbot && python3 -m msr run --all >> ~/.msr/cron.log 2>&1
-```
+每日定时调度由 Web 控制台内置调度引擎（`DailyScheduler`）常驻托管：
+- **多账号独立定时**：每个账号在 Web 控制台（或账号配置中）独立配置每日触发时间（`HH:MM`），各账号到点自动加入执行队列；
+- **防风控随机抖动**：到达设定时间后，在 0~25 分钟随机延迟后启动，彻底消除固定整点特征；
+- **安全并发上限**：默认最大并发为 2（`schedule.max_concurrency: 2`），防止拉起过多浏览器撑爆内存；
+- **常驻服务管理**：在宿主机上通过 `sudo systemctl status msr-web.service` 管理，或者在 Docker 中直接由容器守护常驻。
 
 ### 6. 账号 profile(自动状态, 不需手改)
 
