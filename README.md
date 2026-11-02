@@ -4,7 +4,7 @@ MSR 自动化, 为 ARM Linux (Armbian) 设计。Python stdlib-only, 无第三方
 
 ## 特性
 
-- **多账号**: 每账号独立 profile(token/cookie/状态/日志互不干扰), 串行执行, 账号间随机等待 15-40 分钟
+- **多账号与并发调度**: 每账号独立 profile(token/cookie/状态/日志互不干扰) 与独立每日定时，默认 2 账号并发执行 (可调)，动态 CDP 端口隔离，账号间随机抖动防关联
 - **区域自适应**: 区域从 `/dapi/me` 运行时探测(`profile.attributes.country`, 账号属性与出口 IP 无关); 搜索域按区域决定(cn 账号走 cn.bing.com); 浏览器任务按当天实际卡片执行, 卡片不存在自然跳过 —— 零区域硬编码
 - **API 侧任务零浏览器**: App签到(type103)/移动阅读(type101)/Edge打卡(动态 offerid) 纯 HTTP
 - **浏览器侧**: headless chromium + CDP(纯 stdlib WebSocket 实现, 含断线重连), 无 X11/xdotool 依赖
@@ -55,7 +55,7 @@ refresh_token 90 天滚动续期(每次成功刷新就续), 正常不需要反�
 
 ```bash
 python3 -m msr web --port 8080           # 启动内置 Web 管理控制台 (浏览器打开 http://ip:8080)
-python3 -m msr run --all                 # 全部账号串行(账号间随机等 15-40 分钟)
+python3 -m msr run --all                 # 全部有效账号并发执行 (默认最大并发上限 2，防爆内存)
 python3 -m msr run sg                    # 只跑一个账号(含后台 edge30m 与前台单会话浏览器并行编排)
 python3 -m msr run sg --dry-run          # 只打印执行计划, 不执行
 python3 -m msr run sg --only=dailyset    # 单跑某阶段: appcheckin/appread/edge30m/dailyset/quests/moreactivities/search/visual
@@ -84,7 +84,6 @@ services:
       - "8080:8080"
     environment:
       - WEB_PORT=8080
-      - CRON_SCHEDULE=30 1 * * *
     volumes:
       - ./data:/data
       - /etc/localtime:/etc/localtime:ro
@@ -208,7 +207,7 @@ msr/api.py           MSR Platform API + token 生命周期
 msr/auth.py          登录引导 (账号密码全自动登录 + Cookie 导入与 Token 静默自愈互换)
 msr/probe.py         区域/任务集探测
 msr/planner.py       执行计划生成
-msr/runner.py        编排 (串行/随机等待/dry-run)
+msr/runner.py        编排 (多账号并发/账号级内核锁/动态CDP/dry-run)
 msr/executor.py      阶段执行器 (API 侧 + 浏览器侧)
 msr/browser.py       chromium 生命周期 + CDP + Edge伪装 + cookie注入
 msr/tasks_browser.py 搜索/每日活动卡/日常任务卡

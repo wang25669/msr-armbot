@@ -28,7 +28,7 @@ EOF
     service cron start
     echo "系统 Cron 服务已启动。"
 else
-    echo "每日定时任务由 Web 控制台内置调度器托管（默认每天 01:30 自动唤醒，可于 Web 控制台动态修改与查看实时日志）。"
+    echo "每日定时任务由 Web 控制台内置调度器托管（各账号按独立配置的每日定时并发拉起，默认并发上限为 2，并具备动态 CDP 端口隔离与随机防风控抖动）。"
 fi
 
 echo "正在启动 MSR-ArmBot Web 控制台..."

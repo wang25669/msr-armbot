@@ -1061,7 +1061,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         <button class="btn btn-secondary btn-sm" onclick="closePipelineModal()">关闭</button>
       </div>
       <div style="font-size:13px; color:var(--text-sub); margin-bottom:16px; line-height:1.6;">
-        所有账号均统一遵循标准化流水线执行，各账号按区域自适应过滤，多账号之间在独立代理与随机等待下串行执行，杜绝关联风控：
+        所有账号均统一遵循标准化流水线执行，各账号按区域自适应过滤，多账号之间在独立代理与并发控制（默认并发上限 2）下安全隔离执行，杜绝关联风控：
       </div>
 
       <div class="pipeline-step">

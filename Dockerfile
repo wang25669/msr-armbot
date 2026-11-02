@@ -7,8 +7,7 @@ LABEL description="MSR automation container with web console"
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     MSR_HOME=/data \
-    WEB_PORT=8080 \
-    CRON_SCHEDULE="30 1 * * *"
+    WEB_PORT=8080
 
 # 安装 Chromium、中文字体、cron 定时器及基础依赖 (保留 tzdata 供宿主机挂载或环境变量适配)
 RUN apt-get update && apt-get install -y --no-install-recommends \
