@@ -2991,20 +2991,33 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         if (s.status === 'wait_proof_confirm') {
           otpBox.style.display = 'block';
+          otpBox.style.background = 'rgba(234, 179, 8, 0.15)';
+          otpBox.style.borderColor = '#eab308';
           document.getElementById('login-otp-prompt').innerHTML = `✉️ <strong>确认辅助安全邮箱</strong>: ${s.otp_prompt || '请输入完整辅助安全邮箱以发送验证码'}`;
           document.getElementById('login-otp-input').placeholder = s.proof_hint ? `请输入完整辅助安全邮箱 (如 ${s.proof_hint})` : '请输入完整辅助安全邮箱';
           const btn = document.getElementById('login-otp-btn');
           if (btn) btn.innerText = '发送验证码';
+          const inp = document.getElementById('login-otp-input');
+          if (inp && document.activeElement !== inp && !inp.value) inp.focus();
           if (!isCanvasOpen) toggleInteractiveCanvas();
         } else if (s.status === 'wait_otp') {
           otpBox.style.display = 'block';
+          otpBox.style.background = 'rgba(34, 197, 94, 0.15)';
+          otpBox.style.borderColor = '#22c55e';
           document.getElementById('login-otp-prompt').innerHTML = `🔑 <strong>输入安全验证码</strong>: ${s.otp_prompt || '已向辅助安全邮箱发送代码，请输入收到的验证码'}`;
           document.getElementById('login-otp-input').placeholder = '请输入 6 位或 7 位安全验证码';
           const btn = document.getElementById('login-otp-btn');
           if (btn) btn.innerText = '提交验证码';
+          const inp = document.getElementById('login-otp-input');
+          if (inp && document.activeElement !== inp && !inp.value) inp.focus();
           if (!isCanvasOpen) toggleInteractiveCanvas();
         } else {
-          otpBox.style.display = 'none';
+          if (s.status === 'running' && s.message && (s.message.includes('辅助邮箱已提交') || s.message.includes('验证码已提交'))) {
+            otpBox.style.display = 'block';
+            document.getElementById('login-otp-prompt').innerHTML = `⏳ <strong>${s.message}</strong>`;
+          } else {
+            otpBox.style.display = 'none';
+          }
         }
 
         if (s.viewport && s.viewport.w && s.viewport.h) {
@@ -3041,7 +3054,9 @@ HTML_CONTENT = """<!DOCTYPE html>
         if (d.status === 'ok') {
           inputEl.value = '';
           toast('提交成功，正在等待 MSR 处理...');
-          setTimeout(refreshLiveScreenshot, 1000);
+          setTimeout(refreshLiveScreenshot, 800);
+          setTimeout(pollLoginSession, 600);
+          setTimeout(pollLoginSession, 1500);
         } else {
           toast('提交失败: ' + (d.message || ''));
         }

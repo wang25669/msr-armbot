@@ -285,8 +285,8 @@ def inspect_login_page(cdp):
         const valMsgEl = document.querySelector('[class*="validationMessage"], [id*="validationMessage"], [role="alert"].error, #idSpan_SAOTCC_Error_OTC, #idSpan_SAOTCS_Error_ProofConfirmation');
         if (valMsgEl && valMsgEl.innerText.trim()) {
             const vt = valMsgEl.innerText.trim();
-            if (vt.toLowerCase().includes('incorrect') || vt.includes('不正确')) {
-                if (document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc]')) {
+            if (vt.toLowerCase().includes('incorrect') || vt.includes('不正确') || vt.toLowerCase().includes("didn't work") || vt.includes('代码无效')) {
+                if (document.querySelector('#idTxtBx_SAOTCC_OTC, input#otc, input[name=otc], input[name=code]')) {
                     return { type: 'otp_input', prompt: '输入的验证码不正确，请重新输入', is_error: true };
                 }
                 return { type: 'error', error: '密码不正确，请核对密码' };
@@ -313,28 +313,13 @@ def inspect_login_page(cdp):
             return { type: 'password_entry' };
         }
 
-        // 6. 检测是否提供“使用密码”切换选项 (针对默认推 Authenticator 或发邮件验证码的账号)
-        if (document.body) {
-            const switchPwdEl = Array.from(document.body.querySelectorAll('*')).find(x => {
-                const t = (x.innerText || '').trim().toLowerCase();
-                const isMatch = (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead' || t === 'use a password instead');
-                if (!isMatch || x.children.length > 0) return false;
-                const r = x.getBoundingClientRect();
-                return r.width > 0 && r.height > 0;
-            });
-            if (switchPwdEl) {
-                const r = switchPwdEl.getBoundingClientRect();
-                return { type: 'switch_to_password', x: r.x + r.width/2, y: r.y + r.height/2 };
-            }
-        }
-
-        // 7. 用户名输入页 (确保仅在尚未输入用户名时匹配)
+        // 6. 用户名输入页 (确保仅在尚未输入用户名时匹配)
         const userInput = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
         if (userInput && userInput.offsetParent !== null) {
             return { type: 'username_entry' };
         }
 
-        // 8. 辅助安全邮箱/手机确认页面 (Proof Confirmation - 此时需填入完整辅助邮箱以触发发送验证码)
+        // 7. 辅助安全邮箱/手机确认页面 (Proof Confirmation - 需填入完整辅助邮箱以触发发送验证码)
         const proofConfirmInput = document.querySelector('#idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #proof-confirmation-email-input');
         const sendCodeBtn = document.querySelector('#idSubmit_SAOTCS_SendCode');
         const hasSendCodeBtn = sendCodeBtn || Array.from(document.querySelectorAll('button, input[type=submit], input[type=button]')).some(b => {
@@ -357,36 +342,61 @@ def inspect_login_page(cdp):
         );
 
         if (isProofConfirmPage) {
-            let prompt = 'MSR 要求输入完整辅助邮箱以发送验证码';
-            const pEl = document.querySelector('#idDiv_SAOTCS_Title, #idDiv_SAOTCS_Description, .text-body, [role=heading]');
-            if (pEl && pEl.innerText.trim()) {
-                prompt = pEl.innerText.trim().slice(0, 120);
+            // 严格匹配带星号掩码的辅助邮箱 (必须包含至少2个星号)，彻底杜绝误匹配登录主账号
+            const maskedMatches = text.match(/[a-zA-Z0-9._%+-]*\*{2,}[a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
+            const masked = maskedMatches.length > 0 ? maskedMatches[0] : '';
+            const phoneMatch = text.match(/(?:\+?\d{1,3}[\s-]*)?(?:\*{2,}[\s-]*)+\d{2,4}/);
+            const hint = masked || (phoneMatch ? phoneMatch[0].trim() : '');
+
+            let prompt = masked ? `请确认辅助安全邮箱 (${masked}) 以发送安全验证码` : (hint ? `请确认安全验证方式 (${hint}) 以发送验证码` : '请输入完整的辅助安全邮箱以发送安全验证码');
+            const descEl = document.querySelector('#idDiv_SAOTCS_Description, #idDiv_SAOTCS_Title, .ext-description, p.text-body');
+            if (descEl && descEl.innerText.trim()) {
+                const dt = descEl.innerText.trim().replace(/\s+/g, ' ');
+                if (!dt.includes('@outlook.') && !dt.includes('@hotmail.') && !dt.includes('@live.') && dt.length > 10) {
+                    prompt = dt.slice(0, 140);
+                }
             }
-            const emailMatch = text.match(/[a-zA-Z0-9._%+-]+(?:\*+|[a-zA-Z0-9._%+-]+)@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-            const masked = emailMatch ? emailMatch[0] : '';
-            return { type: 'proof_confirm', prompt: prompt, masked: masked };
+            return { type: 'proof_confirm', prompt: prompt, masked: hint };
         }
 
-        // 9. 接收并输入 OTC 验证码页面 (OTP Input - 此时验证码已由 MSR 发出)
-        const otcInput = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_OTC');
+        // 8. 接收并输入 OTC 验证码页面 (OTP Input - 验证码已由 MSR 发送，需填入验证码)
+        const otcInput = document.querySelector(
+            '#idTxtBx_SAOTCC_OTC, input#otc, input[name=otc], input[name=OTC], input[name=code], input[name=Code], input[autocomplete="one-time-code"], input[inputmode="numeric"], #idTxtBx_OTC, #iOttText'
+        );
+        const hasOtpText = lowerText.includes('enter code') ||
+                           lowerText.includes('enter the code') ||
+                           lowerText.includes('enter the 6-digit code') ||
+                           lowerText.includes('enter the 7-digit code') ||
+                           text.includes('输入代码') ||
+                           text.includes('输入验证码') ||
+                           text.includes('代码已发送') ||
+                           text.includes('验证码已发送') ||
+                           lowerText.includes('sent a code') ||
+                           lowerText.includes('we sent a code') ||
+                           lowerText.includes('we\'ve sent a code') ||
+                           lowerText.includes('verify your email') ||
+                           text.includes('输入你在电子邮件中收到的代码') ||
+                           text.includes('输入你在短信中收到的代码');
         const isOtpPage = Boolean(
             (otcInput && otcInput.offsetParent !== null) ||
-            (
-                (lowerText.includes('enter code') || text.includes('输入代码') || text.includes('代码已发送') || lowerText.includes('sent a code') || lowerText.includes('we sent a code')) &&
-                document.querySelector('input[type=text], input[type=tel], input:not([type=hidden])')
-            )
+            (hasOtpText && !isProofConfirmPage && document.querySelector('input[type=text], input[type=tel], input[type=number], input:not([type=hidden])'))
         );
 
         if (isOtpPage) {
-            let prompt = 'MSR 要求输入安全验证码';
-            const pEl = document.querySelector('#idDiv_SAOTCC_Description, .text-body, #idDiv_SAOTCC_Title, [role=heading]');
-            if (pEl && pEl.innerText.trim()) {
-                prompt = pEl.innerText.trim().slice(0, 120);
+            const maskedMatches = text.match(/[a-zA-Z0-9._%+-]*\*{2,}[a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
+            const masked = maskedMatches.length > 0 ? maskedMatches[0] : '';
+            let prompt = masked ? `MSR 已向辅助安全邮箱 (${masked}) 发送验证码，请输入收到的 6 位或 7 位代码` : 'MSR 要求输入安全验证码';
+            const descEl = document.querySelector('#idDiv_SAOTCC_Description, .ext-description, #idDiv_SAOTCC_Title');
+            if (descEl && descEl.innerText.trim()) {
+                const dt = descEl.innerText.trim().replace(/\s+/g, ' ');
+                if (!dt.includes('@outlook.') && dt.length > 10) {
+                    prompt = dt.slice(0, 140);
+                }
             }
-            return { type: 'otp_input', prompt: prompt };
+            return { type: 'otp_input', prompt: prompt, masked: masked };
         }
 
-        // 10. 验证方式选择 / "Almost there" (Proof Selection)
+        // 9. 验证方式选择 / "Almost there" (Proof Selection)
         // 涵盖现代 Fluent UI: "Almost there", "Just one more step to verify it's you", "Send a code to ..."
         // 以及经典: #idDiv_SAOTCS_Proofs, "验证你的身份", "选择接收代码的方式"
         const hasAlmostThere = lowerText.includes('almost there') || text.includes('就快完成了') || text.includes('只差一步') ||
@@ -421,6 +431,22 @@ def inspect_login_page(cdp):
                 hint: hint || '辅助安全邮箱/手机验证',
                 has_clickable_proof: Boolean(targetEl)
             };
+        }
+
+        // 10. 检测是否提供“使用密码”切换选项 (针对初始默认推 Authenticator 或发邮件验证码的账号)
+        // 关键防护：严防在已处于辅助邮箱确认/输入验证码/身份选择等质询阶段误触发切换密码
+        if (!isProofConfirmPage && !isOtpPage && !hasProofSelectionText && !signEl && document.body) {
+            const switchPwdEl = Array.from(document.body.querySelectorAll('*')).find(x => {
+                const t = (x.innerText || '').trim().toLowerCase();
+                const isMatch = (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead' || t === 'use a password instead');
+                if (!isMatch || x.children.length > 0) return false;
+                const r = x.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            });
+            if (switchPwdEl) {
+                const r = switchPwdEl.getBoundingClientRect();
+                return { type: 'switch_to_password', x: r.x + r.width/2, y: r.y + r.height/2 };
+            }
         }
 
         // 11. 人机拼图验证码 (Arkose Labs FunCaptcha)
@@ -560,10 +586,10 @@ class LoginSession:
             let inp = document.querySelector('#idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #proof-confirmation-email-input');
             let isProof = Boolean(inp && inp.offsetParent !== null);
             if (!isProof) {{
-                inp = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_OTC');
+                inp = document.querySelector('#idTxtBx_SAOTCC_OTC, input#otc, input[name=otc], input[name=OTC], input[name=code], input[name=Code], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[type=tel], #idTxtBx_OTC, #iOttText');
             }}
             if (!inp || inp.offsetParent === null) {{
-                inp = Array.from(document.querySelectorAll('input[type=email], input[type=tel], input[type=text], input:not([type=hidden])')).find(x => x.offsetParent !== null && !x.disabled);
+                inp = Array.from(document.querySelectorAll('input[type=email], input[type=tel], input[type=text], input[type=number], input:not([type=hidden])')).find(x => x.offsetParent !== null && !x.disabled);
             }}
             if (!inp) {{
                 return {{ success: false, error: '未能定位输入框' }};
@@ -582,6 +608,8 @@ class LoginSession:
             const directSelectors = [
                 '#idSubmit_SAOTCS_SendCode',
                 '#idSubmit_SAOTCC_Continue',
+                'button#idSubmit_SAOTCC_Continue',
+                'button#idSubmit_SAOTCS_SendCode',
                 '#idSIButton9',
                 'button[type=submit]',
                 'input[type=submit]'
@@ -849,26 +877,30 @@ class LoginSession:
                                 time.sleep(2.5)
 
                     elif st_type == 'switch_to_password':
-                        self.status = 'running'
-                        self.message = '检测到非密码默认选项，正在自动切换至“使用密码”模式...'
-                        self.log('检测到非密码默认选项，自动切换至“使用密码”模式')
-                        x = state.get('x')
-                        y = state.get('y')
-                        if x is not None and y is not None and (x > 0 or y > 0):
-                            browser.mouse_click(self.cdp, x, y)
+                        if password_injected:
+                            self.log('已完成密码输入，当前处于后续二次质询阶段，忽略“使用密码”选项')
+                            time.sleep(1.5)
                         else:
-                            browser.ev(self.cdp, '''(() => {
-                                const leaf = Array.from(document.body ? document.body.querySelectorAll('*') : []).find(x => {
-                                    const t = (x.innerText || '').trim().toLowerCase();
-                                    return (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead') && x.children.length === 0;
-                                });
-                                if (leaf) {
-                                    leaf.click();
-                                    const target = leaf.closest('a, button, [role=button], .fui-Link');
-                                    if (target) target.click();
-                                }
-                            })()''')
-                        time.sleep(3)
+                            self.status = 'running'
+                            self.message = '检测到非密码默认选项，正在自动切换至“使用密码”模式...'
+                            self.log('检测到非密码默认选项，自动切换至“使用密码”模式')
+                            x = state.get('x')
+                            y = state.get('y')
+                            if x is not None and y is not None and (x > 0 or y > 0):
+                                browser.mouse_click(self.cdp, x, y)
+                            else:
+                                browser.ev(self.cdp, '''(() => {
+                                    const leaf = Array.from(document.body ? document.body.querySelectorAll('*') : []).find(x => {
+                                        const t = (x.innerText || '').trim().toLowerCase();
+                                        return (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead') && x.children.length === 0;
+                                    });
+                                    if (leaf) {
+                                        leaf.click();
+                                        const target = leaf.closest('a, button, [role=button], .fui-Link');
+                                        if (target) target.click();
+                                    }
+                                })()''')
+                            time.sleep(3)
 
                     elif st_type == 'password_entry':
                         if not password_injected or (time.time() - password_injected_at > 8):
