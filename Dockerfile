@@ -7,9 +7,10 @@ LABEL description="MSR automation container with web console"
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     MSR_HOME=/data \
-    WEB_PORT=8080
+    WEB_PORT=8080 \
+    TZ=Asia/Shanghai
 
-# 安装 Chromium、中文字体、cron 定时器及基础依赖 (保留 tzdata 供宿主机挂载或环境变量适配)
+# 安装 Chromium、中文字体、cron 定时器及基础依赖 (通过 tzdata 实现容器内时区自闭环)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     fonts-wqy-zenhei \
@@ -20,7 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/local/bin/python3 /usr/bin/python3 \
-    && ln -sf /usr/local/bin/python /usr/bin/python
+    && ln -sf /usr/local/bin/python /usr/bin/python \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 WORKDIR /app
 
