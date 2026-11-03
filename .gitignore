@@ -9,5 +9,4 @@ data/
 docker-test/
 .env
 tests/
-None/
 
