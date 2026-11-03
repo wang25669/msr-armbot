@@ -1,0 +1,10 @@
+.git
+.github
+tests/
+docker-test/
+data/
+logs/
+flows
+*.pyc
+__pycache__/
+.env

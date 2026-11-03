@@ -263,6 +263,7 @@ def inspect_login_page(cdp):
     script = '''(() => {
         const text = (document.body ? document.body.innerText : '') || '';
         const url = location.href || '';
+        const lowerText = text.toLowerCase();
         
         // 1. 成功页面判断
         if (url.includes('bing.com') || url.includes('account.microsoft.com') || url.includes('rewards.bing.com') || url.includes('privacynotice') || url.includes('myaccount.microsoft.com')) {
@@ -270,7 +271,6 @@ def inspect_login_page(cdp):
         }
         
         // 2. 账号与风控错误拦截
-        const lowerText = text.toLowerCase();
         if (text.includes('此 Microsoft 帐户不存在') || lowerText.includes("that microsoft account doesn't exist") || lowerText.includes("account doesn't exist")) {
             return { type: 'error', error: '此 MSR 帐户不存在，请核对用户名' };
         }
@@ -281,12 +281,18 @@ def inspect_login_page(cdp):
             return { type: 'error', error: '该 MSR 账户触发了安全风控拦截或已被锁定，需通过官方渠道重置' };
         }
 
-        // 检查输入字段的验证错误信息 (如 FluentUI field validationMessage)
-        const valMsgEl = document.querySelector('[class*="validationMessage"], [id*="validationMessage"], [role="alert"].error');
+        // 检查输入字段的验证错误信息 (如 FluentUI field validationMessage / inline error)
+        const valMsgEl = document.querySelector('[class*="validationMessage"], [id*="validationMessage"], [role="alert"].error, #idSpan_SAOTCC_Error_OTC, #idSpan_SAOTCS_Error_ProofConfirmation');
         if (valMsgEl && valMsgEl.innerText.trim()) {
             const vt = valMsgEl.innerText.trim();
             if (vt.toLowerCase().includes('incorrect') || vt.includes('不正确')) {
+                if (document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc]')) {
+                    return { type: 'otp_input', prompt: '输入的验证码不正确，请重新输入', is_error: true };
+                }
                 return { type: 'error', error: '密码不正确，请核对密码' };
+            }
+            if (vt.includes('不匹配') || vt.includes('不符') || vt.toLowerCase().includes("doesn't match") || vt.toLowerCase().includes('does not match')) {
+                return { type: 'proof_confirm', prompt: '输入的辅助安全邮箱与系统记录不匹配，请核对后重新输入', is_error: true };
             }
         }
 
@@ -328,24 +334,102 @@ def inspect_login_page(cdp):
             return { type: 'username_entry' };
         }
 
-        // 8. 二次验证/手机/邮箱 OTC 验证码输入框
-        const otcInput = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #idTxtBx_OTC, #proof-confirmation-email-input');
-        if (otcInput && otcInput.offsetParent !== null) {
-            let prompt = 'MSR 要求输入安全验证码';
-            const pEl = document.querySelector('#idDiv_SAOTCC_Description, .text-body, #idDiv_SAOTCS_Description, [role=heading]');
+        // 8. 辅助安全邮箱/手机确认页面 (Proof Confirmation - 此时需填入完整辅助邮箱以触发发送验证码)
+        const proofConfirmInput = document.querySelector('#idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #proof-confirmation-email-input');
+        const sendCodeBtn = document.querySelector('#idSubmit_SAOTCS_SendCode');
+        const hasSendCodeBtn = sendCodeBtn || Array.from(document.querySelectorAll('button, input[type=submit], input[type=button]')).some(b => {
+            if (b.offsetParent === null) return false;
+            const bt = (b.innerText || b.value || '').trim().toLowerCase();
+            return bt.includes('send code') || bt.includes('发送代码') || bt.includes('获取代码');
+        });
+
+        const isProofConfirmPage = Boolean(
+            (proofConfirmInput && proofConfirmInput.offsetParent !== null) ||
+            (hasSendCodeBtn && (
+                lowerText.includes('enter the complete email') ||
+                lowerText.includes('verify that this is your email') ||
+                lowerText.includes('to verify that this is your email address') ||
+                text.includes('为验证这是你的电子邮件地址') ||
+                text.includes('输入完整的电子邮件') ||
+                text.includes('隐藏的字符') ||
+                lowerText.includes('hidden part')
+            ))
+        );
+
+        if (isProofConfirmPage) {
+            let prompt = 'MSR 要求输入完整辅助邮箱以发送验证码';
+            const pEl = document.querySelector('#idDiv_SAOTCS_Title, #idDiv_SAOTCS_Description, .text-body, [role=heading]');
             if (pEl && pEl.innerText.trim()) {
-                prompt = pEl.innerText.trim().slice(0, 100);
+                prompt = pEl.innerText.trim().slice(0, 120);
+            }
+            const emailMatch = text.match(/[a-zA-Z0-9._%+-]+(?:\*+|[a-zA-Z0-9._%+-]+)@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+            const masked = emailMatch ? emailMatch[0] : '';
+            return { type: 'proof_confirm', prompt: prompt, masked: masked };
+        }
+
+        // 9. 接收并输入 OTC 验证码页面 (OTP Input - 此时验证码已由 MSR 发出)
+        const otcInput = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_OTC');
+        const isOtpPage = Boolean(
+            (otcInput && otcInput.offsetParent !== null) ||
+            (
+                (lowerText.includes('enter code') || text.includes('输入代码') || text.includes('代码已发送') || lowerText.includes('sent a code') || lowerText.includes('we sent a code')) &&
+                document.querySelector('input[type=text], input[type=tel], input:not([type=hidden])')
+            )
+        );
+
+        if (isOtpPage) {
+            let prompt = 'MSR 要求输入安全验证码';
+            const pEl = document.querySelector('#idDiv_SAOTCC_Description, .text-body, #idDiv_SAOTCC_Title, [role=heading]');
+            if (pEl && pEl.innerText.trim()) {
+                prompt = pEl.innerText.trim().slice(0, 120);
             }
             return { type: 'otp_input', prompt: prompt };
         }
 
-        // 9. 人机拼图验证码 (Arkose Labs FunCaptcha)
+        // 10. 验证方式选择 / "Almost there" (Proof Selection)
+        // 涵盖现代 Fluent UI: "Almost there", "Just one more step to verify it's you", "Send a code to ..."
+        // 以及经典: #idDiv_SAOTCS_Proofs, "验证你的身份", "选择接收代码的方式"
+        const hasAlmostThere = lowerText.includes('almost there') || text.includes('就快完成了') || text.includes('只差一步') ||
+                               lowerText.includes('just one more step to verify') || text.includes('只需再执行一步即可验证你的身份');
+        const hasProofSelectionText = hasAlmostThere ||
+                                      text.includes('验证你的身份') || lowerText.includes('verify your identity') ||
+                                      text.includes('选择接收代码的方式') || lowerText.includes('how would you like to get your security code') ||
+                                      lowerText.includes('send a code to') || text.includes('发送代码') ||
+                                      lowerText.includes('already have a code') || text.includes('已有代码') ||
+                                      lowerText.includes("don't recognize or have any of these") || text.includes('这些信息均无法使用');
+        const proofsEl = document.querySelector('#idDiv_SAOTCS_Proofs, .tile-container, #idDiv_SAOTCS_Proofs_List, [data-testid*="proof"]');
+
+        if (hasProofSelectionText || proofsEl) {
+            const candidates = Array.from(document.querySelectorAll('button, [role="button"], .tile, a, div[tabindex="0"]')).filter(el => {
+                if (el.offsetParent === null) return false;
+                const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
+                const lower = t.toLowerCase();
+                return lower.includes('send a code to') ||
+                       lower.includes('send code to') ||
+                       (t.includes('向') && (t.includes('发送代码') || t.includes('发送验证码'))) ||
+                       lower.includes('email to') ||
+                       lower.includes('text to') ||
+                       (lower.includes('@') && (lower.includes('code') || lower.includes('代码')));
+            });
+            const targetEl = candidates[0] || document.querySelector('#idDiv_SAOTCS_Proofs .table-row, [data-testid*="proof"], .tile-container .tile, #idDiv_SAOTCS_Proofs button');
+            let hint = '';
+            if (targetEl) {
+                hint = (targetEl.innerText || targetEl.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ');
+            }
+            return {
+                type: 'proof_selection',
+                hint: hint || '辅助安全邮箱/手机验证',
+                has_clickable_proof: Boolean(targetEl)
+            };
+        }
+
+        // 11. 人机拼图验证码 (Arkose Labs FunCaptcha)
         const arkose = document.querySelector('iframe[src*="arkoselabs"], iframe[src*="arkose"], #enforcementFrame, div[id*="wlspisp"]');
         if (arkose || text.includes('请解决谜题') || text.includes('证明你不是机器人') || text.includes('Please solve the puzzle')) {
             return { type: 'arkose_challenge' };
         }
 
-        // 10. 设备密钥 / 通行密钥 / 安全密钥 / 摆脱密码 / 无密码免密拦截与可跳过弹窗
+        // 12. 设备密钥 / 通行密钥 / 安全密钥 / 摆脱密码 / 无密码免密拦截与可跳过弹窗
         const hasPasskeyPrompt = text.includes('设备密钥') || text.includes('通行密钥') || 
                                  text.includes('安全密钥') || text.includes('无需密码') || 
                                  text.includes('摆脱密码') || text.includes('加快登录速度') ||
@@ -366,15 +450,9 @@ def inspect_login_page(cdp):
             return { type: 'dismissible_prompt', has_passkey: hasPasskeyPrompt };
         }
 
-        // 11. 验证方式选择列表 / 辅助邮箱确认 (Proof Selection)
-        const proofs = document.querySelector('#idDiv_SAOTCS_Proofs, .tile-container, #idDiv_SAOTCS_Proofs_List');
-        if (proofs || text.includes('验证你的身份') || text.includes('Verify your identity') || text.includes('选择接收代码的方式')) {
-            return { type: 'proof_selection' };
-        }
-
-        // 12. 通用下一步 / 协议同意
+        // 13. 通用下一步 / 协议同意
         const nextBtn = document.querySelector('#iNext, #iLandingViewAction, #idSIButton9, input[type=submit], button[type=submit]');
-        if (nextBtn && (text.includes('下一步') || text.includes('继续') || text.includes('Next') || text.includes('Continue'))) {
+        if (nextBtn && (text.includes('下一步') || text.includes('继续') || lowerText.includes('next') || lowerText.includes('continue'))) {
             return { type: 'generic_next' };
         }
 
@@ -397,10 +475,11 @@ class LoginSession:
         self.proxy = proxy
         self.log_cb = log_cb
         self.save_credential_flag = save_credential_flag
-        self.status = 'starting'  # starting, running, wait_auth_push, wait_otp, wait_interactive, success, error
+        self.status = 'starting'  # starting, running, wait_auth_push, wait_proof_confirm, wait_otp, wait_interactive, success, error
         self.message = '正在初始化安全 Chromium 实例...'
         self.auth_code = None
         self.otp_prompt = None
+        self.proof_hint = None
         self.error_msg = None
         self.logs = []
         self.created_at = time.time()
@@ -475,26 +554,78 @@ class LoginSession:
             return {'status': 'error', 'message': '浏览器未就绪'}
         from msr import browser
         import json
-        self.log(f'正在向 MSR 页面填入安全验证码/确认信息: {code} ...')
+        self.log(f'正在向 MSR 页面填入信息 (安全验证码/辅助邮箱): {code} ...')
         script = f'''(() => {{
-            const inp = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #idTxtBx_OTC, #proof-confirmation-email-input');
-            if (inp) {{
-                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                setter.call(inp, {json.dumps(code)});
-                inp.dispatchEvent(new Event('input', {{bubbles: true}}));
-                inp.dispatchEvent(new Event('change', {{bubbles: true}}));
-                const btn = document.querySelector('#idSubmit_SAOTCC_Continue, #idSIButton9, button[type=submit], input[type=submit]');
-                if (btn) btn.click();
-                return true;
+            // 1. 查找输入框 (优先查找 ProofConfirmation 或 OTC 或任何可见的文本/邮件输入框)
+            let inp = document.querySelector('#idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #proof-confirmation-email-input');
+            let isProof = Boolean(inp && inp.offsetParent !== null);
+            if (!isProof) {{
+                inp = document.querySelector('#idTxtBx_SAOTCC_OTC, input[name=otc], input[type=tel], #idTxtBx_OTC');
             }}
-            return false;
+            if (!inp || inp.offsetParent === null) {{
+                inp = Array.from(document.querySelectorAll('input[type=email], input[type=tel], input[type=text], input:not([type=hidden])')).find(x => x.offsetParent !== null && !x.disabled);
+            }}
+            if (!inp) {{
+                return {{ success: false, error: '未能定位输入框' }};
+            }}
+
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+            if (setter) {{
+                setter.call(inp, {json.dumps(code)});
+            }} else {{
+                inp.value = {json.dumps(code)};
+            }}
+            inp.dispatchEvent(new Event('input', {{bubbles: true}}));
+            inp.dispatchEvent(new Event('change', {{bubbles: true}}));
+
+            // 2. 点击对应提交/发送按钮
+            const directSelectors = [
+                '#idSubmit_SAOTCS_SendCode',
+                '#idSubmit_SAOTCC_Continue',
+                '#idSIButton9',
+                'button[type=submit]',
+                'input[type=submit]'
+            ];
+            let clickedBtn = null;
+            for (const s of directSelectors) {{
+                const btn = document.querySelector(s);
+                if (btn && btn.offsetParent !== null && !btn.disabled) {{
+                    btn.click();
+                    clickedBtn = s;
+                    break;
+                }}
+            }}
+            if (!clickedBtn) {{
+                const btns = Array.from(document.querySelectorAll('button, input[type=button], input[type=submit], a[role=button]')).filter(b => b.offsetParent !== null && !b.disabled);
+                const match = btns.find(b => {{
+                    const t = (b.innerText || b.value || '').trim().toLowerCase();
+                    return ['发送代码', '发送验证码', '获取代码', 'send code', 'send a code', '验证', 'verify', '下一步', 'next', '确定', 'submit'].some(k => t.includes(k));
+                }});
+                if (match) {{
+                    match.click();
+                    clickedBtn = match.innerText || match.value;
+                }}
+            }}
+
+            // 回车键兜底
+            try {{
+                inp.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}}));
+                inp.dispatchEvent(new KeyboardEvent('keyup', {{key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}}));
+            }} catch(e) {{}}
+
+            return {{ success: true, isProof: isProof, clickedBtn: clickedBtn }};
         }})()'''
-        ok = browser.ev(self.cdp, script)
-        if ok:
+        res = browser.ev(self.cdp, script)
+        if res and res.get('success'):
             self.status = 'running'
-            self.message = '验证码已提交，正在等待 MSR 校验...'
+            if res.get('isProof'):
+                self.message = '辅助邮箱已提交，正在请求 MSR 发送安全验证码...'
+                self.log(f'辅助安全邮箱已提交 ({code})，正在等待 MSR 响应与下发验证码...')
+            else:
+                self.message = '验证码已提交，正在等待 MSR 校验与凭据固化...'
+                self.log(f'安全验证码已提交 ({code})，正在等待 MSR 校验...')
             return {'status': 'ok'}
-        return {'status': 'error', 'message': '未能定位验证码输入框，请确认当前画面是否在输入验证码'}
+        return {'status': 'error', 'message': (res and res.get('error')) or '未能定位输入框，请确认当前画面是否在输入验证码或辅助邮箱'}
 
     def dispatch_mouse_click(self, x, y):
         if not self.cdp:
@@ -519,6 +650,7 @@ class LoginSession:
                 'message': self.message,
                 'auth_code': self.auth_code,
                 'otp_prompt': self.otp_prompt,
+                'proof_hint': self.proof_hint,
                 'error_msg': self.error_msg,
                 'logs': list(self.logs),
                 'result': self.result,
@@ -567,8 +699,9 @@ class LoginSession:
             username_injected_at = 0
             password_injected = False
             password_injected_at = 0
+            proof_clicks = 0
 
-            deadline = time.time() + 180
+            deadline = time.time() + 300
             while time.time() < deadline and not self.stop_requested:
                 self.updated_at = time.time()
 
@@ -599,7 +732,7 @@ class LoginSession:
                         # 严防在依然处于账号输入、密码输入、保持登录确认、验证码或人机质询阶段时误判登录完成
                         state_peek = inspect_login_page(self.cdp)
                         st_peek_type = state_peek.get('type')
-                        in_challenge = st_peek_type in ('username_entry', 'password_entry', 'auth_push', 'otp_input', 'dismissible_prompt', 'arkose_challenge', 'proof_selection', 'switch_to_password', 'kmsi')
+                        in_challenge = st_peek_type in ('username_entry', 'password_entry', 'auth_push', 'otp_input', 'proof_confirm', 'dismissible_prompt', 'arkose_challenge', 'proof_selection', 'switch_to_password', 'kmsi')
                         is_authenticated = diag.get('has_auth_u') or has_post_url or (st_peek_type == 'success_url') or (password_injected and has_ms_auth and not in_challenge and 'login.live.com' not in curr_url)
 
                         if is_authenticated:
@@ -799,19 +932,70 @@ class LoginSession:
                         self.log(f'>>> [安全提示] MSR 触发手机 Authenticator 二次验证，匹配数字: 【 {code} 】')
                         time.sleep(3)
 
+                    elif st_type == 'proof_confirm':
+                        masked = state.get('masked') or self.proof_hint or '辅助安全邮箱'
+                        prompt = state.get('prompt') or f'请输入完整的辅助安全邮箱 ({masked}) 以发送安全验证码'
+                        self.status = 'wait_proof_confirm'
+                        self.otp_prompt = prompt
+                        self.proof_hint = masked
+                        self.message = f'MSR 要求确认辅助安全邮箱: {prompt}'
+                        deadline = max(deadline, time.time() + 180)
+                        time.sleep(2)
+
                     elif st_type == 'otp_input':
                         prompt = state.get('prompt') or '请输入安全验证码'
                         self.status = 'wait_otp'
                         self.otp_prompt = prompt
                         self.message = f'MSR 需要输入安全验证码: {prompt}'
+                        deadline = max(deadline, time.time() + 180)
                         time.sleep(2)
 
-                    elif st_type in ('arkose_challenge', 'proof_selection'):
-                        self.status = 'wait_interactive'
-                        if st_type == 'arkose_challenge':
-                            self.message = '检测到人机拼图验证码(Arkose)，请在下方实时交互窗口中点击完成验证'
+                    elif st_type == 'proof_selection':
+                        proof_hint = state.get('hint') or self.proof_hint or '辅助安全邮箱/手机'
+                        self.proof_hint = proof_hint
+                        if proof_clicks < 2:
+                            self.status = 'running'
+                            self.message = f'检测到 MSR 身份验证选项 ({proof_hint})，正在自动点击以发送验证码...'
+                            self.log(f'检测到 MSR 身份验证页面 (Almost there: {proof_hint})，正在自动点击进入验证码发送流程...')
+                            click_res = browser.ev(self.cdp, '''(() => {
+                                const candidates = Array.from(document.querySelectorAll('button, [role="button"], .tile, a, div[tabindex="0"]')).filter(el => {
+                                    if (el.offsetParent === null) return false;
+                                    const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
+                                    const lower = t.toLowerCase();
+                                    return lower.includes('send a code to') ||
+                                           lower.includes('send code to') ||
+                                           (t.includes('向') && (t.includes('发送代码') || t.includes('发送验证码'))) ||
+                                           lower.includes('email to') ||
+                                           lower.includes('text to') ||
+                                           (lower.includes('@') && (lower.includes('code') || lower.includes('代码')));
+                                });
+                                const target = candidates[0] || document.querySelector('#idDiv_SAOTCS_Proofs .table-row, [data-testid*="proof"], .tile-container .tile, #idDiv_SAOTCS_Proofs button');
+                                if (target) {
+                                    const el = target.closest('button, [role=button], a, .tile, div[tabindex]') || target;
+                                    try {
+                                        el.focus();
+                                        el.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
+                                        el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                                        el.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, cancelable: true}));
+                                        el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                                        el.click();
+                                    } catch(e) {
+                                        el.click();
+                                    }
+                                    return { success: true, text: el.innerText || el.getAttribute('aria-label') };
+                                }
+                                return { success: false };
+                            })()''')
+                            proof_clicks += 1
+                            time.sleep(2.5)
                         else:
-                            self.message = '检测到 MSR 身份验证方式选择，请在下方实时交互窗口中点击选择'
+                            self.status = 'wait_interactive'
+                            self.message = f'检测到 MSR 身份验证方式选择 ({proof_hint})，请在下方实时交互窗口中点击选择'
+                            time.sleep(2)
+
+                    elif st_type == 'arkose_challenge':
+                        self.status = 'wait_interactive'
+                        self.message = '检测到人机拼图验证码(Arkose)，请在下方实时交互窗口中点击完成验证'
                         time.sleep(2)
 
                     elif st_type == 'dismissible_prompt':
@@ -879,7 +1063,7 @@ class LoginSession:
                     self.message = '登录已取消'
                 else:
                     self.status = 'error'
-                    self.message = '登录超时 (180秒未完成)，可能存在未通过的风控验证'
+                    self.message = '登录超时，可能存在未通过的风控验证或等待验证输入超时'
 
         except Exception as ex:
             self.status = 'error'
@@ -941,13 +1125,14 @@ def get_session_screenshot(name):
     return sess.get_screenshot()
 
 
-def login_with_credential(name, username, password, proxy=None, log_cb=None, save_credential_flag=True, ch=None, cdp=None, timeout=180):
+def login_with_credential(name, username, password, proxy=None, log_cb=None, save_credential_flag=True, ch=None, cdp=None, timeout=300):
     """现代化 MSR 账号密码全自动登录与多重风控质询接管。支持复用已有 Chromium 实例原地登录。"""
     session = start_session(name, username, password, proxy=proxy, log_cb=log_cb,
                             save_credential_flag=save_credential_flag, ch=ch, cdp=cdp)
     deadline = time.time() + timeout
     prompted_auth_code = None
     prompted_otp = False
+    prompted_proof = False
 
     while time.time() < deadline:
         if session.status == 'success':
@@ -959,6 +1144,20 @@ def login_with_credential(name, username, password, proxy=None, log_cb=None, sav
             prompted_auth_code = session.auth_code
             if log_cb:
                 log_cb(f'>>> [安全提示] MSR 触发手机 Authenticator 验证，请在手机上选择数字：【 {session.auth_code} 】')
+
+        if session.status == 'wait_proof_confirm' and not prompted_proof:
+            prompted_proof = True
+            if sys.stdin and sys.stdin.isatty():
+                print(f'\n>>> MSR 要求确认辅助安全邮箱 ({session.otp_prompt or session.proof_hint or "辅助邮箱"}):', flush=True)
+                try:
+                    email_val = input('请输入完整辅助安全邮箱: ').strip()
+                    if email_val:
+                        session.submit_otp(email_val)
+                except Exception:
+                    pass
+            else:
+                if log_cb:
+                    log_cb(f'>>> [安全提示] MSR 要求确认辅助安全邮箱: {session.otp_prompt} (请在 Web 控制台输入完整辅助邮箱以发送验证码)')
 
         if session.status == 'wait_otp' and not prompted_otp:
             prompted_otp = True

@@ -1212,12 +1212,12 @@ HTML_CONTENT = """<!DOCTYPE html>
           <div style="font-size:12px; color:var(--text-sub); margin-top:4px;">（在手机上点击对应数字后系统将自动继续）</div>
         </div>
 
-        <!-- 安全验证码输入卡片 (条件展示) -->
+        <!-- 安全验证码 / 辅助邮箱确认卡片 (条件展示) -->
         <div id="login-otp-box" style="display:none; background:rgba(234,179,8,0.15); border:1px solid #eab308; border-radius:8px; padding:12px; margin-bottom:12px;">
-          <div id="login-otp-prompt" style="font-size:13px; color:#facc15; margin-bottom:8px;">✉️ MSR 需要安全验证码</div>
+          <div id="login-otp-prompt" style="font-size:13px; color:#facc15; margin-bottom:8px; font-weight:600;">✉️ MSR 需要安全验证</div>
           <div style="display:flex; gap:8px;">
-            <input type="text" id="login-otp-input" placeholder="请输入 6 位安全验证码" style="flex:1;">
-            <button class="btn" onclick="submitSessionOtp()">提交验证码</button>
+            <input type="text" id="login-otp-input" placeholder="请输入安全验证码或辅助安全邮箱" style="flex:1;" onkeydown="if(event.key==='Enter')submitSessionOtp()">
+            <button id="login-otp-btn" class="btn" onclick="submitSessionOtp()">提交验证</button>
           </div>
         </div>
 
@@ -2989,9 +2989,20 @@ HTML_CONTENT = """<!DOCTYPE html>
           authPushBox.style.display = 'none';
         }
 
-        if (s.status === 'wait_otp') {
+        if (s.status === 'wait_proof_confirm') {
           otpBox.style.display = 'block';
-          document.getElementById('login-otp-prompt').innerText = s.otp_prompt || 'MSR 要求输入安全验证码';
+          document.getElementById('login-otp-prompt').innerHTML = `✉️ <strong>确认辅助安全邮箱</strong>: ${s.otp_prompt || '请输入完整辅助安全邮箱以发送验证码'}`;
+          document.getElementById('login-otp-input').placeholder = s.proof_hint ? `请输入完整辅助安全邮箱 (如 ${s.proof_hint})` : '请输入完整辅助安全邮箱';
+          const btn = document.getElementById('login-otp-btn');
+          if (btn) btn.innerText = '发送验证码';
+          if (!isCanvasOpen) toggleInteractiveCanvas();
+        } else if (s.status === 'wait_otp') {
+          otpBox.style.display = 'block';
+          document.getElementById('login-otp-prompt').innerHTML = `🔑 <strong>输入安全验证码</strong>: ${s.otp_prompt || '已向辅助安全邮箱发送代码，请输入收到的验证码'}`;
+          document.getElementById('login-otp-input').placeholder = '请输入 6 位或 7 位安全验证码';
+          const btn = document.getElementById('login-otp-btn');
+          if (btn) btn.innerText = '提交验证码';
+          if (!isCanvasOpen) toggleInteractiveCanvas();
         } else {
           otpBox.style.display = 'none';
         }
@@ -3014,9 +3025,12 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     async function submitSessionOtp() {
-      const code = document.getElementById('login-otp-input').value.trim();
-      if (!code) return toast('请输入验证码');
-      toast('正在提交安全验证码...');
+      const inputEl = document.getElementById('login-otp-input');
+      const code = inputEl.value.trim();
+      if (!code) return toast('请输入内容');
+      const btn = document.getElementById('login-otp-btn');
+      toast('正在提交...');
+      if (btn) btn.disabled = true;
       try {
         const res = await fetch('/api/auth/session/submit-otp', {
           method: 'POST',
@@ -3025,13 +3039,16 @@ HTML_CONTENT = """<!DOCTYPE html>
         });
         const d = await res.json();
         if (d.status === 'ok') {
-          document.getElementById('login-otp-input').value = '';
-          toast('验证码已提交');
+          inputEl.value = '';
+          toast('提交成功，正在等待 MSR 处理...');
+          setTimeout(refreshLiveScreenshot, 1000);
         } else {
           toast('提交失败: ' + (d.message || ''));
         }
       } catch(e) {
         toast('提交异常: ' + e);
+      } finally {
+        if (btn) btn.disabled = false;
       }
     }
 
@@ -3375,12 +3392,12 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json_resp({'status': 'ok'})
             return
 
-        if path == '/api/auth/session/submit-otp':
+        if path in ('/api/auth/session/submit-otp', '/api/auth/session/submit-proof-confirm'):
             from msr import auth
             name = payload.get('name')
             code = (payload.get('code') or '').strip()
             if not name or not code:
-                self._json_resp({'status': 'error', 'message': '账号与验证码不能为空'}, code=400)
+                self._json_resp({'status': 'error', 'message': '账号与验证内容不能为空'}, code=400)
                 return
             res = auth.submit_session_otp(name, code)
             self._json_resp(res)
