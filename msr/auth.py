@@ -257,10 +257,11 @@ def _login_by_interactive(name, profile_path, config, proxy=None):
         pass
 
 
-def inspect_login_page(cdp):
+def inspect_login_page(cdp, can_switch_to_password=True):
     """自适应探测 MSR 登录页的当前状态与风控质询类型。"""
     from msr import browser
-    script = '''(() => {
+    can_switch_js = 'true' if can_switch_to_password else 'false'
+    script = f'(() => {{ const canSwitchToPassword = {can_switch_js};\n' + '''
         const text = (document.body ? document.body.innerText : '') || '';
         const url = location.href || '';
         const lowerText = text.toLowerCase();
@@ -313,13 +314,29 @@ def inspect_login_page(cdp):
             return { type: 'password_entry' };
         }
 
-        // 6. 用户名输入页 (确保仅在尚未输入用户名时匹配)
+        // 6. 检测是否可切换至“使用密码”登录
+        // 核心准则：若用户提供了密码且尚未输入过密码，优先自动切换至密码输入模式，绝不擅自将用户拉入辅助邮箱验证
+        if (canSwitchToPassword && document.body) {
+            const switchPwdEl = Array.from(document.body.querySelectorAll('*')).find(x => {
+                const t = (x.innerText || '').trim().toLowerCase();
+                const isMatch = (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead' || t === 'use a password instead');
+                if (!isMatch || x.children.length > 0) return false;
+                const r = x.getBoundingClientRect();
+                return r.width > 0 && r.height > 0 && (x.offsetParent !== null || r.top > 0);
+            });
+            if (switchPwdEl) {
+                const r = switchPwdEl.getBoundingClientRect();
+                return { type: 'switch_to_password', x: r.x + r.width/2, y: r.y + r.height/2 };
+            }
+        }
+
+        // 7. 用户名输入页 (确保仅在尚未输入用户名时匹配)
         const userInput = document.querySelector('#usernameEntry, input[name=loginfmt], input[type=email], #i0116');
         if (userInput && userInput.offsetParent !== null) {
             return { type: 'username_entry' };
         }
 
-        // 7. 辅助安全邮箱/手机确认页面 (Proof Confirmation - 需填入完整辅助邮箱以触发发送验证码)
+        // 8. 辅助安全邮箱/手机确认页面 (Proof Confirmation - 需填入完整辅助邮箱以触发发送验证码)
         const proofConfirmInput = document.querySelector('#idTxtBx_SAOTCS_ProofConfirmation, input[name=ProofConfirmation], #proof-confirmation-email-input');
         const sendCodeBtn = document.querySelector('#idSubmit_SAOTCS_SendCode');
         const hasSendCodeBtn = sendCodeBtn || Array.from(document.querySelectorAll('button, input[type=submit], input[type=button]')).some(b => {
@@ -361,7 +378,7 @@ def inspect_login_page(cdp):
             return { type: 'proof_confirm', prompt: prompt, masked: hint };
         }
 
-        // 8. 接收并输入 OTC 验证码页面 (OTP Input - 验证码已由 MSR 发送，需填入验证码)
+        // 9. 接收并输入 OTC 验证码页面 (OTP Input - 验证码已由 MSR 发送，需填入验证码)
         const otcInput = document.querySelector(
             '#idTxtBx_SAOTCC_OTC, input#otc, input[name=otc], input[name=OTC], input[name=code], input[name=Code], input[autocomplete="one-time-code"], input[inputmode="numeric"], #idTxtBx_OTC, #iOttText'
         );
@@ -398,7 +415,7 @@ def inspect_login_page(cdp):
             return { type: 'otp_input', prompt: prompt, masked: masked };
         }
 
-        // 9. 验证方式选择 / "Almost there" (Proof Selection)
+        // 10. 验证方式选择 / "Almost there" (Proof Selection)
         // 涵盖现代 Fluent UI: "Almost there", "Just one more step to verify it's you", "Send a code to ..."
         // 以及经典: #idDiv_SAOTCS_Proofs, "验证你的身份", "选择接收代码的方式"
         const hasAlmostThere = lowerText.includes('almost there') || text.includes('就快完成了') || text.includes('只差一步') ||
@@ -433,22 +450,6 @@ def inspect_login_page(cdp):
                 hint: hint || '辅助安全邮箱/手机验证',
                 has_clickable_proof: Boolean(targetEl)
             };
-        }
-
-        // 10. 检测是否提供“使用密码”切换选项 (针对初始默认推 Authenticator 或发邮件验证码的账号)
-        // 关键防护：严防在已处于辅助邮箱确认/输入验证码/身份选择等质询阶段误触发切换密码
-        if (!isProofConfirmPage && !isOtpPage && !hasProofSelectionText && !signEl && document.body) {
-            const switchPwdEl = Array.from(document.body.querySelectorAll('*')).find(x => {
-                const t = (x.innerText || '').trim().toLowerCase();
-                const isMatch = (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead' || t === 'use a password instead');
-                if (!isMatch || x.children.length > 0) return false;
-                const r = x.getBoundingClientRect();
-                return r.width > 0 && r.height > 0;
-            });
-            if (switchPwdEl) {
-                const r = switchPwdEl.getBoundingClientRect();
-                return { type: 'switch_to_password', x: r.x + r.width/2, y: r.y + r.height/2 };
-            }
         }
 
         // 11. 人机拼图验证码 (Arkose Labs FunCaptcha)
@@ -731,6 +732,7 @@ class LoginSession:
             password_injected = False
             password_injected_at = 0
             proof_clicks = 0
+            switch_pwd_clicks = 0
 
             deadline = time.time() + 300
             while time.time() < deadline and not self.stop_requested:
@@ -761,7 +763,8 @@ class LoginSession:
                         has_post_url = any(u in curr_url for u in ('account.microsoft.com', 'rewards.bing.com', 'myaccount.microsoft.com', 'privacynotice.account.microsoft.com', 'complete-client-signin'))
                         
                         # 严防在依然处于账号输入、密码输入、保持登录确认、验证码或人机质询阶段时误判登录完成
-                        state_peek = inspect_login_page(self.cdp)
+                        can_switch = bool(self.password) and (not password_injected) and (switch_pwd_clicks < 3)
+                        state_peek = inspect_login_page(self.cdp, can_switch_to_password=can_switch)
                         st_peek_type = state_peek.get('type')
                         in_challenge = st_peek_type in ('username_entry', 'password_entry', 'auth_push', 'otp_input', 'proof_confirm', 'dismissible_prompt', 'arkose_challenge', 'proof_selection', 'switch_to_password', 'kmsi')
                         is_authenticated = diag.get('has_auth_u') or has_post_url or (st_peek_type == 'success_url') or (password_injected and has_ms_auth and not in_challenge and 'login.live.com' not in curr_url)
@@ -828,8 +831,9 @@ class LoginSession:
                     except Exception:
                         pass
 
-                    # B. 检测页面状态
-                    state = inspect_login_page(self.cdp)
+                    # B. 检测页面状态 (若用户提供了密码且尚未输入过密码，优先嗅探“使用密码”通道切换)
+                    can_switch = bool(self.password) and (not password_injected) and (switch_pwd_clicks < 3)
+                    state = inspect_login_page(self.cdp, can_switch_to_password=can_switch)
                     st_type = state.get('type')
 
                     if st_type == 'error':
@@ -884,26 +888,28 @@ class LoginSession:
                             self.log('已完成密码输入，当前处于后续二次质询阶段，忽略“使用密码”选项')
                             time.sleep(1.5)
                         else:
+                            switch_pwd_clicks += 1
                             self.status = 'running'
                             self.message = '检测到非密码默认选项，正在自动切换至“使用密码”模式...'
-                            self.log('检测到非密码默认选项，自动切换至“使用密码”模式')
+                            self.log('检测到提供“使用密码”通道，正在自动切换至密码输入模式...')
                             x = state.get('x')
                             y = state.get('y')
                             if x is not None and y is not None and (x > 0 or y > 0):
-                                browser.mouse_click(self.cdp, x, y)
-                            else:
-                                browser.ev(self.cdp, '''(() => {
-                                    const leaf = Array.from(document.body ? document.body.querySelectorAll('*') : []).find(x => {
-                                        const t = (x.innerText || '').trim().toLowerCase();
-                                        return (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead') && x.children.length === 0;
-                                    });
-                                    if (leaf) {
-                                        leaf.click();
-                                        const target = leaf.closest('a, button, [role=button], .fui-Link');
-                                        if (target) target.click();
-                                    }
-                                })()''')
-                            time.sleep(3)
+                                try:
+                                    browser.mouse_click(self.cdp, x, y)
+                                except Exception:
+                                    pass
+                            browser.ev(self.cdp, '''(() => {
+                                const leaf = Array.from(document.body ? document.body.querySelectorAll('*') : []).find(x => {
+                                    const t = (x.innerText || '').trim().toLowerCase();
+                                    return (t === '使用密码' || t === '使用你的密码' || t === 'use password' || t === 'use your password' || t === 'use password instead' || t === 'use a password instead') && x.children.length === 0;
+                                });
+                                if (leaf) {
+                                    const target = leaf.closest('a, button, [role=button], .fui-Link') || leaf;
+                                    target.click();
+                                }
+                            })()''')
+                            time.sleep(2.5)
 
                     elif st_type == 'password_entry':
                         if not password_injected or (time.time() - password_injected_at > 8):
