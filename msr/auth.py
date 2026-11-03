@@ -325,7 +325,7 @@ def inspect_login_page(cdp):
         const hasSendCodeBtn = sendCodeBtn || Array.from(document.querySelectorAll('button, input[type=submit], input[type=button]')).some(b => {
             if (b.offsetParent === null) return false;
             const bt = (b.innerText || b.value || '').trim().toLowerCase();
-            return bt.includes('send code') || bt.includes('发送代码') || bt.includes('获取代码');
+            return bt.includes('send code') || bt.includes('发送代码') || bt.includes('获取代码') || bt.includes('发送验证码');
         });
 
         const isProofConfirmPage = Boolean(
@@ -334,7 +334,9 @@ def inspect_login_page(cdp):
                 lowerText.includes('enter the complete email') ||
                 lowerText.includes('verify that this is your email') ||
                 lowerText.includes('to verify that this is your email address') ||
+                lowerText.includes('enter it here') ||
                 text.includes('为验证这是你的电子邮件地址') ||
+                text.includes('要验证这是否是你的电子邮件') ||
                 text.includes('输入完整的电子邮件') ||
                 text.includes('隐藏的字符') ||
                 lowerText.includes('hidden part')
@@ -373,7 +375,7 @@ def inspect_login_page(cdp):
                            text.includes('验证码已发送') ||
                            lowerText.includes('sent a code') ||
                            lowerText.includes('we sent a code') ||
-                           lowerText.includes('we\'ve sent a code') ||
+                           lowerText.includes("we've sent a code") ||
                            lowerText.includes('verify your email') ||
                            text.includes('输入你在电子邮件中收到的代码') ||
                            text.includes('输入你在短信中收到的代码');
@@ -487,7 +489,8 @@ def inspect_login_page(cdp):
     try:
         res = browser.ev(cdp, script)
         return res if isinstance(res, dict) else {'type': 'other'}
-    except Exception:
+    except Exception as e:
+        logger.debug(f'页面检测异常: {e}')
         return {'type': 'other'}
 
 
@@ -1004,6 +1007,7 @@ class LoginSession:
                                 const target = candidates[0] || document.querySelector('#idDiv_SAOTCS_Proofs .table-row, [data-testid*="proof"], .tile-container .tile, #idDiv_SAOTCS_Proofs button');
                                 if (target) {
                                     const el = target.closest('button, [role=button], a, .tile, div[tabindex]') || target;
+                                    const rect = el.getBoundingClientRect();
                                     try {
                                         el.focus();
                                         el.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
@@ -1014,10 +1018,20 @@ class LoginSession:
                                     } catch(e) {
                                         el.click();
                                     }
-                                    return { success: true, text: el.innerText || el.getAttribute('aria-label') };
+                                    return {
+                                        success: true,
+                                        text: el.innerText || el.getAttribute('aria-label'),
+                                        x: (rect && rect.width > 0) ? (rect.x + rect.width / 2) : 0,
+                                        y: (rect && rect.height > 0) ? (rect.y + rect.height / 2) : 0
+                                    };
                                 }
                                 return { success: false };
                             })()''')
+                            if isinstance(click_res, dict) and click_res.get('x') and click_res.get('y'):
+                                try:
+                                    browser.mouse_click(self.cdp, click_res['x'], click_res['y'])
+                                except Exception:
+                                    pass
                             proof_clicks += 1
                             time.sleep(2.5)
                         else:
