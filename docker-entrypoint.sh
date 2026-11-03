@@ -4,11 +4,6 @@ set -e
 MSR_DATA="${MSR_HOME:-/data}"
 mkdir -p "$MSR_DATA"
 
-# 容器内部时区自闭环配置 (支持 TZ 环境变量动态指定，彻底摆脱宿主机 /etc/localtime 与 /etc/timezone 依赖)
-if [ -n "$TZ" ] && [ -f "/usr/share/zoneinfo/$TZ" ]; then
-    ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && echo "$TZ" > /etc/timezone
-fi
-
 echo "=== MSR-ArmBot 容器正在启动 ==="
 echo "数据目录: $MSR_DATA"
 # 如果外部传入了自定义命令，则直接执行
