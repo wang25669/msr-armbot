@@ -63,12 +63,29 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
         flight = api.find_promo(promos, 'edge_browsing_streak_flight')
         elig = api.find_promo(promos, 'edge_browsing_streak_eligible')
 
-        # 若处于未激活状态，统一交由前台主浏览器执行页面交互激活，严禁在后台线程私起第二个 Chromium 造成锁冲突
-        if flight is None or elig is None or str(elig.get('complete', '')).lower() != 'true':
-            config.log(name, '检测到本账号 Edge 浏览打卡尚未激活 (交由主浏览器页面激活后联动补跑)')
+        # 1. 若尚未获取打卡任务 flight，通过 HTTP API 信令向服务端发送资格激活请求 (零进程开销、无 Chromium 锁冲突)
+        if flight is None:
+            offer_id = (elig.get('offerid') if elig else None) or 'edge_flight_1_ww_treatment'
+            report_type = int(elig.get('report_offer_type', 714)) if elig else 714
+            config.log(name, f'Edge 30分钟打卡尚未激活，正在发送资格激活信令 (offerid={offer_id}, type={report_type})...')
+            try:
+                api.api(name, 'POST', '/me/activities', token, eh,
+                        {'amount': 1, 'attributes': {'offerid': offer_id},
+                         'request_user_info': True, 'type': report_type}, proxy=proxy)
+                time.sleep(4)
+                promos = api.get_me(name, token, rg, proxy=proxy)
+                flight = api.find_promo(promos, 'edge_browsing_streak_flight')
+                if flight:
+                    config.log(name, 'Edge 30分钟打卡激活信令已生效，成功获取打卡任务 (DailyCheckIn_Edge)！')
+            except Exception as ex_act:
+                config.log(name, f'Edge 30分钟打卡激活信令发送异常: {ex_act}')
+
+        # 2. 若激活后仍未下发 flight，记录状态交由后续浏览器阶段交互或联动补跑
+        if flight is None:
+            config.log(name, '本账号在 API 侧未下发 Edge 浏览打卡任务 (flight 为空，如页面有卡片交由主浏览器页面激活后联动补跑)')
             return '未下发Edge任务(跳过)'
 
-        if str(flight.get('complete')).lower() == 'true':
+        if str(flight.get('complete', '')).lower() == 'true':
             return '已完成'
         from msr import settings
         st_edge = settings.load_settings()

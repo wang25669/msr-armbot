@@ -14,7 +14,7 @@ REDIRECT = 'https://login.live.com/oauth20_desktop.srf'
 DEVICE_CODE_URL = 'https://login.live.com/oauth20_connect.srf'
 
 EDGE_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
-           'Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0')
+           'Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0')
 APP_UA = ('Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UQ1A.240205.002; ) AppleWebKit/537.36 '
           '(KHTML, like Gecko) Version/4.0 Chrome/124.0.6367.82 Mobile Safari/537.36 '
           'BingSapphire/31.1.2110003554')

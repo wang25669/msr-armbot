@@ -1564,8 +1564,8 @@ def auto_activate_promotions_and_streaks(cdp, ch=None, log=print):
       const clickables = Array.from(document.querySelectorAll('button, div[role="button"], a, span[role="link"], [data-react-aria-pressable="true"], [role="button"], [role="link"]'));
       
       const perkPattern = /(?:福利已解锁|福利解锁|特权已解锁|特权解锁|搜索次数翻倍|搜索翻倍|限时翻倍|每日搜索翻倍|双倍积分|限时特惠|限时福利|perk\\s*unlocked|perks\\s*unlocked|benefit\\s*unlocked|reward\\s*unlocked|double\\s*search|2x\\s*search|search\\s*2x|double\\s*daily\\s*search|2x\\s*points|opt[\\s-]?in|limited\\s*time\\s*search)/i;
-      const streakPattern = /(?:activate\\s*streak|how\\s*to\\s*activate|如何激活|开始连续打卡|start\\s*streak|join\\s*streak|inactive|pending\\s*activation)/i;
-      const activateCtaPattern = /(?:立即激活|activate\\s*now|activate|激活|开启|加入)/i;
+      const streakPattern = /(?:activate\\s*streak|how\\s*to\\s*activate|如何激活|开始连续打卡|start\\s*streak|join\\s*streak|inactive|pending\\s*activation|browse\\s*on\\s*edge|browse\\s*with\\s*edge|在\\s*edge\\s*上浏览)/i;
+      const activateCtaPattern = /(?:立即激活|activate\\s*now|activate|激活|开启|加入|get\\s*started|start\\s*browsing|start|开始)/i;
       const completedPattern = /(?:completed|已完成|activated|已激活|claimed|已领取)/i;
 
       const seenIds = new Set();
@@ -1635,12 +1635,10 @@ def auto_activate_promotions_and_streaks(cdp, ch=None, log=print):
         time.sleep(random.uniform(2.5, 3.5))
         unactivated = ev(cdp, find_tasks_js) or []
 
-    if not unactivated:
-        return []
-
-    log('[特权与打卡自动激活] 发现 %d 个待激活任务: %s' % (
-        len(unactivated), ['%s (%s)' % (u['title'], u['category']) for u in unactivated]))
     activated_types = []
+    if unactivated:
+        log('[特权与打卡自动激活] 发现 %d 个待激活任务: %s' % (
+            len(unactivated), ['%s (%s)' % (u['title'], u['category']) for u in unactivated]))
 
     for s in unactivated:
         title = s['title']
@@ -1792,6 +1790,31 @@ def auto_activate_promotions_and_streaks(cdp, ch=None, log=print):
                 pass
         else:
             log('未能定位到弹窗激活按钮或该卡片已激活')
+
+    # 额外触发 Edge 专属奖励面板入口 (触发 Edge 浏览识别与连续打卡激活)
+    if ch:
+        try:
+            edge_tab = ch.new_tab('https://www.bing.com/?rwgbopen=1&FORM=rwbsl1')
+            time.sleep(random.uniform(2.5, 3.5))
+            edge_cdp = ch.attach(edge_tab)
+            clicked = ev(edge_cdp, '''(() => {
+              const cand = Array.from(document.querySelectorAll('a, button, [role="button"]')).find(el => {
+                const t = (el.innerText || '').trim();
+                const h = el.getAttribute('href') || el.href || '';
+                return /开始在 Edge 上浏览|开始|Get started|Start browsing|Activate streak|立即激活/i.test(t) ||
+                       h.includes('rwgbopen=1');
+              });
+              if (cand) { cand.click(); return true; }
+              return false;
+            })()''')
+            if clicked:
+                log('[Edge 专属入口] 成功点击 Edge 浏览打卡/特权激活按钮')
+                if 'edge' not in activated_types:
+                    activated_types.append('edge')
+            time.sleep(1.0)
+            ch.close_tab(edge_tab.get('id'))
+        except Exception as ex_edge:
+            log(f'[Edge 专属入口激活] 容错(跳过): {ex_edge}')
 
     return list(set(activated_types))
 

@@ -422,14 +422,26 @@ def run_one(name, args, config, planner, probe, api, executor, notify=None, sett
             config.log(name, '前台浏览器任务已全部就绪，等待后台 Edge 30分钟打卡结束...')
             edge_thread.join()
 
-        # 4.1 新手首次激活联动：若最初未下发跳过，但前台浏览器刚刚完成了 Edge 打卡任务激活，则触发补跑
+        # 4.1 新手首次激活联动：若最初未下发跳过，但前台浏览器交互激活或服务端下发了 flight，则触发补跑
         newly_activated = b_results.get('_newly_activated', []) if browser_phases else []
-        if 'edge' in newly_activated and results_map.get(edge_ph) == '未下发Edge任务(跳过)':
-            config.log(name, '检测到浏览器刚刚完成了 Edge 浏览打卡的新手激活，正在启动今日打卡心跳...')
+        edge_needs_retry = False
+        if results_map.get(edge_ph) == '未下发Edge任务(跳过)':
+            if 'edge' in newly_activated:
+                edge_needs_retry = True
+            else:
+                try:
+                    pr_check = api.get_me(name, token, {'country': pr.get('country', 'US'), 'language': pr.get('language', 'en')}, proxy=proxy)
+                    if api.find_promo(pr_check, 'edge_browsing_streak_flight'):
+                        edge_needs_retry = True
+                except Exception:
+                    pass
+
+        if edge_needs_retry:
+            config.log(name, '检测到已具备 Edge 浏览打卡资格/任务，正在启动今日打卡心跳...')
             try:
                 r = executor.run_api_phase(name, edge_ph, token, pr, p, config, api, proxy=proxy)
                 results_map[edge_ph] = r
-                config.log(name, '<<< Edge 30分钟新手初次打卡完成: %s' % r)
+                config.log(name, '<<< Edge 30分钟新手打卡完成: %s' % r)
             except Exception as ex:
                 results_map[edge_ph] = '失败(%s)' % str(ex)[:60]
                 config.log(name, '!!! Edge 30分钟打卡异常: %s' % str(ex)[:120])
