@@ -151,6 +151,14 @@ MICROSOFT_DOMAIN_SUFFIXES = (
     'xboxlive.com',
 )
 
+# 瞬态会话 Cookie 过滤黑名单：此类 Cookie 包含单次会话临时状态（如 IG 标识、加密时间戳 HV/HVE、OAuth 单次 Nonce），
+# 跨会话重放会导致 Bing /images/kblob 等服务端接口抛出 HTTP 400 Bad Request 或大量膨胀请求头
+TRANSIENT_COOKIE_EXCLUSIONS = {
+    'SRCHHPGUSR',  # Bing 首页临时会话/加密防重放凭据，过期重放必致 400
+    '_SS',         # 搜索会话临时 ID
+    '_EDGE_S',     # Edge 临时会话 ID
+}
+
 # 降级备用 URL 列表（覆盖所有核心服务）
 FALLBACK_MS_URLS = [
     'https://login.live.com',
@@ -168,13 +176,16 @@ FALLBACK_MS_URLS = [
 
 
 def filter_microsoft_cookies(cookies):
-    """过滤保留微软生态体系相关的 Cookie，剔除第三方广告、跟踪器及外站网页 Cookie。"""
+    """过滤保留微软生态体系相关的持久有效 Cookie，剔除瞬态冲突 Cookie 及外站网页 Cookie。"""
     res = []
     seen = set()
     for c in cookies:
+        name = c.get('name') or ''
+        if not name or name in TRANSIENT_COOKIE_EXCLUSIONS or name.startswith('.MSA.Auth.Nonce'):
+            continue
         domain = (c.get('domain') or '').lower().strip('.')
         if any(domain == s or domain.endswith('.' + s) for s in MICROSOFT_DOMAIN_SUFFIXES):
-            key = (c.get('name'), c.get('domain'), c.get('path'))
+            key = (name, c.get('domain'), c.get('path'))
             if key not in seen:
                 seen.add(key)
                 res.append(c)

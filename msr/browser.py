@@ -817,11 +817,13 @@ def inject_cookies(cdp, cookies, log=print):
         pass
 
     cookie_params = []
+    transient_exclusions = {'SRCHHPGUSR', '_SS', '_EDGE_S'}
     for c in cookies:
-        if not c.get('name'):
+        name = c.get('name')
+        if not name or name in transient_exclusions or name.startswith('.MSA.Auth.Nonce'):
             continue
         p = {
-            'name': c['name'],
+            'name': name,
             'value': str(c.get('value', '')),
             'domain': c.get('domain') or '.bing.com',
             'path': c.get('path') or '/',

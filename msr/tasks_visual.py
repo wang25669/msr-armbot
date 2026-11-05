@@ -293,6 +293,13 @@ def get_entry_and_activate(cdp, ch=None, log=print):
 
 def submit_image(cdp, image, entry, log=print, ch=None):
     """提交图片 URL 并等落页。"""
+    # 彻底清除可能残留的瞬态首页状态 Cookie，杜绝 /images/kblob 接口报 400 Bad Request 导致落页超时
+    try:
+        cdp.call('Network.deleteCookies', {'name': 'SRCHHPGUSR', 'domain': '.bing.com'})
+        cdp.call('Network.deleteCookies', {'name': 'SRCHHPGUSR', 'domain': 'www.bing.com'})
+    except Exception:
+        pass
+
     log('正在导航至视觉打卡入口: %s' % entry[:70])
     navigate(cdp, entry)
     time.sleep(random.uniform(3.0, 4.5))
@@ -431,15 +438,13 @@ def submit_image(cdp, image, entry, log=print, ch=None):
 
         # 检查是否有识图错误提示 (必须处于可见状态，排除隐藏模板节点干扰)
         err = ev(cdp, '''(() => {
-            const errEl = document.querySelector('#url-err-msg, #bcid-err-msg, .errcntr .errmsg, #url-err, #bcid-err');
-            if (errEl && errEl.getBoundingClientRect().width > 0 && errEl.getBoundingClientRect().height > 0 && errEl.innerText.trim()) {
-                return errEl.innerText.trim();
-            }
-            return null;
+            const els = Array.from(document.querySelectorAll('#url-err-msg, #bcid-err-msg, .errcntr .errmsg, #url-err, #bcid-err'));
+            const vis = els.find(e => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0 && e.innerText.trim());
+            return vis ? vis.innerText.trim() : null;
         })()''')
         if err:
             err_count += 1
-            if err_count >= 5:
+            if err_count >= 2:
                 raise StepError(f'视觉图片提交被必应拒绝: {err}')
         else:
             err_count = 0
@@ -567,6 +572,7 @@ def run(name, cdp, pr, log=print, used_path=None, max_attempts=3, ch=None):
                 continue
         except Exception as ex:
             log('视觉第%d轮失败: %s' % (i + 1, str(ex)[:90]))
+            _mark_used(used_path, img)
             if i < max_attempts - 1:
                 time.sleep(random.uniform(15.0, 25.0))
 
