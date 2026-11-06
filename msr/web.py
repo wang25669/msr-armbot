@@ -1177,73 +1177,49 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
 
       <div class="nav-tabs" style="margin-bottom:16px;">
-        <button id="modal-tab-pwd" class="tab-btn active" onclick="switchModalTab('pwd')">MSR 账号密码登录 (推荐)</button>
+        <button id="modal-tab-pwd" class="tab-btn active" onclick="switchModalTab('pwd')">手动登录（推荐）</button>
         <button id="modal-tab-ck" class="tab-btn" onclick="switchModalTab('ck')">Cookie 快速导入 (免密备选)</button>
       </div>
 
-      <!-- 账号密码自动化登录与风控接管页面 -->
+      <!-- 手动登录: 服务端浏览器 + 实时画面 + 输入转发 -->
       <div id="modal-panel-pwd">
-        <p style="font-size:13px; color:var(--text-sub); margin-bottom:14px; line-height:1.5;">
-          输入 MSR 账号密码，后台 Chromium 将全自动登录并智能应对风控质询（支持 Authenticator 双位数匹配、邮箱验证码输入与人机拼图远程接管）。
+        <p style="font-size:13px; color:var(--text-sub); margin-bottom:12px; line-height:1.6;">
+          点击下方按钮后，服务端会用<b>该账号专属的浏览器 profile</b> 与<b>该账号配置的代理出口</b>打开微软官方登录页，
+          画面直接显示在方框里。密码、验证码、Authenticator 推送、拼图全部由你自己输入/点击；
+          登录完成后系统自动抓取 Cookie 并静默换取 Token（不做任何页面状态判定，不代填密码）。
         </p>
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:12px;">
-          <div class="form-group">
-            <label>MSR 账号 (邮箱 / 手机号)</label>
-            <input type="text" id="login-username" placeholder="例如: your_name@outlook.com">
-          </div>
-          <div class="form-group">
-            <label>MSR 密码</label>
-            <input type="password" id="login-password" placeholder="请输入 MSR 账号密码">
-          </div>
+
+        <div id="live-egress-line" style="font-size:12.5px; color:#94a3b8; margin-bottom:10px;">出口: 尚未启动</div>
+
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
+          <button id="live-start-btn" class="btn" onclick="startLiveLogin()">🖥️ 打开微软登录页（手动登录）</button>
+          <button id="live-finish-btn" class="btn btn-secondary" style="display:none;" onclick="finishLiveLogin()">✅ 我已登录完成，抓取凭据</button>
+          <button id="live-close-btn" class="btn btn-secondary" style="display:none;" onclick="closeLiveLogin()">✖ 关闭会话</button>
         </div>
 
-        <div style="margin-bottom:14px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-          <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:12.5px; color:#cbd5e1;">
-            <input type="checkbox" id="login-save-cred" checked style="accent-color:var(--primary); cursor:pointer;">
-            <span>安全保存账号密码凭据 <span style="color:var(--text-sub); font-size:11.5px;">(凭据失效或过期时全自动静默重登自愈)</span></span>
-          </label>
-          <span id="saved-cred-hint" style="font-size:11.5px; color:#38bdf8; display:none;">🔒 已沿用已存凭据</span>
+        <div id="login-pwd-status" style="font-size:13px; padding:10px; border-radius:6px; background:#070d19; color:var(--text-sub); margin-top:12px; min-height:38px; display:flex; align-items:center;">
+          尚未启动登录会话。
         </div>
 
-        <!-- 手机 Authenticator 匹配数字提示卡片 (条件展示) -->
-        <div id="login-auth-push-box" style="display:none; background:rgba(14,165,233,0.15); border:1px solid #0284c7; border-radius:8px; padding:12px; margin-bottom:12px; text-align:center;">
-          <div style="font-size:13px; color:#38bdf8; margin-bottom:6px;">📱 MSR 触发手机 Authenticator 二次验证，请在手机应用上选择数字：</div>
-          <div style="font-size:32px; font-weight:800; color:#38bdf8; letter-spacing:4px;" id="auth-code-val">--</div>
-          <div style="font-size:12px; color:var(--text-sub); margin-top:4px;">（在手机上点击对应数字后系统将自动继续）</div>
-        </div>
-
-        <!-- 安全验证码 / 辅助邮箱确认卡片 (条件展示) -->
-        <div id="login-otp-box" style="display:none; background:rgba(234,179,8,0.15); border:1px solid #eab308; border-radius:8px; padding:12px; margin-bottom:12px;">
-          <div id="login-otp-prompt" style="font-size:13px; color:#facc15; margin-bottom:8px; font-weight:600;">✉️ MSR 需要安全验证</div>
-          <div style="display:flex; gap:8px;">
-            <input type="text" id="login-otp-input" placeholder="请输入安全验证码或辅助安全邮箱" style="flex:1;" onkeydown="if(event.key==='Enter')submitSessionOtp()">
-            <button id="login-otp-btn" class="btn" onclick="submitSessionOtp()">提交验证</button>
+        <details id="cred-box" style="margin-top:14px; border:1px solid var(--border); border-radius:8px; padding:10px 12px; background:#0a1220;">
+          <summary style="cursor:pointer; font-size:13px; color:#cbd5e1; outline:none;">
+            🔐 自动重登凭据（可选：保存账号密码）
+            <span id="cred-state" style="font-size:12px; color:#94a3b8; margin-left:6px;"></span>
+          </summary>
+          <div style="font-size:12px; color:#94a3b8; margin:8px 0 10px; line-height:1.6;">
+            会话过期时用这份凭据自动登录（只走"账号 → 密码 → 保持登录"，遇到验证码/推送一律放弃并通知你手动登录）。
+            凭据仅存在该账号 profile 目录的 <code>credential.json</code>（0600），不会上传到任何地方。
           </div>
-        </div>
-
-        <!-- 实时远程交互窗口 (用于 Arkose 拼图验证码、选项选择或人工接管) -->
-        <div id="interactive-canvas-box" style="display:none; background:#070d19; border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:12px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-            <span style="font-size:12px; color:#94a3b8;">🖱️ 实时交互画面 (点击图片可直接点击浏览器网页，如旋转拼图、选择选项):</span>
-            <button class="btn btn-secondary btn-sm" onclick="refreshLiveScreenshot()">刷新画面</button>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;">
+            <input id="cred-username" type="text" placeholder="账号邮箱 (如 xxx@outlook.com)">
+            <input id="cred-password" type="password" placeholder="密码">
           </div>
-          <div style="position:relative; text-align:center; overflow:auto; max-height:420px; background:#000; border-radius:6px;" id="screen-container">
-            <img id="live-screen-img" src="" alt="远程浏览器画面加载中..." style="max-width:100%; height:auto; background:#070d19; cursor:crosshair; display:inline-block; border-radius:6px;" onclick="handleScreenClick(event)">
-            <div id="click-indicator" style="display:none; position:absolute; width:16px; height:16px; border-radius:50%; background:rgba(59,130,246,0.6); border:2px solid #fff; pointer-events:none; transform:translate(-50%, -50%); transition:opacity 0.3s; z-index:10;"></div>
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <button id="cred-save-btn" class="btn btn-sm" onclick="saveCredential()">保存凭据</button>
+            <button id="cred-del-btn" class="btn btn-secondary btn-sm" onclick="deleteCredential()">删除已保存凭据</button>
+            <span style="font-size:11.5px; color:#64748b;">保存后账号卡片会出现「清除凭据」按钮</span>
           </div>
-        </div>
-
-        <div id="login-pwd-status" style="font-size:13px; padding:10px; border-radius:6px; background:#070d19; color:var(--text-sub); margin-bottom:14px; min-height:38px; display:flex; align-items:center;">
-          准备就绪。支持账号密码登录、手机 Authenticator 二次验证、安全验证码输入及人机拼图远程交互。
-        </div>
-
-        <div class="flex-row" style="justify-content:space-between;">
-          <button class="btn btn-secondary btn-sm" onclick="toggleInteractiveCanvas()">🖥️ 远程实时画面</button>
-          <div class="flex-row">
-            <button id="login-cancel-btn" class="btn btn-secondary" style="display:none; margin-right:8px;" onclick="cancelLoginSession()">取消登录</button>
-            <button id="login-pwd-btn" class="btn" onclick="startLoginSession()">一键全自动登录 / 启动接管</button>
-          </div>
-        </div>
+        </details>
       </div>
 
       <!-- Cookie 粘贴页面 -->
@@ -1723,7 +1699,6 @@ HTML_CONTENT = """<!DOCTYPE html>
           </div>
           <div class="flex-row">
             <button class="btn btn-primary-sub btn-sm" onclick="openEditProxyModal('${a.name}', '${a.proxy || ''}', '${a.schedule_time || ''}')">✏️ 修改配置</button>
-            ${a.proxy ? `<button class="btn btn-secondary btn-sm" onclick="testAccountProxy('${a.name}', '${a.proxy}')">⚡ 测代理</button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="openFingerprintModal('${a.name}')">专属指纹</button>
             ${authBtns}
             ${credClearBtn}
@@ -2121,27 +2096,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         box.style.border = '1px solid rgba(239,68,68,0.3)';
         box.style.color = '#ef4444';
         box.innerText = '请求失败: ' + e;
-      }
-    }
-
-    async function testAccountProxy(name, proxy) {
-      toast(`正在测试账号 [${name}] 的代理...`);
-      try {
-        const res = await fetch('/api/accounts/proxy-test', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({proxy, name})
-        });
-        const d = await res.json();
-        if (d.status === 'ok') {
-          const g = d.data;
-          toast(`🟢 [${name}] 代理正常! ${g.country_name || g.country} (${g.ip}), 延迟 ${g.latency_ms}ms`);
-          fetchStatus();
-        } else {
-          toast(`🔴 [${name}] 代理失败: ${d.message}`);
-        }
-      } catch(e) {
-        toast(`🔴 测试失败: ${e}`);
       }
     }
 
@@ -2776,59 +2730,43 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
 
-    /* 登录弹窗逻辑 (根据当前有效性展示提示) */
+    /* 登录弹窗逻辑 (手动登录: 服务端浏览器 + 实时画面 + 输入转发) */
     function openLoginModal(name, isReLogin) {
       activeAccountName = name;
       document.getElementById('modal-title').innerText = isReLogin
         ? `账号重新登录 / 凭据更新: [${name}]`
         : `账号授权登录: [${name}]`;
-      
+
+      const cur = (currentAccounts || []).find(x => x.name === name) || {};
       const hintEl = document.getElementById('login-auth-hint');
-      if (isReLogin) {
-        hintEl.innerHTML = `<span style="color:var(--success)">🟢 该账号当前登录凭据有效。</span> 如需更换 MSR 账户或刷新会话，请在下方直接输入新账号密码或导入新 Cookie。`;
-      } else {
-        hintEl.innerHTML = `<span style="color:var(--danger)">🔴 该账号尚未登录或凭据失效。</span> 推荐在下方输入 MSR 账号密码一键全自动登录，亦可粘贴 Cookie 激活。`;
-      }
+      const authTxt = (cur.auth && cur.auth.valid) ? (' ' + cur.auth.summary) : '';
+      const proxyTxt = cur.proxy ? cur.proxy : '直连（未配置代理）';
+      hintEl.innerHTML = (isReLogin
+          ? `<span style="color:var(--success)">🟢 该账号已有凭据。</span>`
+          : `<span style="color:var(--danger)">🔴 该账号尚未登录或凭据失效。</span>`)
+        + `${authTxt}<br><span style="color:#94a3b8; font-size:12px;">浏览器 profile: [${name}]；出口: ${proxyTxt}；时区/语言/指纹按该出口自动匹配。</span>`;
 
-      const currentAcc = (currentAccounts || []).find(x => x.name === name) || {};
-      const savedUser = currentAcc.saved_username || (name.includes('@') ? name : '');
-      document.getElementById('login-username').value = savedUser;
-
-      const pwdInput = document.getElementById('login-password');
-      const hintSavedEl = document.getElementById('saved-cred-hint');
-      const saveCredCb = document.getElementById('login-save-cred');
-      if (saveCredCb) saveCredCb.checked = true;
-
-      if (currentAcc.has_saved_password) {
-        pwdInput.value = '';
-        pwdInput.placeholder = '●●●●●●●● (留空沿用已安全保存的密码)';
-        if (hintSavedEl) hintSavedEl.style.display = 'inline';
-        document.getElementById('login-pwd-status').innerHTML = '🔒 已检测到已保存的 MSR 账号密码凭据，可直接点击“🚀 一键全自动登录”直接重登，或输入新密码以覆盖更新。';
-      } else {
-        pwdInput.value = '';
-        pwdInput.placeholder = '请输入 MSR 账号密码';
-        if (hintSavedEl) hintSavedEl.style.display = 'none';
-        document.getElementById('login-pwd-status').innerHTML = '准备就绪。支持账号密码登录、手机 Authenticator 二次验证、安全验证码输入及人机拼图远程交互。';
-      }
-
-      document.getElementById('login-pwd-btn').disabled = false;
-      document.getElementById('login-cancel-btn').style.display = 'none';
-      document.getElementById('login-auth-push-box').style.display = 'none';
-      document.getElementById('login-otp-box').style.display = 'none';
-      document.getElementById('interactive-canvas-box').style.display = 'none';
-      isCanvasOpen = false;
-      if (loginPollTimer) { clearInterval(loginPollTimer); loginPollTimer = null; }
+      closeLiveOverlay();
+      document.getElementById('live-finish-btn').style.display = 'none';
+      document.getElementById('live-close-btn').style.display = 'none';
+      const sb = document.getElementById('live-start-btn');
+      if (sb) sb.disabled = false;
+      document.getElementById('live-egress-line').innerHTML = '出口: 尚未启动';
+      document.getElementById('login-pwd-status').innerHTML = '尚未启动登录会话。';
+      initCredBox(cur);
       document.getElementById('ck-text-input').value = '';
       document.getElementById('ck-result-msg').innerText = '';
       document.getElementById('login-modal').style.display = 'flex';
       switchModalTab('pwd');
     }
 
-    let loginPollTimer = null;
-    let isCanvasOpen = false;
+    let livePollTimer = null;
+    let liveFrameSeq = 0;
+    let liveViewport = { w: 1280, h: 900 };      // 页面真实视口(innerWidth/Height), 坐标换算基准
+    let liveZoom = 'fit';                        // fit | 100%
 
     function closeLoginModal() {
-      if (loginPollTimer) { clearInterval(loginPollTimer); loginPollTimer = null; }
+      stopLivePolling();
       document.getElementById('login-modal').style.display = 'none';
       fetchStatus();
     }
@@ -2840,251 +2778,443 @@ HTML_CONTENT = """<!DOCTYPE html>
       document.getElementById('modal-panel-ck').style.display = tab === 'ck' ? 'block' : 'none';
     }
 
-    function toggleInteractiveCanvas() {
-      isCanvasOpen = !isCanvasOpen;
-      const box = document.getElementById('interactive-canvas-box');
-      box.style.display = isCanvasOpen ? 'block' : 'none';
-      if (isCanvasOpen) {
-        refreshLiveScreenshot();
-      }
-    }
+    /* ===== 手动登录: 实时画面拉流 + 鼠标/键盘/触屏输入转发 ===== */
+    function liveImg() { return document.getElementById('live-screen-img'); }
 
-    let _cachedViewport = { w: 1280, h: 757 };
-
-    function refreshLiveScreenshot() {
-      if (!activeAccountName) return;
-      const img = document.getElementById('live-screen-img');
-      if (img) {
-        img.src = `/api/auth/session/screenshot?name=${encodeURIComponent(activeAccountName)}&_t=${Date.now()}`;
-      }
-    }
-
-    async function handleScreenClick(e) {
-      if (!activeAccountName) return;
-      const img = document.getElementById('live-screen-img');
-      if (!img) return;
-
-      const rect = img.getBoundingClientRect();
-      const clickX = e.clientX - rect.left;
-      const clickY = e.clientY - rect.top;
-
-      if (clickX < 0 || clickY < 0 || clickX > rect.width || clickY > rect.height) return;
-
-      // 实时交互微动效
-      const indicator = document.getElementById('click-indicator');
-      if (indicator) {
-        indicator.style.left = (img.offsetLeft + clickX) + 'px';
-        indicator.style.top = (img.offsetTop + clickY) + 'px';
-        indicator.style.display = 'block';
-        indicator.style.opacity = '1';
-        setTimeout(() => { indicator.style.opacity = '0'; }, 350);
-      }
-
-      // 计算真实视口缩放坐标
-      const nw = img.naturalWidth || _cachedViewport.w;
-      const nh = img.naturalHeight || _cachedViewport.h;
-      const scaleX = nw / rect.width;
-      const scaleY = nh / rect.height;
-      const x = Math.round(clickX * scaleX);
-      const y = Math.round(clickY * scaleY);
-
-      try {
-        await fetch('/api/auth/session/mouse', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({name: activeAccountName, x, y})
-        });
-        setTimeout(refreshLiveScreenshot, 500);
-        setTimeout(refreshLiveScreenshot, 1500);
-      } catch(err) {
-        console.error('Click error:', err);
-      }
-    }
-
-    async function startLoginSession() {
-      const u = document.getElementById('login-username').value.trim();
-      const p = document.getElementById('login-password').value;
-      const saveCred = document.getElementById('login-save-cred') ? document.getElementById('login-save-cred').checked : true;
-      const currentAcc = (currentAccounts || []).find(x => x.name === activeAccountName) || {};
-
-      if (!u) return toast('请输入 MSR 账号邮箱');
-      if (!p && !currentAcc.has_saved_password) return toast('请输入 MSR 账号密码');
-
-      const btn = document.getElementById('login-pwd-btn');
-      const cancelBtn = document.getElementById('login-cancel-btn');
+    async function startLiveLogin() {
+      if (!activeAccountName) return toast('请先选择账号');
       const statusEl = document.getElementById('login-pwd-status');
-      btn.disabled = true;
-      cancelBtn.style.display = 'inline-block';
-      statusEl.innerHTML = '<span style="color:var(--primary)">⏳ 正在启动安全 Chromium 实例并连接 MSR 登录网关...</span>';
-
-      try {
-        const res = await fetch('/api/auth/session/start', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({name: activeAccountName, username: u, password: p, save_cred: saveCred})
-        });
-        const text = await res.text();
-        let d;
-        try {
-          d = JSON.parse(text);
-        } catch(parseErr) {
-          throw new Error(`服务网关响应异常 (HTTP ${res.status}): ${text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100) || text.slice(0, 80)}`);
-        }
-        if (d.status !== 'ok') {
-          throw new Error(d.message || '启动失败');
-        }
-        if (loginPollTimer) clearInterval(loginPollTimer);
-        loginPollTimer = setInterval(pollLoginSession, 1200);
-      } catch(err) {
-        statusEl.innerHTML = `<span style="color:var(--danger)">❌ 启动失败: ${err.message || err}</span>`;
-        btn.disabled = false;
-        cancelBtn.style.display = 'none';
-      }
-    }
-
-    async function pollLoginSession() {
-      if (!activeAccountName) return;
-      try {
-        const res = await fetch(`/api/auth/session/status?name=${encodeURIComponent(activeAccountName)}`);
-        const text = await res.text();
-        let s;
-        try {
-          s = JSON.parse(text);
-        } catch(e) {
-          return;
-        }
-        const statusEl = document.getElementById('login-pwd-status');
-        const authPushBox = document.getElementById('login-auth-push-box');
-        const otpBox = document.getElementById('login-otp-box');
-
-        if (s.status === 'success') {
-          clearInterval(loginPollTimer);
-          loginPollTimer = null;
-          statusEl.innerHTML = `<strong style="color:var(--success)">🎉 登录成功！Cookie 与 Token 已自动换取并固化（积分: ${s.result?.balance || 0}, 区域: ${s.result?.country || '未知'}）。</strong>`;
-          authPushBox.style.display = 'none';
-          otpBox.style.display = 'none';
-          document.getElementById('login-pwd-btn').disabled = false;
-          document.getElementById('login-cancel-btn').style.display = 'none';
-          toast('MSR 账号登录成功');
-          fetchStatus();
-          return;
-        }
-
-        if (s.status === 'error') {
-          clearInterval(loginPollTimer);
-          loginPollTimer = null;
-          statusEl.innerHTML = `<span style="color:var(--danger)">❌ 登录失败: ${s.message || s.error_msg || '未知错误'}</span>`;
-          document.getElementById('login-pwd-btn').disabled = false;
-          document.getElementById('login-cancel-btn').style.display = 'none';
-          toast('登录中断: ' + (s.message || ''));
-          return;
-        }
-
-        statusEl.innerHTML = `<span style="color:var(--primary)">⏳ ${s.message || '正在处理中...'}</span>`;
-
-        if (s.status === 'wait_auth_push' && s.auth_code) {
-          authPushBox.style.display = 'block';
-          document.getElementById('auth-code-val').innerText = s.auth_code;
-        } else {
-          authPushBox.style.display = 'none';
-        }
-
-        if (s.status === 'wait_proof_confirm') {
-          otpBox.style.display = 'block';
-          otpBox.style.background = 'rgba(234, 179, 8, 0.15)';
-          otpBox.style.borderColor = '#eab308';
-          document.getElementById('login-otp-prompt').innerHTML = `✉️ <strong>确认辅助安全邮箱</strong>: ${s.otp_prompt || '请输入完整辅助安全邮箱以发送验证码'}`;
-          document.getElementById('login-otp-input').placeholder = s.proof_hint ? `请输入完整辅助安全邮箱 (如 ${s.proof_hint})` : '请输入完整辅助安全邮箱';
-          const btn = document.getElementById('login-otp-btn');
-          if (btn) btn.innerText = '发送验证码';
-          const inp = document.getElementById('login-otp-input');
-          if (inp && document.activeElement !== inp && !inp.value) inp.focus();
-          if (!isCanvasOpen) toggleInteractiveCanvas();
-        } else if (s.status === 'wait_otp') {
-          otpBox.style.display = 'block';
-          otpBox.style.background = 'rgba(34, 197, 94, 0.15)';
-          otpBox.style.borderColor = '#22c55e';
-          document.getElementById('login-otp-prompt').innerHTML = `🔑 <strong>输入安全验证码</strong>: ${s.otp_prompt || '已向辅助安全邮箱发送代码，请输入收到的验证码'}`;
-          document.getElementById('login-otp-input').placeholder = '请输入 6 位或 7 位安全验证码';
-          const btn = document.getElementById('login-otp-btn');
-          if (btn) btn.innerText = '提交验证码';
-          const inp = document.getElementById('login-otp-input');
-          if (inp && document.activeElement !== inp && !inp.value) inp.focus();
-          if (!isCanvasOpen) toggleInteractiveCanvas();
-        } else {
-          if (s.status === 'running' && s.message && (s.message.includes('辅助邮箱已提交') || s.message.includes('验证码已提交'))) {
-            otpBox.style.display = 'block';
-            document.getElementById('login-otp-prompt').innerHTML = `⏳ <strong>${s.message}</strong>`;
-          } else {
-            otpBox.style.display = 'none';
-          }
-        }
-
-        if (s.viewport && s.viewport.w && s.viewport.h) {
-          _cachedViewport = s.viewport;
-        }
-
-        if (s.status === 'wait_interactive' && !isCanvasOpen) {
-          toggleInteractiveCanvas();
-        }
-
-        if (isCanvasOpen) {
-          refreshLiveScreenshot();
-        }
-
-      } catch(err) {
-        console.error('Poll error:', err);
-      }
-    }
-
-    async function submitSessionOtp() {
-      const inputEl = document.getElementById('login-otp-input');
-      const code = inputEl.value.trim();
-      if (!code) return toast('请输入内容');
-      const btn = document.getElementById('login-otp-btn');
-      toast('正在提交...');
+      const btn = document.getElementById('live-start-btn');
       if (btn) btn.disabled = true;
+      statusEl.innerHTML = '<span style="color:var(--primary)">⏳ 正在用该账号的 profile 与代理启动浏览器...</span>';
       try {
-        const res = await fetch('/api/auth/session/submit-otp', {
+        const res = await fetch('/api/auth/live/start', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({name: activeAccountName, code})
+          body: JSON.stringify({name: activeAccountName})
         });
         const d = await res.json();
-        if (d.status === 'ok') {
-          inputEl.value = '';
-          toast('提交成功，正在等待 MSR 处理...');
-          setTimeout(refreshLiveScreenshot, 800);
-          setTimeout(pollLoginSession, 600);
-          setTimeout(pollLoginSession, 1500);
+        if (d.status !== 'ok') throw new Error(d.message || '启动失败');
+
+        openLiveOverlay();
+        document.getElementById('live-finish-btn').style.display = 'inline-block';
+        document.getElementById('live-close-btn').style.display = 'inline-block';
+        liveFrameSeq = 0;
+        applyLiveSession(d.session);
+        bindLiveInput();
+        bindLiveKeys();
+        focusLive();
+        if (livePollTimer) clearInterval(livePollTimer);
+        livePollTimer = setInterval(pollLiveLogin, 1200);
+        pumpLiveFrames();
+      } catch(err) {
+        statusEl.innerHTML = `<span style="color:var(--danger)">❌ 启动失败: ${err.message || err}</span>`;
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    function applyLiveSession(s) {
+      if (!s) return;
+      const statusEl = document.getElementById('login-pwd-status');
+      const egressEl = document.getElementById('live-egress-line');
+      if (s.page_viewport && s.page_viewport.w) {
+        liveViewport = { w: s.page_viewport.w, h: s.page_viewport.h };
+      } else if (s.viewport && s.viewport.w) {
+        liveViewport = s.viewport;
+      }
+      const accEl = document.getElementById('live-overlay-acc');
+      if (accEl) accEl.innerText = '[' + s.name + ']';
+      const egEl = document.getElementById('live-overlay-egress');
+      if (egEl && s.egress && s.egress.status === 'ok') {
+        egEl.innerText = '出口 ' + (s.egress.ip || '-') + ' (' + (s.egress.country || '-') + ') 经 ' + (s.proxy || '直连');
+      }
+      if (egressEl && s.egress) {
+        const e = s.egress;
+        let t;
+        if (e.status === 'ok') {
+          t = `出口: <b>${e.ip || '-'}</b> (${e.country || '-'}, ${e.timezone || '-'}) 经 ${s.proxy || '直连'}`;
         } else {
-          toast('提交失败: ' + (d.message || ''));
+          t = `出口: 未能确认 (${s.proxy || '直连'})，画面若打不开请检查代理`;
         }
+        if (e.warning) t += ` <span style="color:#f59e0b">⚠️ ${e.warning}</span>`;
+        egressEl.innerHTML = t;
+      }
+      if (statusEl && s.message) {
+        const bad = (s.status === 'error' || s.status === 'needs_action');
+        const good = (s.status === 'success');
+        const color = good ? 'var(--success)' : (bad ? 'var(--danger)' : 'var(--primary)');
+        const icon = s.status === 'waiting' ? '🖥️ ' : (s.status === 'finishing' ? '⏳ ' : '');
+        statusEl.innerHTML = `<span style="color:${color}">${icon}${s.message}</span>`;
+      }
+    }
+
+    async function pollLiveLogin() {
+      if (!activeAccountName) return;
+      try {
+        const res = await fetch(`/api/auth/live/status?name=${encodeURIComponent(activeAccountName)}`);
+        const s = await res.json();
+        if (s.status === 'idle') { stopLivePolling(); return; }
+        applyLiveSession(s);
+        if (s.status === 'success') {
+          stopLivePolling();
+          document.getElementById('live-finish-btn').style.display = 'none';
+          document.getElementById('live-close-btn').style.display = 'none';
+          closeLiveOverlay();
+          document.getElementById('live-start-btn').disabled = false;
+          toast('登录成功：Cookie 与 Token 已就绪');
+          fetchStatus();
+        } else if (s.status === 'error' || s.status === 'cancelled') {
+          stopLivePolling();
+          document.getElementById('live-start-btn').disabled = false;
+        }
+      } catch(e) {}
+    }
+
+    function stopLivePolling() {
+      if (livePollTimer) { clearInterval(livePollTimer); livePollTimer = null; }
+    }
+
+    /* 画面: 带 seq 的增量拉流, 无新帧时服务端返回 304, 不产生重绘与带宽浪费 */
+    let livePumping = false;
+    async function pumpLiveFrames() {
+      if (livePumping) return;
+      livePumping = true;
+      try {
+        while (livePollTimer && activeAccountName && liveOverlayOpen) {
+          const url = `/api/auth/live/frame?name=${encodeURIComponent(activeAccountName)}&seq=${liveFrameSeq}`;
+          let res;
+          try {
+            res = await fetch(url, {cache: 'no-store'});
+          } catch(e) { break; }
+          if (res.status === 404) break;
+          if (res.status === 200) {
+            const seq = parseInt(res.headers.get('X-Frame-Seq') || '0', 10);
+            const blob = await res.blob();
+            if (blob && blob.size > 0) {
+              const img = liveImg();
+              const old = img.dataset.objurl;
+              const u = URL.createObjectURL(blob);
+              img.dataset.objurl = u;
+              img.src = u;
+              if (old) setTimeout(() => { try { URL.revokeObjectURL(old); } catch(e) {} }, 2000);
+            }
+            liveFrameSeq = seq || (liveFrameSeq + 1);
+          }
+          await new Promise(r => setTimeout(r, 150));
+        }
+      } finally {
+        livePumping = false;
+      }
+    }
+
+    /* 坐标换算: 显示坐标 -> 页面真实视口坐标
+       注意: 画面帧会被 screencast 缩放到 maxWidth/maxHeight, 所以绝不能用图片尺寸当基准,
+       必须用页面 innerWidth/innerHeight, 否则点击整体偏移(曾导致输入框点不中、打不进字) */
+    function livePoint(e) {
+      const img = liveImg();
+      const vw = liveViewport.w || 1280;
+      const vh = liveViewport.h || 800;
+      if (!img) return {x: 0, y: 0, w: vw, h: vh};
+      const rect = img.getBoundingClientRect();
+      const x = Math.round((e.clientX - rect.left) * vw / Math.max(1, rect.width));
+      const y = Math.round((e.clientY - rect.top) * vh / Math.max(1, rect.height));
+      return {
+        x: Math.max(0, Math.min(vw - 1, x)),
+        y: Math.max(0, Math.min(vh - 1, y)),
+        w: vw, h: vh
+      };
+    }
+
+    /* ===== 全屏登录台 ===== */
+    let liveOverlayOpen = false;
+
+    function openLiveOverlay() {
+      const ov = document.getElementById('live-overlay');
+      if (!ov) return;
+      ov.style.display = 'flex';
+      liveOverlayOpen = true;
+      bindLiveInput();
+      bindLiveKeys();
+      focusLive();
+      pumpLiveFrames();
+    }
+
+    function closeLiveOverlay() {
+      const ov = document.getElementById('live-overlay');
+      if (ov) ov.style.display = 'none';
+      liveOverlayOpen = false;
+      const sb = document.getElementById('live-start-btn');
+      if (sb) sb.disabled = false;
+    }
+
+    function refreshLiveNow() {
+      liveFrameSeq = 0;
+      pumpLiveFrames();
+    }
+
+    function toggleLiveZoom() {
+      const img = liveImg();
+      const btn = document.getElementById('live-zoom-btn');
+      if (!img) return;
+      if (liveZoom === 'fit') {
+        liveZoom = '100%';
+        img.style.maxWidth = 'none';
+        img.style.maxHeight = 'none';
+        if (btn) btn.innerText = '适应屏幕';
+      } else {
+        liveZoom = 'fit';
+        img.style.maxWidth = '100vw';
+        img.style.maxHeight = 'calc(100vh - 132px)';
+        if (btn) btn.innerText = '100%';
+      }
+    }
+
+    function showRipple(e) {
+      const img = liveImg();
+      const rp = document.getElementById('click-ripple');
+      if (!img || !rp) return;
+      const rect = img.getBoundingClientRect();
+      rp.style.left = (e.clientX - rect.left) + 'px';
+      rp.style.top = (e.clientY - rect.top) + 'px';
+      rp.style.display = 'block';
+      setTimeout(() => { rp.style.display = 'none'; }, 400);
+    }
+
+    async function sendLiveInput(ev) {
+      if (!activeAccountName) return;
+      try {
+        const res = await fetch('/api/auth/live/input', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(Object.assign({name: activeAccountName}, ev))
+        });
+        return await res.json();
+      } catch(e) { return {status: 'error', message: String(e)}; }
+    }
+
+    let liveLastMoveAt = 0;
+    let liveMouseDown = false;
+
+    function bindLiveInput() {
+      const img = liveImg();
+      if (!img || img.dataset.bound) return;
+      img.dataset.bound = '1';
+
+      img.addEventListener('mousemove', (e) => {
+        const now = Date.now();
+        if (now - liveLastMoveAt < 60) return;
+        liveLastMoveAt = now;
+        const p = livePoint(e);
+        sendLiveInput({kind: 'mouse', type: 'mouseMoved', x: p.x, y: p.y});
+      });
+
+      img.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        focusLive();
+        showRipple(e);
+        const p = livePoint(e);
+        liveMouseDown = true;
+        sendLiveInput({kind: 'mouse', type: 'mousePressed', x: p.x, y: p.y,
+                       button: e.button === 2 ? 'right' : 'left', clickCount: 1});
+      });
+
+      img.addEventListener('mouseup', (e) => {
+        if (!liveMouseDown) return;
+        liveMouseDown = false;
+        const p = livePoint(e);
+        sendLiveInput({kind: 'mouse', type: 'mouseReleased', x: p.x, y: p.y,
+                       button: e.button === 2 ? 'right' : 'left', clickCount: 1});
+      });
+
+      img.addEventListener('contextmenu', (e) => e.preventDefault());
+
+      img.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const p = livePoint(e);
+        sendLiveInput({kind: 'mouse', type: 'mouseWheel', x: p.x, y: p.y,
+                       deltaX: e.deltaX, deltaY: e.deltaY});
+      }, {passive: false});
+
+      /* 触屏 (手机/平板): 转换为鼠标事件 */
+      img.addEventListener('touchstart', (e) => {
+        const t = e.touches[0];
+        if (!t) return;
+        e.preventDefault();
+        focusLive();
+        const p = livePoint(t);
+        liveMouseDown = true;
+        sendLiveInput({kind: 'mouse', type: 'mousePressed', x: p.x, y: p.y, button: 'left', clickCount: 1});
+      }, {passive: false});
+
+      img.addEventListener('touchend', (e) => {
+        const t = e.changedTouches[0];
+        if (!t) return;
+        e.preventDefault();
+        const p = livePoint(t);
+        liveMouseDown = false;
+        sendLiveInput({kind: 'mouse', type: 'mouseReleased', x: p.x, y: p.y, button: 'left', clickCount: 1});
+      }, {passive: false});
+    }
+
+    const LIVE_KEYS = {
+      Enter:     {key: 'Enter',     code: 'Enter',     vk: 13, text: '\\r'},
+      Backspace: {key: 'Backspace', code: 'Backspace', vk: 8},
+      Tab:       {key: 'Tab',       code: 'Tab',       vk: 9},
+      Escape:    {key: 'Escape',    code: 'Escape',    vk: 27},
+      Delete:    {key: 'Delete',    code: 'Delete',    vk: 46},
+      ArrowLeft: {key: 'ArrowLeft', code: 'ArrowLeft', vk: 37},
+      ArrowUp:   {key: 'ArrowUp',   code: 'ArrowUp',   vk: 38},
+      ArrowRight:{key: 'ArrowRight',code: 'ArrowRight',vk: 39},
+      ArrowDown: {key: 'ArrowDown', code: 'ArrowDown', vk: 40},
+      Home:      {key: 'Home',      code: 'Home',      vk: 36},
+      End:       {key: 'End',       code: 'End',       vk: 35}
+    };
+
+    function focusLive() {
+      const box = document.getElementById('screen-container');
+      if (box) { try { box.focus({preventScroll: true}); } catch(e) { box.focus(); } }
+    }
+
+    function bindLiveKeys() {
+      if (document.body.dataset.livekeys) return;
+      document.body.dataset.livekeys = '1';
+
+      const inLocalField = (el) => {
+        const tag = (el && el.tagName) || '';
+        return tag === 'INPUT' || tag === 'TEXTAREA' || (el && el.isContentEditable);
+      };
+
+      document.addEventListener('keydown', (e) => {
+        if (!liveOverlayOpen) return;
+        if (e.key === 'Escape') { e.preventDefault(); closeLiveOverlay(); return; }
+        if (inLocalField(e.target)) return;          // 本地输入框里的按键交给它自己
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        const k = LIVE_KEYS[e.key];
+        if (k) {
+          e.preventDefault();
+          sendLiveInput({kind: 'key', type: 'keyDown', key: k.key, code: k.code,
+                         vk: k.vk, text: k.text || '', press: true});
+          return;
+        }
+        if (e.key && e.key.length === 1) {
+          e.preventDefault();
+          sendLiveInput({kind: 'text', text: e.key});
+        }
+      });
+
+      document.addEventListener('paste', (e) => {
+        if (!liveOverlayOpen || inLocalField(e.target)) return;
+        const txt = (e.clipboardData || window.clipboardData).getData('text');
+        if (txt) { e.preventDefault(); sendLiveInput({kind: 'text', text: txt}); }
+      });
+    }
+
+    async function sendLiveText() {
+      const inp = document.getElementById('live-text-input');
+      if (!inp) return;
+      const t = inp.value;
+      if (!t) return;
+      inp.value = '';
+      const r = await sendLiveInput({kind: 'text', text: t});
+      focusLive();
+    }
+
+    async function finishLiveLogin() {
+      if (!activeAccountName) return;
+      const statusEl = document.getElementById('login-pwd-status');
+      statusEl.innerHTML = '<span style="color:var(--primary)">⏳ 正在抓取 Cookie 并换取 Token...</span>';
+      try {
+        await fetch('/api/auth/live/finish', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: activeAccountName})
+        });
+        if (!livePollTimer) livePollTimer = setInterval(pollLiveLogin, 1200);
       } catch(e) {
-        toast('提交异常: ' + e);
+        statusEl.innerHTML = `<span style="color:var(--danger)">❌ 抓取请求失败: ${e}</span>`;
+      }
+    }
+
+    /* ===== 自动重登凭据 (账号密码) ===== */
+    function initCredBox(acc) {
+      const cur = acc || (currentAccounts || []).find(x => x.name === activeAccountName) || {};
+      const box = document.getElementById('cred-box');
+      if (box) box.open = !cur.has_saved_password;   // 没存过就默认展开, 免得用户找不到
+      const uEl = document.getElementById('cred-username');
+      const pEl = document.getElementById('cred-password');
+      const st = document.getElementById('cred-state');
+      if (uEl) uEl.value = cur.saved_username || '';
+      if (pEl) pEl.value = '';
+      if (st) {
+        st.innerText = cur.has_saved_password
+          ? '已保存（会话过期可自动重登）'
+          : '未保存（会话过期需要手动登录）';
+        st.style.color = cur.has_saved_password ? '#4ade80' : '#94a3b8';
+      }
+    }
+
+    async function saveCredential() {
+      if (!activeAccountName) return toast('请先选择账号');
+      const u = (document.getElementById('cred-username').value || '').trim();
+      const p = document.getElementById('cred-password').value || '';
+      if (!u || !p) return toast('请填写账号邮箱与密码');
+      const btn = document.getElementById('cred-save-btn');
+      if (btn) btn.disabled = true;
+      try {
+        const res = await fetch('/api/auth/credential/save', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: activeAccountName, username: u, password: p})
+        });
+        const d = await res.json();
+        if (d.status !== 'ok') throw new Error(d.message || '保存失败');
+        document.getElementById('cred-password').value = '';
+        const st = document.getElementById('cred-state');
+        if (st) { st.innerText = '已保存（会话过期可自动重登）'; st.style.color = '#4ade80'; }
+        toast('凭据已保存，后续会话过期会自动用账号密码重登');
+        fetchStatus();
+      } catch(e) {
+        toast('保存失败: ' + (e.message || e));
       } finally {
         if (btn) btn.disabled = false;
       }
     }
 
-    async function cancelLoginSession() {
-      if (!confirm('确定取消当前登录流程吗？')) return;
+    async function deleteCredential() {
+      if (!activeAccountName) return;
+      if (!confirm('确定删除该账号已保存的登录凭据吗？删除后会话过期只能手动登录。')) return;
       try {
-        await fetch('/api/auth/session/cancel', {
+        await fetch('/api/auth/credential/delete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: activeAccountName})
+        });
+        const st = document.getElementById('cred-state');
+        if (st) { st.innerText = '未保存（会话过期需要手动登录）'; st.style.color = '#94a3b8'; }
+        toast('已删除保存的凭据');
+        fetchStatus();
+      } catch(e) { toast('删除失败: ' + e); }
+    }
+
+    async function closeLiveLogin() {
+      if (!activeAccountName) return;
+      if (!confirm('确定关闭当前登录会话吗？未完成的登录不会保存。')) return;
+      stopLivePolling();
+      try {
+        await fetch('/api/auth/live/cancel', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({name: activeAccountName})
         });
       } catch(e) {}
-      if (loginPollTimer) { clearInterval(loginPollTimer); loginPollTimer = null; }
-      document.getElementById('login-pwd-btn').disabled = false;
-      document.getElementById('login-cancel-btn').style.display = 'none';
-      document.getElementById('login-pwd-status').innerHTML = '登录流程已取消。';
-      document.getElementById('login-auth-push-box').style.display = 'none';
-      document.getElementById('login-otp-box').style.display = 'none';
+      closeLiveOverlay();
+      document.getElementById('live-finish-btn').style.display = 'none';
+      document.getElementById('live-close-btn').style.display = 'none';
+      document.getElementById('live-start-btn').disabled = false;
+      document.getElementById('login-pwd-status').innerHTML = '会话已关闭。';
     }
 
-    const submitCredentialLogin = startLoginSession;
+
 
     async function submitCookies() {
       const content = document.getElementById('ck-text-input').value.trim();
@@ -3123,6 +3253,43 @@ HTML_CONTENT = """<!DOCTYPE html>
       setupLogScrollListener();
     });
   </script>
+  <!-- 全屏手动登录台: 画面按屏幕尺寸铺开, 支持鼠标/键盘/触屏输入 -->
+  <div id="live-overlay" style="display:none; position:fixed; inset:0; z-index:9000; background:#060a12;
+       flex-direction:column; font-family:inherit;">
+    <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid #1e293b; flex:0 0 auto;">
+      <span style="font-weight:700; color:#e2e8f0;">🖥️ 微软登录</span>
+      <span id="live-overlay-acc" style="color:#38bdf8; font-size:13px;"></span>
+      <span id="live-overlay-egress" style="color:#94a3b8; font-size:12px;"></span>
+      <span style="flex:1"></span>
+      <button class="btn btn-secondary btn-sm" onclick="toggleLiveZoom()" id="live-zoom-btn">100%</button>
+      <button class="btn btn-secondary btn-sm" onclick="refreshLiveNow()">刷新画面</button>
+      <button class="btn btn-sm" style="background:#16a34a" onclick="finishLiveLogin()">✅ 我已登录完成</button>
+      <button class="btn btn-secondary btn-sm" onclick="closeLiveOverlay()">收起（不关会话）</button>
+      <button class="btn btn-sm" style="background:#b91c1c" onclick="closeLiveLogin()">✖ 关闭会话</button>
+    </div>
+    <div style="flex:1 1 auto; overflow:auto; background:#000; display:flex; align-items:flex-start; justify-content:center;">
+      <div id="screen-container" tabindex="0" style="position:relative; outline:none; line-height:0;">
+        <img id="live-screen-img" src="" alt="微软登录画面加载中..." draggable="false"
+             style="display:block; max-width:100vw; max-height:calc(100vh - 132px); cursor:crosshair; user-select:none;">
+        <div id="click-ripple" style="display:none; position:absolute; width:18px; height:18px; border-radius:50%;
+             border:2px solid #38bdf8; background:rgba(56,189,248,0.35); pointer-events:none;
+             transform:translate(-50%,-50%);"></div>
+      </div>
+    </div>
+    <div style="flex:0 0 auto; padding:8px 14px 12px; border-top:1px solid #1e293b;">
+      <div style="display:flex; gap:8px; align-items:center;">
+        <input id="live-text-input" type="text" style="flex:1; padding:9px 12px; background:#0b1220; border:1px solid #1e293b;
+               border-radius:8px; color:#e2e8f0;"
+               placeholder="在这里打字（中文/长文本/粘贴用这里，回车发送）—— 会自动落到页面上当前输入框"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();sendLiveText();}">
+        <button class="btn btn-sm" onclick="sendLiveText()">发送</button>
+      </div>
+      <div style="font-size:12px; color:#64748b; margin-top:6px;">
+        点画面任意位置即可操作（鼠标已支持移动/点击/滚轮/触屏）；直接敲键盘也可以（Enter/Tab/退格/方向键）；Esc 收起画面。
+      </div>
+    </div>
+  </div>
+
 </body>
 </html>
 """
@@ -3201,46 +3368,45 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json_resp({'status': 'ok', 'data': fp})
             return
 
-        if path == '/api/auth/session/status':
+        if path == '/api/auth/live/status':
             params = urllib.parse.parse_qs(u.query)
             name = params.get('name', [None])[0]
-            if not name:
-                self._json_resp({'status': 'error', 'message': '缺少账号参数 name'}, code=400)
-                return
-            from msr import auth
-            sess = auth.get_session(name)
+            from msr import live_login
+            sess = live_login.get(name) if name else None
             if not sess:
                 self._json_resp({'status': 'idle', 'name': name})
             else:
-                self._json_resp(sess.to_dict())
+                self._json_resp(sess.status_dict())
             return
 
-        if path == '/api/auth/session/screenshot':
+        if path == '/api/auth/live/frame':
             params = urllib.parse.parse_qs(u.query)
             name = params.get('name', [None])[0]
-            from msr import auth
-            img_bytes = auth.get_session_screenshot(name) if name else None
             try:
-                if img_bytes:
+                since = int(params.get('seq', ['0'])[0])
+            except (TypeError, ValueError):
+                since = 0
+            from msr import live_login
+            sess = live_login.get(name) if name else None
+            if not sess:
+                self._json_resp({'status': 'error', 'message': '会话不存在或已结束'}, code=404)
+                return
+            seq, data = sess.frame(since)
+            try:
+                if not data:
+                    self.send_response(304)
+                    self.send_header('X-Frame-Seq', str(seq))
+                    self.send_cors()
+                    self.end_headers()
+                else:
                     self.send_response(200)
                     self.send_header('Content-Type', 'image/jpeg')
                     self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+                    self.send_header('X-Frame-Seq', str(seq))
                     self.send_cors()
+                    self.send_header('Content-Length', str(len(data)))
                     self.end_headers()
-                    self.wfile.write(img_bytes)
-                else:
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'image/svg+xml; charset=utf-8')
-                    self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
-                    self.send_cors()
-                    self.end_headers()
-                    svg_data = '''<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
-  <rect width="800" height="450" fill="#090d16"/>
-  <circle cx="400" cy="180" r="26" fill="none" stroke="#0ea5e9" stroke-width="4" stroke-dasharray="32 8"/>
-  <text x="400" y="245" text-anchor="middle" fill="#f8fafc" font-size="16" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-weight="600">正在建立浏览器安全视口...</text>
-  <text x="400" y="275" text-anchor="middle" fill="#94a3b8" font-size="13" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">页面就绪后画面将以低延迟实时呈现，支持直接点击交互</text>
-</svg>'''
-                    self.wfile.write(svg_data.encode('utf-8'))
+                    self.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError):
                 self.close_connection = True
             return
@@ -3367,35 +3533,75 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json_resp({'status': 'ok', 'message': f'推送测试请求已发送 (渠道: {ch_desc})'})
             return
 
+        if path == '/api/auth/live/start':
+            from msr import live_login, config
+            name = (payload.get('name') or '').strip()
+            if not name:
+                self._json_resp({'status': 'error', 'message': '缺少账号参数 name'}, code=400)
+                return
+            acc = config.get_account(name) or {}
+            proxy = acc.get('proxy')
+            append_live_log(f'[{name}] 打开微软登录页（手动登录，出口: {proxy or "直连"}）', name='系统')
+            try:
+                sess = live_login.start_session(name, proxy=proxy)
+            except Exception as ex:
+                self._json_resp({'status': 'error', 'message': str(ex)[:200]}, code=500)
+                return
+            self._json_resp({'status': 'ok', 'session': sess.status_dict()})
+            return
+
+        if path == '/api/auth/live/input':
+            from msr import live_login
+            name = payload.get('name')
+            sess = live_login.get(name) if name else None
+            if not sess:
+                self._json_resp({'status': 'error', 'message': '会话不存在'}, code=404)
+                return
+            self._json_resp(sess.input(payload))
+            return
+
+        if path == '/api/auth/live/finish':
+            from msr import live_login
+            name = payload.get('name')
+            sess = live_login.get(name) if name else None
+            if not sess:
+                self._json_resp({'status': 'error', 'message': '会话不存在'}, code=404)
+                return
+            append_live_log(f'[{name}] 开始抓取登录凭据 (Cookie + Token)...', name='系统')
+            self._json_resp({'status': 'ok', 'session': sess.finish_async()})
+            return
+
+        if path == '/api/auth/live/cancel':
+            from msr import live_login
+            name = payload.get('name')
+            closed = live_login.stop_session(name, 'cancelled') if name else False
+            if closed:
+                append_live_log(f'[{name}] 已关闭手动登录会话', name='系统')
+            self._json_resp({'status': 'ok', 'closed': bool(closed)})
+            return
+
         if path == '/api/auth/credential':
             self._handle_credential_login(payload)
             return
 
-        if path == '/api/auth/session/start':
-            from msr import auth, config
-            name = payload.get('name')
-            username = payload.get('username')
-            password = payload.get('password')
-            save_cred = bool(payload.get('save_cred', True))
-
-            # 若用户未填密码，尝试从已安全保存的凭据中读取沿用
-            if not password:
-                saved = config.get_credential(name)
-                if saved and saved.get('password'):
-                    password = saved['password']
-                    if not username:
-                        username = saved.get('username')
-
+        if path == '/api/auth/credential/save':
+            from msr import config
+            name = (payload.get('name') or '').strip()
+            username = (payload.get('username') or '').strip()
+            password = payload.get('password') or ''
             if not name or not username or not password:
-                self._json_resp({'status': 'error', 'message': '账号、用户名和密码不能为空'}, code=400)
+                self._json_resp({'status': 'error', 'message': '账号标识、邮箱、密码都不能为空'}, code=400)
                 return
-
-            acc_cfg = config.get_account(name) or {}
-            proxy = acc_cfg.get('proxy')
-            sess = auth.start_session(name, username, password, proxy=proxy,
-                                      log_cb=lambda m: append_live_log(f'[{name}] {m}'),
-                                      save_credential_flag=save_cred)
-            self._json_resp({'status': 'ok', 'message': '登录会话已启动', 'session': sess.to_dict()})
+            if not config.get_account(name):
+                self._json_resp({'status': 'error', 'message': '账号不存在: %s' % name}, code=400)
+                return
+            try:
+                config.save_credential(name, username, password)
+            except Exception as ex:
+                self._json_resp({'status': 'error', 'message': str(ex)[:150]}, code=500)
+                return
+            append_live_log(f'[{name}] 已保存自动重登凭据 (账号: {username})')
+            self._json_resp({'status': 'ok', 'username': username, 'has_saved_password': True})
             return
 
         if path == '/api/auth/credential/delete':
@@ -3404,34 +3610,6 @@ class WebHandler(BaseHTTPRequestHandler):
             if name:
                 config.delete_credential(name)
                 append_live_log(f'[{name}] 已安全清除保存的 MSR 账号密码凭据')
-            self._json_resp({'status': 'ok'})
-            return
-
-        if path in ('/api/auth/session/submit-otp', '/api/auth/session/submit-proof-confirm'):
-            from msr import auth
-            name = payload.get('name')
-            code = (payload.get('code') or '').strip()
-            if not name or not code:
-                self._json_resp({'status': 'error', 'message': '账号与验证内容不能为空'}, code=400)
-                return
-            res = auth.submit_session_otp(name, code)
-            self._json_resp(res)
-            return
-
-        if path == '/api/auth/session/mouse':
-            from msr import auth
-            name = payload.get('name')
-            x = payload.get('x', 0)
-            y = payload.get('y', 0)
-            res = auth.session_mouse_click(name, x, y)
-            self._json_resp(res)
-            return
-
-        if path == '/api/auth/session/cancel':
-            from msr import auth
-            name = payload.get('name')
-            if name:
-                auth.cancel_session(name)
             self._json_resp({'status': 'ok'})
             return
 
@@ -3948,6 +4126,13 @@ def _init_reaper():
 def run_web(host='0.0.0.0', port=8080):
     """启动轻量级 Web 控制台服务器。"""
     _init_reaper()
+    try:
+        from msr import live_login
+        cleaned = live_login.reap_orphans()
+        if cleaned:
+            append_live_log('启动自愈: 清理孤儿登录会话 %s' % cleaned, name='系统')
+    except Exception as _ex:
+        append_live_log('启动自愈失败(忽略): %s' % _ex, name='系统')
     sync_logs_from_disk(force=True)
     addr = (host, int(port))
     server = ThreadingHTTPServer(addr, WebHandler)

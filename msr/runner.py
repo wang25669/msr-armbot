@@ -34,15 +34,41 @@ def acquire_runner_lock(config, name=None):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError):
+            holder = ''
             try:
                 with open(lock_path, 'r', encoding='utf-8') as f:
-                    c = f.read().strip()
-                if c.isdigit() and is_runner_process_alive(int(c)):
-                    os.close(fd)
-                    return None
-                # 若持有该文件的 PID 并非活跃的 msr 任务，视作残留锁尝试抢锁
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    holder = f.read().strip()
             except Exception:
+                pass
+            hp = int(holder) if holder.isdigit() else 0
+
+            # 1. 本进程自己确实持有(在 _LOCK_FDS 里): 正常返回占用
+            if lock_path in _LOCK_FDS:
+                os.close(fd)
+                return None
+            # 2. 真有一个别的 msr run 进程活着: 正常返回占用
+            if hp > 1 and hp != os.getpid() and is_runner_process_alive(hp):
+                os.close(fd)
+                return None
+
+            # 3. 其余都是残留锁: 容器里 PID 恒为 1(init=本进程)、或进程已消失、或本进程历史泄漏的 fd。
+            #    解除旧 fd 的占用 + 删文件换 inode, 再重新加锁。
+            os.close(fd)
+            old_fd = _LOCK_FDS.pop(lock_path, None)
+            if old_fd is not None:
+                try:
+                    fcntl.flock(old_fd, fcntl.LOCK_UN)
+                    os.close(old_fd)
+                except Exception:
+                    pass
+            try:
+                os.remove(lock_path)
+            except Exception:
+                pass
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, OSError):
                 os.close(fd)
                 return None
 
