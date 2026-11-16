@@ -909,6 +909,28 @@ def resolve_quest_subtask_action(step_info, q_name):
 
 # ---------- 任务打卡 (Quests / Punchcards，含桌面专属打卡) ----------
 
+# 打卡步骤锚点的**唯一**判定实现（找步骤 / 点步骤两处共用，禁止再各写一份 —— 2026-11-16 事故：
+# 两处过滤逻辑漂移，find 认出了收尾领奖步骤、click 用旧规则又把它拒了，实测报 "点击目标不存在: 立即兑换"）。
+# 收尾领奖步骤的文案本身含 "completed"（"You completed this Punch Card"）、href 是 /redeem/<sku>，
+# 原来两道过滤（完成文案 + /redeem 黑名单）同时把它挡掉，卡片就永远停在 x-1/x
+# （实测两个 SG 号的 Spotify 卡 4/5 挂了一整周，白丢一次领奖）。
+# 放行条件收紧：文案必须命中"打卡收尾"且 href 必须是 /redeem/ —— 绝不自动点会花积分的普通兑换入口。
+_QUEST_STEP_PICK_JS = r"""
+  const __claimStep = (rowText, aText) => (/Punch\s*Card\s*complete|completed\s+this\s+Punch\s*Card|打卡.{0,6}完成/i.test(rowText + " " + aText));
+  const __hasBadge = (row) => !!(row && row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess], svg[aria-label*=complete i], svg[aria-label*=已完成]"));
+  const __pickStep = (a) => {
+    const row = a.closest("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]") || a.parentElement;
+    const h = a.href || "";
+    const rowText = (row && row.innerText) || "";
+    const isClaim = __claimStep(rowText, a.innerText || "") && String(h).includes("/redeem/");
+    if (!isClaim && (__hasBadge(row) || /已完成|completed/i.test(rowText))) return false;
+    if (!isClaim && (h.includes("/dashboard") || h.includes("/earn") || h.includes("/redeem") || h.includes("/pointsbreakdown") || h.includes("terms") || h.includes("privacy"))) return false;
+    if (isClaim && (h.includes("/earn/quest/") || h.includes("terms") || h.includes("privacy"))) return false;
+    return true;
+  };
+"""
+
+
 def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print, proxy=None):
     """任务打卡(Quests / Punchcards，含桌面专属打卡)。"""
     # P1: 打卡参数全部来自 settings.json (原地生效, 不再写死)
@@ -946,10 +968,11 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print, proxy=N
     time.sleep(1.0)
 
     # 智能轮询等待 #quests 容器及链接渲染完成 (最多等待 20 秒)
-    quests = []
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        quests = ev(cdp, """(() => {
+    def _poll_quests(seconds=20):
+        _q = []
+        _dl = time.time() + seconds
+        while time.time() < _dl:
+            _q = ev(cdp, """(() => {
           const qs = document.getElementById("quests");
           if (!qs) return [];
           const links = Array.from(qs.querySelectorAll("a[href*='/earn/quest/']"));
@@ -962,12 +985,44 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print, proxy=N
             };
           });
         })()""") or []
-        if quests:
-            break
-        time.sleep(1.0)
+            if _q:
+                break
+            time.sleep(1.0)
+        return _q
+
+    quests = _poll_quests()
 
     if not quests:
-        log('今日未发现打卡任务 (#quests)')
+        # 2026-11-16 事故: 某 SG 号 11-13 这里 47 秒空跑就返回"无打卡任务", 当天该推进的一步没了。
+        # 周卡 8 步 = 8 个 24h 窗口, 卡只活 7 天, 少一天必然 7/8 领不到 100 分(实测 11-15 收尾 7/8)。
+        # 所以空列表不能当"今日没任务": 先重载 /earn 两次, 再用服务端 payload 交叉验证。
+        for _retry in range(2):
+            log('[重试] #quests 为空, 第%d次重载 /earn' % (_retry + 1))
+            navigate(cdp, 'https://rewards.bing.com/earn')
+            time.sleep(random.uniform(3.0, 5.0))
+            ev(cdp, 'window.scrollTo(0, document.body.scrollHeight*0.4);')
+            time.sleep(1.5)
+            ev(cdp, 'window.scrollTo(0, document.body.scrollHeight);')
+            time.sleep(1.5)
+            quests = _poll_quests(12)
+            if quests:
+                log('[重试] 第%d次重载后取到 %d 张打卡卡' % (_retry + 1, len(quests)))
+                break
+    if not quests:
+        _ids = None
+        try:
+            from msr.tasks import quest_activity as _qa
+            _ids = _qa.list_quest_ids(name, proxy=proxy)
+        except Exception as _ex:
+            log('打卡列表空, 服务端 payload 交叉验证失败(忽略): %s' % str(_ex)[:60])
+        if _ids:
+            log('!!! 服务端 payload 里仍有 %d 张打卡卡 (%s), 页面 #quests 未渲染 -> 判失败交阶段10回补'
+                % (len(_ids), ','.join(_ids[:3])))
+            return '失败(quests 列表未渲染, 服务端有%d张)' % len(_ids)
+        if _ids is None:
+            log('今日未发现打卡任务 (#quests, 服务端 payload 读取失败, 无法交叉验证)')
+        else:
+            log('今日未发现打卡任务 (#quests, 服务端 payload 亦无打卡卡)')
         return '无打卡任务'
 
     active_quests = [q for q in quests if not q.get('isDone')]
@@ -1019,20 +1074,10 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print, proxy=N
             step_info = None
             step_deadline = time.time() + max(5, activation_wait)
             while time.time() < step_deadline:
-                res = ev(cdp, """(() => {
+                res = ev(cdp, "(() => {" + _QUEST_STEP_PICK_JS + """
                   const mainEl = document.querySelector("main");
                   if (!mainEl) return { ready: false, step: null };
-                  const anchors = Array.from(mainEl.querySelectorAll("a[href], button")).filter(a => {
-                    const row = a.closest("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]") || a.parentElement;
-                    if (row && (row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess], svg[aria-label*=complete i], svg[aria-label*=已完成]") || /已完成|completed/i.test(row.innerText))) {
-                      return false;
-                    }
-
-                    const t = a.innerText || "";
-                    const h = a.href || "";
-                    if (h.includes("/dashboard") || h.includes("/earn") || h.includes("/redeem") || h.includes("/pointsbreakdown") || h.includes("terms") || h.includes("privacy")) return false;
-                    return true;
-                  });
+                  const anchors = Array.from(mainEl.querySelectorAll("a[href], button")).filter(__pickStep);
                   if (anchors.length === 0) {
                     const allRows = mainEl.querySelectorAll("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]");
                     if (allRows.length > 0) return { ready: true, step: null };
@@ -1103,17 +1148,10 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print, proxy=N
 
             log('执行步骤: %s -> %s' % (step_text[:30], step_href[:60]))
 
-            click_selector = """(() => {
-              const el = Array.from(document.querySelectorAll("main a[href], main button")).find(a => {
-                const row = a.closest("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]") || a.parentElement;
-                if (row && (row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess], svg[aria-label*=complete i], svg[aria-label*=已完成]") || /已完成|completed/i.test(row.innerText))) {
-                  return false;
-                }
-                const t = a.innerText || "";
-                const h = a.href || "";
-                if (h.includes("/dashboard") || h.includes("/earn") || h.includes("/redeem") || h.includes("/pointsbreakdown") || h.includes("terms") || h.includes("privacy")) return false;
-                return true;
-              });
+            # 与"找步骤"共用同一份过滤(__pickStep): 两处漂移过一次, 结果 find 认出的收尾领奖步骤
+            # 在 click 侧又用旧规则被拒, 实测报 "点击目标不存在: 立即兑换"。
+            click_selector = "(() => {" + _QUEST_STEP_PICK_JS + """
+              const el = Array.from(document.querySelectorAll("main a[href], main button")).filter(__pickStep)[0];
               if (el && el.href && el.href.startsWith("ms-search://")) {
                 let q = "";
                 try {

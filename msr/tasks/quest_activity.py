@@ -33,6 +33,7 @@ from msr import config as _cfg
 from msr.tasks.streaks import UA
 
 QUEST_TPL = 'https://rewards.bing.com/earn/quest/%s'
+EARN = 'https://rewards.bing.com/earn'
 
 _BLOCK_RE = re.compile(r'\{"className":"flex flex-row gap-2 sm:gap-4","children":\[')
 _H3_RE = re.compile(r'"h3",null,\{"className":"[^"]*","children":"((?:[^"\\]|\\.){1,90})"')
@@ -92,6 +93,40 @@ def fetch_activities(name, promo_id, proxy=None, timeout=25):
     except Exception:
         return None
     return parse_activities(html)
+
+
+def _quest_ids_from_html(html):
+    """/earn 页面(payload/HTML) -> 打卡卡 promo id 列表(去重保序)。纯函数, 无 IO。"""
+    h = (html or '').replace('\\"', '"').replace('\\/', '/')   # RSC 里斜杠有时被转义成 \/
+    ids = []
+    for m in re.finditer(r'/earn/quest/([A-Za-z0-9_\-]{6,})', h):
+        qid = m.group(1)
+        if qid not in ids:
+            ids.append(qid)
+    return ids
+
+
+def list_quest_ids(name, proxy=None, timeout=25):
+    """GET /earn 里出现的打卡卡 promo id 列表（去重、保序）。
+
+    用途：页面 `#quests` 没渲染出来时做交叉验证 —— 服务端 payload 里有卡就说明"没渲染"，
+    不能当成"今天没有打卡任务"（2026-11-16 事故：某 SG 号 11-13 空跑一天，周卡最终 7/8 领不到 100 分）。
+    返回 None = 读取失败（未知），[] = 页面确实没有打卡卡。
+    """
+    ck = _cookie_header(name)
+    if not ck:
+        return None
+    req = urllib.request.Request(EARN, headers={
+        'Cookie': ck, 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9'})
+    handlers = []
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({'http': proxy, 'https': proxy}))
+    try:
+        html = urllib.request.build_opener(*handlers).open(req, timeout=timeout).read() \
+            .decode('utf-8', 'ignore')
+    except Exception:
+        return None
+    return _quest_ids_from_html(html)
 
 
 def snapshot(activities):
