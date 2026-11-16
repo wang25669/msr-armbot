@@ -909,24 +909,39 @@ def resolve_quest_subtask_action(step_info, q_name):
 
 # ---------- 任务打卡 (Quests / Punchcards，含桌面专属打卡) ----------
 
-# 打卡步骤锚点的**唯一**判定实现（找步骤 / 点步骤两处共用，禁止再各写一份 —— 2026-11-16 事故：
-# 两处过滤逻辑漂移，find 认出了收尾领奖步骤、click 用旧规则又把它拒了，实测报 "点击目标不存在: 立即兑换"）。
-# 收尾领奖步骤的文案本身含 "completed"（"You completed this Punch Card"）、href 是 /redeem/<sku>，
-# 原来两道过滤（完成文案 + /redeem 黑名单）同时把它挡掉，卡片就永远停在 x-1/x
-# （实测两个 SG 号的 Spotify 卡 4/5 挂了一整周，白丢一次领奖）。
-# 放行条件收紧：文案必须命中"打卡收尾"且 href 必须是 /redeem/ —— 绝不自动点会花积分的普通兑换入口。
+# 打卡步骤锚点的**唯一**判定实现（"找步骤"与"点步骤"共用一份，禁止再各写一套）
+# 判定只看元素结构与属性，**不猜文案、不看 URL 关键字**（2026-11-16 用户纠正）：
+#   · 一行步骤 = class 含 flex-row 且内部恰好一个 h3 的容器（条款正文在 .text-legal 块里、没有 h3，天然排除）
+#   · 已完成   = 行内有成功徽章（div[class*=bg-statusSuccess] / svg[class*=text-statusSuccess] …）
+#   · 未解锁   = 行内没有任何 a/button（服务端只给可做的那一步挂可点元素）
+#   · 可点     = 无徽章 + 行内第一个可点元素就是它 + 该元素没有 disabled/aria-disabled/data-disabled
+# 旧实现按文案与 URL 关键字过滤，把收尾领奖步骤（文案含 completed、href=/redeem/<sku>）双重挡死，
+# 卡片永久停在 x-1/x；而首日能点两步的卡也被"取第一个"的逻辑吃掉一步。
 _QUEST_STEP_PICK_JS = r"""
-  const __claimStep = (rowText, aText) => (/Punch\s*Card\s*complete|completed\s+this\s+Punch\s*Card|打卡.{0,6}完成/i.test(rowText + " " + aText));
-  const __hasBadge = (row) => !!(row && row.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess], svg[aria-label*=complete i], svg[aria-label*=已完成]"));
+  const __hasBadge = (el) => !!(el && el.querySelector("div[class*=bg-statusSuccess], div[class*=statusSuccessRewardsBg], svg[class*=text-statusSuccess], svg[aria-label*=complete i], svg[aria-label*=已完成]"));
+  const __rowOf = (a) => {
+    let n = a, i = 0;
+    while (n && i < 6) {
+      if (String(n.className || "").includes("flex-row")) return n;
+      n = n.parentElement; i++;
+    }
+    return null;
+  };
+  const __isDisabled = (a) => {
+    if (!a) return true;
+    if (a.disabled === true) return true;
+    if (a.getAttribute("aria-disabled") === "true") return true;
+    if (a.hasAttribute("data-disabled")) return true;
+    return false;
+  };
   const __pickStep = (a) => {
-    const row = a.closest("div.flex.flex-row, div.flex.flex-col.gap-3, div[class*=rounded-2xl]") || a.parentElement;
-    const h = a.href || "";
-    const rowText = (row && row.innerText) || "";
-    const isClaim = __claimStep(rowText, a.innerText || "") && String(h).includes("/redeem/");
-    if (!isClaim && (__hasBadge(row) || /已完成|completed/i.test(rowText))) return false;
-    if (!isClaim && (h.includes("/dashboard") || h.includes("/earn") || h.includes("/redeem") || h.includes("/pointsbreakdown") || h.includes("terms") || h.includes("privacy"))) return false;
-    if (isClaim && (h.includes("/earn/quest/") || h.includes("terms") || h.includes("privacy"))) return false;
-    return true;
+    const row = __rowOf(a);
+    if (!row) return false;
+    if (row.querySelectorAll("h3").length !== 1) return false;
+    if (__hasBadge(row)) return false;
+    const first = row.querySelector("a[href], button, [role=button]");
+    if (first !== a) return false;
+    return !__isDisabled(a);
   };
 """
 
