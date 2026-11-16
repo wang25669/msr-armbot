@@ -4,7 +4,8 @@
 Usage:
   msr login <name> [--method credential|cookies] [--username EMAIL] [--password PWD] [--cookies FILE] [--proxy URL]  引导账号登录
   msr account <name> [--proxy URL] [--enable/--disable]                 查看或更新账号独立配置
-  msr run [name|--all] [--dry-run] [--only PHASES] [--fast]            执行账号任务链
+  msr run [name|--all] [--dry-run] [--only PHASES]                     执行账号任务链
+  msr discover [name|--all] [--json] [--no-dom] [--save PATH]          只读发现今日任务清单(P3 dry-run)
   msr settings [--set key=val] [--get key]                             查看或调整全局参数配置
   msr notify-test [title] [text]                                       测试消息通知通道 (Server酱/TG)
   msr web [--host 0.0.0.0] [--port 8080]                               启动内置 Web 管理控制台
@@ -111,7 +112,15 @@ def main():
     p.add_argument('--all', action='store_true', help='执行全部有效账号')
     p.add_argument('--dry-run', action='store_true', help='仅打印排期计划，不执行')
     p.add_argument('--only', default=None, help='只跑指定阶段 (例如: dailyset,moreactivities,search)')
-    p.add_argument('--fast', action='store_true', help='极速调试模式 (所有停留等待压缩至 3-6 秒)')
+    p.add_argument('--force', action='store_true', help='账号已停用时也强制执行 (手动补跑用, 不受 enabled 过滤)')
+
+    # discover (P3 只读发现 / dry-run)
+    p = sub.add_parser('discover', help='只读发现今日任务清单(不执行、不点击、不计分)')
+    p.add_argument('name', nargs='?', default=None)
+    p.add_argument('--all', action='store_true', help='全部启用账号')
+    p.add_argument('--json', action='store_true', help='输出 JSON(便于对比基线)')
+    p.add_argument('--no-dom', action='store_true', help='只看 API 侧，不起浏览器')
+    p.add_argument('--save', help='把 JSON 写入指定文件')
 
     # settings
     p = sub.add_parser('settings', help='查看或调整集中风控与节奏参数')
@@ -147,6 +156,9 @@ def main():
     elif args.cmd == 'run':
         from msr import runner
         runner.cmd_run(args)
+    elif args.cmd == 'discover':
+        from msr.tasks import cmd_discover
+        return cmd_discover(args, config)
     elif args.cmd == 'settings':
         cmd_settings(args)
     elif args.cmd == 'notify-test':

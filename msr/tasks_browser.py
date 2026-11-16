@@ -1,3 +1,5 @@
+MAX_STEPS_PER_RUN = 8        # 单次运行每张卡最多推进步数 (2026-11-11 固化, 实测每日实际只推进 1 步)
+MULTI_DAY_GUARD_HOURS = 20   # 多日任务保护窗: 20 小时内不重复推进同一张跨日卡
 """浏览器侧任务: 搜索 / 每日活动卡 / 任务打卡 (含桌面专属) / 日常任务卡。
 
 完全适配 Next.js App Router 现代 rewards.bing.com:
@@ -13,7 +15,47 @@ import re
 import time
 import urllib.parse
 
-from msr.browser import ev, navigate, StepError, human_click, close_tab, tab_ids, _http_json
+from msr.browser import ev, navigate, human_click, close_tab, tab_ids, _http_json
+
+
+# ---------- P5 只读判据: 卡内对号徽章 + x/y 快照 (语言无关, 禁止用"卡片消失"推断) ----------
+BADGE_JS_TPL = '''(() => {
+  const box = document.getElementById(%s);
+  if (!box) return { found: false, total: 0, cards: [] };
+  // 卡片级归属: 只看卡片自身(或只含一张卡的父层)的徽章, 绝不借用兄弟卡徽章
+  const pick = Array.from(box.querySelectorAll("a[href], button, [role='button']"));
+  const cards = [];
+  for (const el of pick) {
+    const cardEl = el.closest("div[class*=rounded], li, div.flex.flex-col, div.flex.flex-row") || el;
+    const own = cardEl !== el ? cardEl : el;
+    const badge = own.querySelector('[class*="bg-statusSuccessRewardsBg"]');
+    const t = (own.innerText || "").replace(/\\n/g, " ").trim();
+    const m = t.match(/(\\d+)\\s*\\/\\s*(\\d+)/);
+    if (!t) continue;
+    cards.push({ text: t.slice(0, 80), badge: !!badge, prog: m ? (m[1] + "/" + m[2]) : null });
+  }
+  // 去重 (同一卡片内多个可点元素)
+  const seen = new Set(); const uniq = [];
+  for (const c of cards) { if (seen.has(c.text)) continue; seen.add(c.text); uniq.push(c); }
+  return { found: true, total: uniq.length,
+           badged: uniq.filter(c => c.badge).length, cards: uniq };
+})()'''
+
+
+def container_snapshot(cdp, container_id, log=print, tag=''):
+    """读容器内每张卡的 x/y 与对号徽章, 只写日志 (P5 完成判据的观测点, 零副作用)。"""
+    try:
+        js = BADGE_JS_TPL % json.dumps(container_id)
+        snap = ev(cdp, js) or {}
+        if not snap.get('found'):
+            return None
+        log('%s%s 快照: 卡=%d 带徽章=%d' % (tag, container_id, snap.get('total', 0), snap.get('badged', 0)))
+        for c in (snap.get('cards') or [])[:12]:
+            log('%s  · [%s] %s%s' % (tag, c.get('prog') or '-', '✅ ' if c.get('badge') else '', c.get('text', '')[:70]))
+        return snap
+    except Exception as ex:
+        log('%s 快照失败(容忍): %s' % (tag, str(ex)[:60]))
+        return None
 
 
 def bing_domain(pr):
@@ -112,24 +154,6 @@ def search_counters_api(pr):
     return None
 
 
-def search_counters_dom(cdp):
-    """通过 dashboard #streaks 或积分明细弹窗检查搜索打卡状态(兼容 2X 翻倍说明)。"""
-    try:
-        res = ev(cdp, """(() => {
-          const el = document.getElementById("streaks") || 
-                     document.querySelector('[role="dialog"], #modal-host, [class*="modal" i]') || 
-                     document.body;
-          if (!el) return null;
-          const text = el.innerText;
-          const m = text.match(/(?:搜索|search|pc\\s*search|pc)[^\\d/]*?(\\d+)\\s*\\/\\s*(\\d+)/i);
-          if (m) {
-            return { progress: parseInt(m[1]), max: parseInt(m[2]), complete: parseInt(m[1]) >= parseInt(m[2]) };
-          }
-          return null;
-        })()""")
-        return res
-    except Exception:
-        return None
 
 
 def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=print, token=None, proxy=None):
@@ -138,10 +162,8 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
     st = settings.load_settings()
     s_cfg = st.get('search', {})
     sch_cfg = st.get('schedule', {})
-    fast = sch_cfg.get('fast_mode', False)
-
-    dwell_min = 3 if fast else int(s_cfg.get('dwell_min_seconds', 180))
-    dwell_max = 6 if fast else int(s_cfg.get('dwell_max_seconds', 300))
+    dwell_min = int(s_cfg.get('dwell_min_seconds', 180))
+    dwell_max = int(s_cfg.get('dwell_max_seconds', 300))
     stall_max = int(s_cfg.get('stall_max_retries', 12))
     hard_cap = int(s_cfg.get('hard_cap_attempts', 60))
     click_prob = float(s_cfg.get('click_result_probability', 0.85))
@@ -161,7 +183,7 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
         return '%d/%d' % (current_prog, target_max)
 
     log('PC搜索启动: 当前进度 %d/%d (模式=%s, 单次停留 %.1f-%.1f 秒/词)' % (
-        current_prog, target_max, '极速测试[fast_mode]' if fast else '防风控真机', dwell_min, dwell_max))
+        current_prog, target_max, '防风控真机', dwell_min, dwell_max))
 
     queries_en = [
         'weather forecast', 'world news today', 'python tutorial for beginners',
@@ -239,7 +261,7 @@ def phase_search(name, cdp, pr, ch=None, budget_seconds=None, target=None, log=p
                 except Exception as ex:
                     log('搜索结果点击容忍: %s' % str(ex)[:60])
 
-            # 核心节奏停留: 180-300 秒 (等待 MSR 风控冷却，fast_mode 下 3-6 秒)
+            # 核心节奏停留: 180-300 秒 (等待 MSR 风控冷却)
             dwell = random.uniform(dwell_min, dwell_max)
             log('搜索[%d] 模拟真人深度阅读停留 %.1f 秒 (%s)...' % (
                 searches_done, dwell, '在独立文章标签页' if res_tab_id else '在主搜索结果页'))
@@ -464,18 +486,30 @@ def interact_quiz(ch, tab_id, label='', log=print):
             pass
 
 
-def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
-    """Daily Set 3张每日活动卡 (支持成熟账号平铺与新账号抽屉双模自适应)。"""
+def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print, proxy=None):
+    """Daily Set 3张每日活动卡 (支持成熟账号平铺与新账号抽屉双模自适应)。
+
+    2026-11-11: 完成状态以服务端 /earn payload 的 partner=dailyset(3/3) 为准,
+    空抽屉 / 卡片判据不可靠时用服务端真值兜底, 不再靠"猜"。
+    """
     earn_url = 'https://rewards.bing.com/earn'
     dash_url = 'https://rewards.bing.com/dashboard'
 
     from msr import settings
     st_card = settings.load_settings()
-    fast_mode = bool(st_card.get('schedule', {}).get('fast_mode'))
 
     # 1. 优先访问统一任务中心 /earn (杜绝 /dashboard 掉入 /about FAQ 重定向黑洞)
     navigate(cdp, earn_url)
     time.sleep(random.uniform(2.5, 4.0))
+
+    def _server_dailyset():
+        """服务端 dailyset 打卡状态; 读不到返回 None。"""
+        try:
+            from msr.tasks import streaks
+            return (streaks.fetch_streaks(name, proxy=proxy) or {}).get('dailyset')
+        except Exception as ex:
+            log('[Daily Set] 服务端状态读取异常(忽略): %s' % str(ex)[:60])
+            return None
 
     def _ensure_expanded():
         try:
@@ -515,6 +549,7 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     # 2. 如果存在平铺模式卡片，执行平铺模式
     if cards:
         log('[Daily Set] 识别为成熟账号平铺模式 (#dailyset，共 %d 张)' % len(cards))
+        container_snapshot(cdp, 'dailyset', log=log, tag='[P5] ')
         todo = [c for c in cards if not c.get('isDone')]
         if not todo:
             log('今日每日活动已全部完成 (3/3)')
@@ -537,12 +572,12 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                 try:
                     if kind == 'quiz':
                         interact_quiz(ch, target_tid, label=title, log=log)
-                        wait = random.uniform(3, 6) if fast_mode else random.uniform(25, 45)
+                        wait = random.uniform(25, 45)
                         log('%s 答题后停留 %.1f 秒等待结算' % (title, wait))
                         time.sleep(wait)
                     else:
-                        w_min = 3 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_min', 60))
-                        w_max = 6 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_max', 120))
+                        w_min = int(st_card.get('cards', {}).get('attribution_wait_min', 60))
+                        w_max = int(st_card.get('cards', {}).get('attribution_wait_max', 120))
                         wait = random.uniform(w_min, w_max)
                         log('%s 停留 %.1f 秒等待归因' % (title, wait))
                         time.sleep(wait)
@@ -606,6 +641,18 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
         streak_info = ev(cdp, find_streak_js)
 
     if not streak_info:
+        # 页面没有卡片时不要只报"未发现"：用服务端真值说清是"已完成"还是"当日任务还没发布"
+        _sv_missing = _server_dailyset()
+        if _sv_missing is not None and (_sv_missing.get('total') or 0) > 0:
+            from msr.tasks import streaks as _sk3
+            if _sk3.is_done(_sv_missing):
+                log('[Daily Set] 页面无卡片, 服务端 %s/%s 已完成 -> 判完成'
+                    % (_sv_missing.get('completed'), _sv_missing.get('total')))
+                return '3/3已完成(服务端)'
+            log('[Daily Set] 页面无卡片, 服务端 %s/%s 未完成 -> 疑似当日任务尚未发布(美西 0 点后一段时间才出卡)'
+                % (_sv_missing.get('completed'), _sv_missing.get('total')))
+            return '未发现卡片(服务端 %s/%s, 疑似任务未发布)' % (
+                _sv_missing.get('completed'), _sv_missing.get('total'))
         log('未发现每日活动区域或 Daily Set 卡片')
         return '未发现每日活动'
 
@@ -654,7 +701,66 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
 
     drawer_cards = ev(cdp, extract_drawer_cards_js) or []
     log('抽屉已展开，发现 %d 张每日子卡片: %s' % (len(drawer_cards), [c['title'] for c in drawer_cards]))
+    # 抽屉偶发"展开慢/首次渲染为空"(2026-11-10 实测: 登录后立刻跑 -> 0 张; 几小时后跑 -> 3 张),
+    # 旧逻辑把空抽屉当"已完成" -> 当日 Daily Set 三张卡 0 分且误报成功。这里改成硬轮询:
+    # 每 3 秒重试一次, 每两次重连刷新一次 /earn, 最多约 30 秒; 仍为空才判失败交阶段10回补。
+    if not drawer_cards:
+        _sv0 = _server_dailyset()
+        if _sv0 is not None:
+            from msr.tasks import streaks as _sk
+            if _sk.is_done(_sv0):
+                log('[Daily Set] 抽屉暂时没卡片, 但服务端已是 %s/%s(今日完成) -> 判完成'
+                    % (_sv0.get('completed'), _sv0.get('total')))
+                return '3/3已完成(服务端)'
+            log('[Daily Set] 抽屉暂时没卡片, 服务端 %s/%s 未完成 -> 继续尝试展开'
+                % (_sv0.get('completed'), _sv0.get('total')))
+    _open_try = 0
+    while not drawer_cards and _open_try < 3:
+        _open_try += 1
+        ev(cdp, click_drawer_js)
+        time.sleep(3.0)
+        drawer_cards = ev(cdp, extract_drawer_cards_js) or []
+        if drawer_cards:
+            log('[Daily Set] 第 %d 次尝试取到 %d 张子卡片' % (_open_try, len(drawer_cards)))
+            break
+        if _open_try % 2 == 0:
+            log('[Daily Set] 第 %d 次尝试仍为空, 重新加载 /earn 后再试' % _open_try)
+            navigate(cdp, earn_url)
+            time.sleep(random.uniform(3.0, 4.5))
+            ev(cdp, click_drawer_js)
+            time.sleep(2.0)
+            drawer_cards = ev(cdp, extract_drawer_cards_js) or []
+    if not drawer_cards:
+        # 诊断: 抽屉结构没取到卡片时, 打印页面真实结构, 避免再次误判"已完成"
+        try:
+            dump = ev(cdp, """(() => {
+              const ds = document.getElementById('dailyset');
+              const dialogs = Array.from(document.querySelectorAll("[role='dialog'], section[role='dialog'], [class*='Dialog'], [class*='dialog']"));
+              const links = Array.from(document.querySelectorAll('a[href]')).map(a => ({
+                t: (a.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 50),
+                h: (a.getAttribute('href') || '').slice(0, 90),
+                c: (a.className || '').toString().slice(0, 60)
+              }));
+              return {
+                title: document.title.slice(0, 40),
+                hasDailyset: !!ds,
+                dailysetHtml: ds ? ds.outerHTML.replace(/\\s+/g, ' ').slice(0, 1200) : null,
+                dialogCount: dialogs.length,
+                dialogInfo: dialogs.slice(0, 4).map(d => ({ tag: d.tagName, cls: (d.className || '').toString().slice(0, 80),
+                                                           links: d.querySelectorAll('a[href]').length,
+                                                           txt: (d.innerText || '').replace(/\\s+/g, ' ').slice(0, 200) })),
+                linkCount: links.length,
+                links: links.slice(0, 20)
+              };
+            })()""")
+            log('[Daily Set 诊断] ' + json.dumps(dump, ensure_ascii=False)[:2600])
+        except Exception as ex_dump:
+            log('[Daily Set 诊断] 失败: %s' % str(ex_dump)[:80])
 
+    if not drawer_cards:
+        # 空抽屉绝不能当"已完成": 交回 runner 阶段10 用 legacy 路径回补
+        log('[Daily Set] 抽屉重试后仍取不到子卡片, 判失败并交由阶段10回补')
+        return '失败(dailyset抽屉未取到卡片)'
     todo_drawer = [c for c in drawer_cards if not c.get('isDone')]
     if not todo_drawer:
         log('抽屉内卡片已全部完成')
@@ -690,12 +796,12 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                     time.sleep(random.uniform(2.5, 4.0))
                     if kind == 'quiz':
                         interact_quiz(ch, target_tid, label=title, log=log)
-                        wait = random.uniform(3, 6) if fast_mode else random.uniform(25, 45)
+                        wait = random.uniform(25, 45)
                         log('%s 答题后停留 %.1f 秒等待结算' % (title, wait))
                         time.sleep(wait)
                     else:
-                        w_min = 3 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_min', 60))
-                        w_max = 6 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_max', 120))
+                        w_min = int(st_card.get('cards', {}).get('attribution_wait_min', 60))
+                        w_max = int(st_card.get('cards', {}).get('attribution_wait_max', 120))
                         wait = random.uniform(w_min, w_max)
                         log('%s 停留 %.1f 秒等待归因' % (title, wait))
                         time.sleep(wait)
@@ -723,6 +829,12 @@ def phase_dailyset(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
     log('每日活动执行后最终回读: %s/%s' % (prog_now, tot_now))
     if prog_now >= tot_now or (done_drawer_count >= len(drawer_cards) and prog_now >= 2):
         return '3/3已完成'
+    _sv1 = _server_dailyset()
+    if _sv1 is not None:
+        from msr.tasks import streaks as _sk2
+        if _sk2.is_done(_sv1):
+            return '3/3已完成(服务端确认)'
+        return '部分完成:处理%d张(服务端 %s/%s)' % (done_drawer_count, _sv1.get('completed'), _sv1.get('total'))
     return '部分完成:处理%d张(当前%d/%d)' % (done_drawer_count, prog_now, tot_now)
 
 
@@ -734,6 +846,7 @@ def resolve_quest_subtask_action(step_info, q_name):
 
     绝不针对任何特定节日、主题硬编码关键词。
     通用操作分流:
+    0. 'activate': 卡片首步是「激活优惠 / opt-in」类 CTA —— 真人点击锚点即可，不做搜索
     1. 'quiz': 具有官方测验标识 (filters=BTBQ/BTB/REWARDSQUIZ 或路径含 quiz)
     2. 'search_direct': 具有搜索终结点且已有预设关键词 q
     3. 'search_semantic': 具有搜索终结点但无 q (开放式搜索任务)，从卡片 title 元数据提取核心题干搜索
@@ -742,16 +855,29 @@ def resolve_quest_subtask_action(step_info, q_name):
     href = step_info.get('href') or ''
     title = (step_info.get('title') or '').strip()
     card_text = (step_info.get('cardText') or '').strip()
+    step_text = (step_info.get('text') or '').strip()
     has_query = step_info.get('hasQuery', False)
+
+    parsed = urllib.parse.urlparse(href)
+    is_bing = 'bing.com' in parsed.netloc
+    is_search_path = parsed.path.rstrip('/') == '/search'
+
+    # 0. 激活/opt-in 类属性判定
+    # 2026-11-11 某新号 实测: Spotify 打卡第一步是 "Activate Spotify offer now"
+    # -> https://www.bing.com/?form=ML2X8X... 旧逻辑因卡片文本含"搜索"被判成 search_semantic,
+    # 结果把 "But first ACTIVATE the offer" 当关键词搜了一次, 优惠到当晚仍未激活。
+    # 判据只看 CTA 自身文案(标题/步骤文字), 且排除已带 q 的真搜索终结点。
+    _act_pat = r'(?:activate|opt[\s\-]?in|enable\s|turn\s*on|join\s*now|激活|开启|启用|立即领取)'
+    _is_real_search = is_bing and is_search_path and has_query
+    if not _is_real_search and (re.search(_act_pat, title, re.I) or re.search(_act_pat, step_text, re.I)):
+        return {'action': 'activate', 'search_term': None,
+                'reason': '激活/opt-in 类 CTA, 真人点击锚点, 不搜索'}
 
     # 1. 测验/竞答类属性判定 (Quiz / Trivia)
     if any(k in href for k in ('REWARDSQUIZ', 'BTBQ', 'BTB')) or '/quiz' in href.lower():
         return {'action': 'quiz', 'search_term': None, 'reason': 'URL携带官方测验标识(REWARDSQUIZ/BTBQ/quiz)'}
 
     # 2. 搜索类属性判定 (Search，含新手打卡 Onboarding / Search now 引导)
-    parsed = urllib.parse.urlparse(href)
-    is_bing = 'bing.com' in parsed.netloc
-    is_search_path = parsed.path.rstrip('/') == '/search'
     is_search_intent = any(k in title.lower() or k in card_text.lower() for k in (
         '搜索', 'search', 'search now', 'keep searching', '立即搜索', '开始搜索'
     ))
@@ -783,8 +909,36 @@ def resolve_quest_subtask_action(step_info, q_name):
 
 # ---------- 任务打卡 (Quests / Punchcards，含桌面专属打卡) ----------
 
-def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
+def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print, proxy=None):
     """任务打卡(Quests / Punchcards，含桌面专属打卡)。"""
+    # P1: 打卡参数全部来自 settings.json (原地生效, 不再写死)
+    from msr import settings as _S
+    _st = _S.load_settings()
+    _q = _st.get('quests', {})
+    activation_wait = int(_q.get('activate_wait_seconds', 15))
+    dw_min = float(_q.get('step_dwell_min', 60))
+    dw_max = float(_q.get('step_dwell_max', 120))
+    max_steps = MAX_STEPS_PER_RUN
+    guard_hours = MULTI_DAY_GUARD_HOURS
+    log('打卡参数: 激活等待=%ds 步骤停留=%g~%gs 单卡步数=%d 跨日保护=%gh' % (
+        activation_wait, dw_min, dw_max, max_steps, guard_hours))
+
+    def _md_state(qn, write=None):
+        """多日任务推进时间戳 (P1: multi_day_guard_hours 的真实读取点)。"""
+        try:
+            from msr import config as _C
+            sp = _C.pfile(name, 'state.json')
+            s = _C.load_json(sp, {}) or {}
+            m = s.get('multi_day_advance') or {}
+            if write is not None:
+                m[qn] = int(write)
+                s['multi_day_advance'] = m
+                _C.save_json(sp, s)
+                return write
+            return m.get(qn)
+        except Exception:
+            return None
+
     navigate(cdp, 'https://rewards.bing.com/earn')
     time.sleep(random.uniform(2.5, 4.0))
     # 触发页面下滚以完成 Next.js 组件水合与打卡任务卡片懒加载
@@ -818,8 +972,23 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
 
     active_quests = [q for q in quests if not q.get('isDone')]
     log('发现 %d 个打卡任务 (待处理 %d 个)' % (len(quests), len(active_quests)))
+    # P5: 每张打卡卡 x/y 进度逐条落日志 (回归度量, 只读)
+    prog_before = {}
+    for q in quests:
+        m = re.search(r'(\d+)\s*/\s*(\d+)', q.get('text') or '')
+        if m:
+            prog_before[q.get('href')] = m.group(0)
+        log('  quest 进度: %-46s %s%s' % (
+            (q.get('href') or '').split('/')[-1][:46],
+            m.group(0) if m else '-',
+            ' [已完成]' if q.get('isDone') else ''))
+    container_snapshot(cdp, 'quests', log=log, tag='[P5] ')
 
     total_steps_done = 0
+    cards_done = 0
+    cards_unscoped = 0
+    executed = {}          # q_name -> [步骤文案]，本阶段真正执行过的步骤（服务端步骤级回读用）
+    pre_snap = {}          # q_name -> 执行前的已完成步骤快照 {标题: 条数}（执行后 diff 出真正计分的步数）
     t0 = time.time()
 
     for q in active_quests:
@@ -827,17 +996,28 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
             break
         q_url = q['href']
         q_name = q_url.split('/')[-1]
+
+        # P1: 多日任务跨日保护 —— 保护窗内不重复推进 (避免同日回补重复提交)
+        try:
+            last_adv = _md_state(q_name)
+            if last_adv and guard_hours > 0 and (time.time() - float(last_adv)) < guard_hours * 3600:
+                log('%s 跨日保护: %.1f 小时前已推进 (<%gh), 本轮跳过' % (
+                    q_name, (time.time() - float(last_adv)) / 3600.0, guard_hours))
+                continue
+        except Exception:
+            pass
+
         log('进入打卡任务: %s' % q_name)
         seen_step_urls = set()
 
-        # 循环完成该任务中今天可执行的所有子步骤
-        for step_attempt in range(8):
+        # 循环完成该任务中今天可执行的所有子步骤 (步数上限 = MAX_STEPS_PER_RUN)
+        for step_attempt in range(max_steps):
             navigate(cdp, q_url)
             time.sleep(random.uniform(2, 4))
 
             # 智能等待打卡步骤组件水合渲染 (最多 15 秒)
             step_info = None
-            step_deadline = time.time() + 15
+            step_deadline = time.time() + max(5, activation_wait)
             while time.time() < step_deadline:
                 res = ev(cdp, """(() => {
                   const mainEl = document.querySelector("main");
@@ -915,6 +1095,7 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                     log('%s 跨日累计步骤 (%s) 今日打卡搜索已完成，MSR 规则要求间隔24小时次日继续，转入下一打卡' % (q_name, prog_str))
                     break
                 log('%s 发现跨日累计步骤: %s (需每日打卡推进)' % (q_name, prog_str))
+                _md_state(q_name, write=time.time())
             elif step_href in seen_step_urls:
                 log('%s 步骤已处理过(需等待冷却或次日刷新)，进入下一打卡' % q_name)
                 break
@@ -947,6 +1128,19 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
               }
               return el;
             })()"""
+
+            # 2026-11-12: 点这一卡的第一个步骤之前，先取一次卡详情页的「已完成步骤」快照。
+            # 阶段末再取一次，diff 出来的增量就是本次真正计分的步数（外层 x/y 刷新滞后数小时，不能当判据）。
+            if q_name not in pre_snap:
+                try:
+                    from msr.tasks import quest_activity as _qa0
+                    pre_snap[q_name] = _qa0.snapshot(
+                        _qa0.fetch_activities(name, q_name, proxy=proxy))
+                    if pre_snap[q_name] is None:
+                        log('%s 执行前快照读取失败(该卡按未知处理)' % q_name[:40])
+                except Exception as ex_pre:
+                    pre_snap[q_name] = None
+                    log('%s 执行前快照异常(忽略): %s' % (q_name[:40], str(ex_pre)[:60]))
 
             new_tabs = human_click(cdp, click_selector, label=step_text[:15], close_new=False)
 
@@ -1000,13 +1194,8 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                         except Exception:
                             pass
 
-                    # 从配置读取停留归因等待时间 (默认 60~120 秒，快速模式 3~6 秒)
-                    from msr import settings
-                    st_card = settings.load_settings()
-                    fast_mode = bool(st_card.get('schedule', {}).get('fast_mode'))
-                    w_min = 3 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_min', 60))
-                    w_max = 6 if fast_mode else int(st_card.get('cards', {}).get('attribution_wait_max', 120))
-                    w = random.uniform(w_min, w_max)
+                    # P1: 单步骤停留来自 quests.step_dwell_min/max (快速模式 3~6 秒)
+                    w = random.uniform(dw_min, dw_max)
                     log('%s 步骤页面停留 %.1f 秒等待服务器归因积分' % (q_name, w))
                     time.sleep(w)
                 finally:
@@ -1019,9 +1208,121 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print):
                 time.sleep(random.uniform(5, 8))
 
             total_steps_done += 1
+            executed.setdefault(q_name, []).append(step_text)
             time.sleep(random.uniform(2, 4))
 
-    return '处理%d个打卡步骤' % total_steps_done
+    # P5: 全部卡片处理完再回 /earn 统一回读 (打卡详情页里没有 #quests 列表, 单卡回读必然定位失败 —— 2026-11-09 实测)
+    try:
+        navigate(cdp, 'https://rewards.bing.com/earn')
+        time.sleep(random.uniform(3.0, 4.5))
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if ev(cdp, 'document.getElementById("quests") !== null'):
+                break
+            time.sleep(1.0)
+        for q in active_quests:
+            q_name = (q.get('href') or '').split('/')[-1]
+            if not q_name:
+                continue
+            try:
+                snap = ev(cdp, '''(() => {
+                  const target = %s;
+                  const qs = document.getElementById("quests") || document;
+                  const a = Array.from(qs.querySelectorAll("a[href*='/earn/quest/']"))
+                              .find(x => (x.href || "").includes(target));
+                  if (!a) return { found: false };
+                  // 2026-11-11 某新号 实测: a.closest("div[class*=rounded]") 会抓到包含多张卡的
+                  // 外层容器, 卡片文本的第一个 x/y 与首个徽章来自**别的卡** —— Spotify 因此被报成
+                  // "进度=6/7 徽章=✅已完成"(那是 onboarding 卡的 6/7), 实际 Spotify 是 3/6 未激活。
+                  // 规则: 只在"祖先里仅含本卡唯一 quest 锚点"时向上走, 一旦会引入兄弟卡就停。
+                  let card = a, el = a.parentElement, scoped = false;
+                  for (let i = 0; i < 6 && el; i++, el = el.parentElement) {
+                    const n = el.querySelectorAll("a[href*='/earn/quest/']").length;
+                    if (n > 1) break;
+                    card = el; scoped = true;
+                  }
+                  const t = (card.innerText || "").replace(/\\n/g, " ");
+                  // 优先咬住紧跟"个任务/tasks/days"的 x/y (2026-11-11 某新号 实测: 7 张卡全都有)
+                  const m = t.match(/(\\d+)\\s*\\/\\s*(\\d+)\\s*(?:个任务|个活動|tasks|days|天)/i)
+                         || t.match(/(\\d+)\\s*\\/\\s*(\\d+)/)
+                         || t.match(/(\\d+)\\s*of\\s*(\\d+)/i);
+                  // 该版式(某新号 实测)7 张卡的锚点同属一个列表容器, 卡级徽章归属不可判 ——
+                  // 徽章必须返回 null(未知), 不能兜底成 false 报"未完成"。
+                  return { found: true, prog: m ? (m[1] + "/" + m[2]) : null,
+                           scoped: scoped,
+                           badge: scoped ? !!card.querySelector('[class*="bg-statusSuccessRewardsBg"]') : null,
+                           text: t.slice(0, 50) };
+                })()''' % json.dumps(q_name)) or {}
+                if snap.get('found'):
+                    prog = snap.get('prog') or '-'
+                    badge = snap.get('badge')
+                    if badge is None:
+                        # 该版式无卡级容器: 徽章归属不可判, 只能用进度增量当证据, 不许报"完成/未完成"
+                        cards_unscoped += 1
+                        advanced = bool(prog != '-' and prog != prog_before.get(q.get('href')) and
+                                        (prog_before.get(q.get('href')) or '0/0') != prog)
+                        if advanced:
+                            cards_done += 1
+                        log('%s 回读: 进度=%s 徽章=未回读(无卡级容器)%s' % (
+                            q_name[:46], prog, ' 进度已推进' if advanced else ''))
+                    else:
+                        log('%s 回读: 进度=%s 徽章=%s' % (q_name[:46], prog,
+                                                       '✅已完成' if badge else '未完成'))
+                        if badge:
+                            cards_done += 1
+                else:
+                    log('%s 回读: 卡片未定位 (按未完成处理)' % q_name[:46])
+            except Exception as ex_snap:
+                log('%s 回读异常(容忍): %s' % (q_name[:40], str(ex_snap)[:60]))
+    except Exception as ex_sum:
+        log('打卡完成后统一回读异常(容忍): %s' % str(ex_sum)[:80])
+
+    # 2026-11-12: 外层 `x/y tasks` 的服务端刷新滞后可达数小时（实测 12:14 读 Sea 仍 1/4、22:20 才变 2/4；
+    # Duolingo 21:01 读 1/6、22:20 已 2/6），只按外层判就把**已计分**的步骤报成"进度推进0/K张"。
+    # 这里改成**执行前后快照对比**：卡的已完成步骤数增量 = 本次真正计分的步数（HTTP，零浏览器）。
+    # 为什么要 diff 而不是按文案匹配：已完成的步骤在 payload 里没有 anchor/linkText，只有徽章。
+    total_exec = sum(len(v) for v in executed.values())
+    credited = 0
+    unknown = 0
+    if pre_snap:
+        try:
+            from msr.tasks import quest_activity as _qa
+        except Exception as ex_qa:
+            _qa = None
+            log('步骤级回读不可用(忽略): %s' % str(ex_qa)[:60])
+        if _qa is not None:
+            def _diff():
+                ok, unk = 0, 0
+                for _qn, _before in pre_snap.items():
+                    _after = _qa.snapshot(_qa.fetch_activities(name, _qn, proxy=proxy))
+                    _d = _qa.newly_completed(_before, _after)
+                    if _d is None:
+                        unk += 1
+                    else:
+                        ok += _d
+                        if _d:
+                            log('%s 服务端新增已完成 %d 步' % (_qn[:40], _d))
+                return ok, unk
+
+            try:
+                credited, unknown = _diff()
+                if credited < total_exec:
+                    log('步骤级回读: %d/%d 步已计分, 等待 180 秒后复读一次...' % (credited, total_exec))
+                    time.sleep(180)
+                    _c2, unknown = _diff()
+                    credited = max(credited, _c2)
+                    log('步骤级回读复读: %d/%d 步已计分' % (credited, total_exec))
+                credited = min(credited, total_exec)
+            except Exception as ex_cf:
+                log('步骤级回读异常(容忍): %s' % str(ex_cf)[:60])
+    if unknown:
+        log('步骤级回读: %d 张卡快照读取失败, 按未知处理(不据此判完成/未完成)' % unknown)
+
+    if cards_unscoped:
+        return '处理%d个打卡步骤(服务端确认%d/%d步已计分, 外层进度推进%d/%d张, %d张版式无卡级徽章)' % (
+            total_steps_done, credited, total_exec, cards_done, len(active_quests), cards_unscoped)
+    return '处理%d个打卡步骤(服务端确认%d/%d步已计分, %d/%d张带对号徽章)' % (
+        total_steps_done, credited, total_exec, cards_done, len(active_quests))
 
 
 def extract_semantic_explore_query(title, desc):
@@ -1042,10 +1343,21 @@ def extract_semantic_explore_query(title, desc):
         flags=re.IGNORECASE
     ).strip()
 
-    # 2. 去除末尾标点符号 (句号、问号、叹号等)
+    # 2. 剥掉句首语法胶水词 (for a / to the / about ...): 卡片描述常是句子片段, 直接当 query 会搜偏
+    #    例: "for a flight to your perfect vacation" -> "flight to your perfect vacation"
+    while True:
+        m_glue = re.match(r'^(?:for|to|about|on|in|of|the|a|an)\b[\s,:-]*', cleaned, re.IGNORECASE)
+        if not m_glue:
+            break
+        rest = cleaned[m_glue.end():].strip()
+        if len(rest) < 8:
+            break
+        cleaned = rest
+
+    # 3. 去除末尾标点符号 (句号、问号、叹号等)
     cleaned = re.sub(r'[\.\?\!\;。？！；]+$', '', cleaned).strip()
 
-    # 3. 兜底保护：若剥离后内容有效则直接使用，否则退回使用卡片标题 title
+    # 4. 兜底保护：若剥离后内容有效则直接使用，否则退回使用卡片标题 title
     if len(cleaned) >= 2 and not re.search(r'^(?:completed|activated|unlocks|已完成|明天解锁)', cleaned, re.I):
         return cleaned
 
@@ -1056,6 +1368,13 @@ def extract_semantic_explore_query(title, desc):
 
 def phase_explore(name, cdp, pr, ch=None, log=print):
     """必应探索打卡 (Explore on Bing / 在必应上探索，通常包含 4 张 10 分主题搜索卡片)。"""
+    # P1: 探索参数 (每卡独立关键词 = 红线; 停留时长可配)
+    from msr import settings as _S
+    _e = _S.load_settings().get('explore', {})
+    ex_min = float(_e.get('dwell_min', 16))
+    ex_max = float(_e.get('dwell_max', 20))
+    if ex_max < ex_min:
+        ex_min, ex_max = ex_max, ex_min
     navigate(cdp, 'https://rewards.bing.com/earn')
     time.sleep(random.uniform(2.5, 4.0))
 
@@ -1141,6 +1460,7 @@ def phase_explore(name, cdp, pr, ch=None, log=print):
 
     # 3. 逐张卡片在新标签页中打开并执行精准搜索归因，主 /earn 标签页保持常驻监听
     done_count = 0
+    fixed_query = None
     import urllib.parse
     for c in cards:
         idx = c['idx']
@@ -1149,7 +1469,9 @@ def phase_explore(name, cdp, pr, ch=None, log=print):
         desc = c.get('desc') or ''
 
         # 从卡片标题和描述中提炼最优搜索词
-        query = extract_semantic_explore_query(title, desc)
+        if not fixed_query:
+            fixed_query = extract_semantic_explore_query(title, desc)
+        query = fixed_query
         log('执行探索打卡[%d/%d]: %s -> 提取搜索词: "%s"' % (done_count + 1, len(cards), (title or text)[:35], query))
 
         t_before = set(tab_ids(cdp))
@@ -1195,7 +1517,7 @@ def phase_explore(name, cdp, pr, ch=None, log=print):
                 new_tab_id = None
 
         search_url = f'https://www.bing.com/search?q={urllib.parse.quote_plus(query)}&form=ML2PCR&OCID=ML2PCR&PUBL=RewardsDO&CREA=ML2PCR&PC=ML2PCR'
-        dwell = random.uniform(16.0, 20.0)
+        dwell = random.uniform(ex_min, ex_max)
         navigate(target_cdp, search_url)
         log('在搜索结果页停留 %.1f 秒等待服务器归因积分...' % dwell)
         time.sleep(dwell)
@@ -1290,9 +1612,8 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
         new_tabs = human_click(cdp, selector, label=text[:15], close_new=False)
         from msr import settings
         st = settings.load_settings()
-        fast = st.get('schedule', {}).get('fast_mode', False)
-        wmin = 3 if fast else int(st.get('cards', {}).get('attribution_wait_min', 60))
-        wmax = 6 if fast else int(st.get('cards', {}).get('attribution_wait_max', 120))
+        wmin = int(st.get('cards', {}).get('attribution_wait_min', 60))
+        wmax = int(st.get('cards', {}).get('attribution_wait_max', 120))
         if new_tabs and ch:
             try:
                 time.sleep(random.uniform(wmin, wmax))
@@ -1331,7 +1652,9 @@ def phase_moreactivities(name, cdp, pr, ch=None, budget_seconds=1500, log=print)
       }).length;
     })()""") or 0
     if remaining_ma == 0 or (done_count >= len(cards) and remaining_ma <= 1):
+        container_snapshot(cdp, 'moreactivities', log=log, tag='[P5] ')
         return '日常任务已全部完成(共%d张)' % done_count
+    container_snapshot(cdp, 'moreactivities', log=log, tag='[P5] ')
     return '部分完成:处理%d张(剩%d张待做)' % (done_count, remaining_ma)
 
 
@@ -1545,7 +1868,7 @@ def phase_claim(name, cdp, pr, ch=None, log=print):
     return f'领取结算中(约{rem_pts}分)'
 
 
-def auto_activate_promotions_and_streaks(cdp, ch=None, log=print):
+def auto_activate_promotions_and_streaks(cdp, ch=None, log=print, edge_activated=None):
     """自动扫描并激活 rewards 页面上所有待激活的福利特权、促销活动与连续打卡任务 (Perks & Streaks)。
     
     通用任务信息提取与自适应处理：
@@ -1558,6 +1881,12 @@ def auto_activate_promotions_and_streaks(cdp, ch=None, log=print):
         3. 其他未激活但可立即参与的限时特惠活动 (Limited-time Promotional Opt-ins)。
       - 状态防护: 自动排除已完成 (Completed / 已完成 / Activated / 已激活) 的卡片，避免重复触发。
       - 交互闭环: 模拟真人点击卡片展开弹窗 -> 提取并记录通用任务详情 -> 点击弹出窗口内的“立即激活”/“Activate” -> 处理外部/落地页跳转与原生双重触发 -> 安全关闭弹窗。
+
+    2026-11-11 用户口径 + 真机日志: 激活是**每个账号一次性**的事 —— 新号首次下发 Edge 30 分钟 /
+    视觉搜索时需要先激活才会计分, 之后每天自动运行**不需要**再激活。
+    实测旧实现每天(甚至每次重跑)都点一次 "[Edge 专属入口]", 某US号/某SG号 一天两次、
+    某SG号2 诊断轮 4 分钟点 6 次。现在由调用方传入 API 事实 `edge_activated`
+    (即 /dapi/me 里已有 edge_browsing_streak_flight), 已激活就整段跳过。
     """
     find_tasks_js = '''(() => {
       const results = [];
@@ -1579,6 +1908,12 @@ def auto_activate_promotions_and_streaks(cdp, ch=None, log=print):
 
         // 排除已完成状态 (如果整个文字块明确显示已完成且无激活按钮，则跳过)
         if (completedPattern.test(t) || (completedPattern.test(combined) && !activateCtaPattern.test(t) && !perkPattern.test(t))) {
+          continue;
+        }
+
+        // 带 x/y 个任务 的是打卡卡(归 quests 阶段处理), 不是"待激活"特权卡。
+        // 否则 onboarding 6/7 这种跨日卡每天都会被当成待激活再点一次(2026-11-11 实测)。
+        if (/(\\d+)\\s*\\/\\s*(\\d+)\\s*(?:个任务|个活動|tasks|days|天)/i.test(combined)) {
           continue;
         }
 
@@ -1792,7 +2127,10 @@ def auto_activate_promotions_and_streaks(cdp, ch=None, log=print):
             log('未能定位到弹窗激活按钮或该卡片已激活')
 
     # 额外触发 Edge 专属奖励面板入口 (触发 Edge 浏览识别与连续打卡激活)
-    if ch:
+    # 只在"尚未激活"时做一次: /dapi/me 已有 edge_browsing_streak_flight 就说明激活过, 不再重复点击
+    if edge_activated:
+        log('[激活跳过] Edge 打卡已激活 (flight 在册), 不再重复点击入口')
+    elif ch:
         try:
             edge_tab = ch.new_tab('https://www.bing.com/?rwgbopen=1&FORM=rwbsl1')
             time.sleep(random.uniform(2.5, 3.5))

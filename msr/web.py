@@ -72,7 +72,7 @@ def format_log_line(raw_line, default_acc='系统', known_accounts=None, fallbac
         acc = m_acc.group(1)
         content = s[m_acc.end():].strip()
     else:
-        # 尝试匹配无括号的账号名 (例如 "gkerstnt refresh 第1次失败")
+        # 尝试匹配无括号的账号名 (例如 "某US号 refresh 第1次失败")
         m_bare = re.match(r'^([a-zA-Z0-9_\-]+)\s+', s)
         if m_bare and known_accounts and m_bare.group(1) in known_accounts:
             acc = m_bare.group(1)
@@ -81,7 +81,7 @@ def format_log_line(raw_line, default_acc='系统', known_accounts=None, fallbac
             acc = default_acc or '系统'
             content = s
 
-    # 消除正文中残留的重复自身标签或账号名，如 [tntker] 或 tntker
+    # 消除正文中残留的重复自身标签或账号名，如 [某SG号3] 或 某SG号3
     while content.startswith(f'[{acc}]'):
         content = content[len(f'[{acc}]'):].strip()
     if content.startswith(f'{acc} '):
@@ -212,6 +212,90 @@ def _sync_runner_state():
         RUNNER_STATE['last_line'] = ACTIVE_RUNNERS[running_names[-1]].get('last_line', '')
     else:
         RUNNER_STATE['last_line'] = ''
+
+
+def stop_account_run(name):
+    """P2-②: 停止单账号运行 (terminate → 等 5 秒 → kill → 清注册表/lock/残留 Chromium)。幂等。"""
+    import signal
+    from msr import config as _cfg
+
+    steps = []
+    proc = None
+    with RUNNER_STATE_LOCK:
+        entry = ACTIVE_RUNNERS.get(name)
+        if entry:
+            proc = entry.get('proc')
+
+    lock_p = os.path.join(_cfg.profile(name), 'runner.lock')
+    lock_pid = None
+    try:
+        if os.path.isfile(lock_p):
+            with open(lock_p, 'r', encoding='utf-8') as f:
+                c = f.read().strip()
+            if c.isdigit():
+                lock_pid = int(c)
+    except Exception:
+        pass
+
+    def _pid_alive(pid):
+        if not pid or pid <= 1:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def _signal(pid, sig):
+        try:
+            if hasattr(os, 'getpgid') and hasattr(os, 'killpg'):
+                os.killpg(os.getpgid(pid), sig)
+            else:
+                os.kill(pid, sig)
+        except Exception:
+            try:
+                os.kill(pid, sig)
+            except Exception:
+                pass
+
+    target_pid = proc.pid if proc is not None else lock_pid
+    if target_pid and _pid_alive(target_pid):
+        _signal(target_pid, signal.SIGTERM)
+        steps.append(f'terminate pid={target_pid}')
+        t0 = time.time()
+        while time.time() - t0 < 5:
+            if proc is not None and proc.poll() is not None:
+                break
+            if proc is None and not _pid_alive(target_pid):
+                break
+            time.sleep(0.2)
+        if _pid_alive(target_pid):
+            _signal(target_pid, signal.SIGKILL)
+            steps.append('kill(-9)')
+    else:
+        steps.append('无运行中进程')
+
+    with RUNNER_STATE_LOCK:
+        ACTIVE_RUNNERS.pop(name, None)
+        _sync_runner_state()
+
+    try:
+        if os.path.isfile(lock_p):
+            os.remove(lock_p)
+            steps.append('已删 runner.lock')
+    except Exception:
+        pass
+
+    try:
+        from msr import live_login
+        killed = live_login.kill_profile_chromium(name)
+        if killed:
+            steps.append('清理残留 Chromium: %s' % killed)
+    except Exception as ex:
+        steps.append('清理 Chromium 异常: %s' % str(ex)[:60])
+
+    idle = not _pid_alive(target_pid)
+    return {'status': 'ok' if idle else 'error', 'name': name, 'idle': idle, 'steps': steps}
 
 
 HTML_CONTENT = """<!DOCTYPE html>
@@ -740,20 +824,12 @@ HTML_CONTENT = """<!DOCTYPE html>
               📱 移动端与 Edge 浏览打卡 (Mobile & Edge API)
             </h4>
             <div class="form-group">
-              <label>移动端资讯阅读文章目标篇数 (默认 10 篇)</label>
-              <input type="number" id="m-read-count">
-            </div>
-            <div class="form-group">
               <label>每篇资讯阅读最小间隔 (秒，默认 60s)</label>
               <input type="number" id="m-read-min">
             </div>
             <div class="form-group">
               <label>每篇资讯阅读最大间隔 (秒，默认 120s)</label>
               <input type="number" id="m-read-max">
-            </div>
-            <div class="form-group">
-              <label>Edge 30分钟打卡上报次数 (每次约5分钟，默认 6 次)</label>
-              <input type="number" id="m-edge-reports">
             </div>
             <div class="form-group">
               <label>两次 Edge 打卡心跳间隔 (秒，默认 305s)</label>
@@ -778,27 +854,52 @@ HTML_CONTENT = """<!DOCTYPE html>
               <input type="number" id="sch-max-concurrency" min="1" max="10" placeholder="2">
             </div>
             <div class="form-group">
-              <label>极速测试模式 (fast_mode, 开启后等待压缩至 3-6 秒)</label>
-              <select id="cfg-fast-mode">
-                <option value="false">关闭 (真实真人节奏，约2小时/号)</option>
-                <option value="true">开启 (极速调试，仅测试流程连通性)</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>阶段间过渡等待最小分钟数 (默认 3 分钟)</label>
-              <input type="number" id="sch-stage-min">
-            </div>
-            <div class="form-group">
-              <label>阶段间过渡等待最大分钟数 (默认 5 分钟)</label>
-              <input type="number" id="sch-stage-max">
-            </div>
-            <div class="form-group">
               <label>定时启动随机延迟上限 (分钟，默认 25 分钟防整点特征)</label>
               <input type="number" id="sch-start-delay">
             </div>
             <div class="form-group">
               <label>失败任务自动修复重试前等待 (分钟，默认 4 分钟)</label>
               <input type="number" id="sch-retry-wait">
+            </div>
+          </div>
+
+          <!-- 4.5 新引擎任务参数 (P1) -->
+          <div class="acc-card">
+            <h4 style="color:var(--primary); margin-bottom:12px; display:flex; align-items:center; gap:6px;">
+              ⚙️ 新引擎任务参数 (Quests / Explore / Streak / Visual)
+            </h4>
+            <div class="form-group">
+              <label>打卡卡打开后等待步骤渲染上限 (秒, quests.activate_wait_seconds)</label>
+              <input type="number" id="q-act-wait">
+            </div>
+            <div class="form-group">
+              <label>打卡单步骤停留最小/最大秒数 (quests.step_dwell_min / max)</label>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                <input type="number" id="q-step-min">
+                <input type="number" id="q-step-max">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>探索结果页停留最小/最大秒数 (explore.dwell_min / max)</label>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                <input type="number" id="e-dwell-min">
+                <input type="number" id="e-dwell-max">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>探索补搜停留秒数 / 单轮预算秒数 (explore.retry_dwell_seconds / budget_seconds)</label>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                <input type="number" id="e-retry-dwell">
+                <input type="number" id="e-budget">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>视觉搜索最多提交轮数 (visual.submit_rounds)</label>
+              <input type="number" id="v-rounds">
+            </div>
+            <div class="form-group">
+              <label>视觉落页基础停留秒数 (visual.landing_wait_seconds，另加 0~7 秒抖动)</label>
+              <input type="number" id="v-land-wait">
             </div>
           </div>
 
@@ -1716,7 +1817,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       const proxy = document.getElementById('acc-proxy-input').value.trim() || null;
       if (!name) return toast('请输入账号标识名称');
       if (!schedule_time) return toast('请输入每日定时执行时间 (24小时制 HH:MM，如 02:30)');
-      if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(schedule_time)) return toast('定时时间格式错误，须为 24小时制 HH:MM (如 02:30)');
+      if (!/^([01]\\d|2[0-3]):([0-5]\\d)$/.test(schedule_time)) return toast('定时时间格式错误，须为 24小时制 HH:MM (如 02:30)');
 
       const res = await fetch('/api/accounts', {
         method: 'POST',
@@ -1818,7 +1919,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       const btn = document.getElementById('btn-submit-proxy');
 
       if (!schedule_time) return toast('请输入每日定时执行时间 (如 02:30)');
-      if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(schedule_time)) return toast('定时时间格式错误，须为 24小时制 HH:MM (如 02:30)');
+      if (!/^([01]\\d|2[0-3]):([0-5]\\d)$/.test(schedule_time)) return toast('定时时间格式错误，须为 24小时制 HH:MM (如 02:30)');
 
       btn.disabled = true;
       btn.innerText = '正在保存...';
@@ -2122,20 +2223,27 @@ HTML_CONTENT = """<!DOCTYPE html>
         document.getElementById('c-quiz-max').value = s.cards?.quiz_step_delay_max ?? 6;
 
         // 3. mobile
-        document.getElementById('m-read-count').value = s.mobile?.read_article_count ?? 10;
         document.getElementById('m-read-min').value = s.mobile?.read_interval_min ?? 60;
         document.getElementById('m-read-max').value = s.mobile?.read_interval_max ?? 120;
-        document.getElementById('m-edge-reports').value = s.mobile?.edge30m_reports ?? 6;
         document.getElementById('m-edge-interval').value = s.mobile?.edge30m_interval ?? 305;
 
         // 4. schedule
         document.getElementById('sch-daily-enabled').value = String(s.schedule?.daily_enabled !== false);
         document.getElementById('sch-max-concurrency').value = s.schedule?.max_concurrency ?? 2;
-        document.getElementById('cfg-fast-mode').value = String(!!s.schedule?.fast_mode);
-        document.getElementById('sch-stage-min').value = s.schedule?.inter_stage_wait_min ?? 3;
-        document.getElementById('sch-stage-max').value = s.schedule?.inter_stage_wait_max ?? 5;
         document.getElementById('sch-start-delay').value = s.schedule?.random_start_delay_max ?? 25;
         document.getElementById('sch-retry-wait').value = s.schedule?.retry_wait_minutes ?? 4;
+
+        // 4.5 新引擎任务参数 (P1)
+        const q = s.quests || {}, ex = s.explore || {}, sk = s.streak || {}, vi = s.visual || {};
+        document.getElementById('q-act-wait').value = q.activate_wait_seconds ?? 15;
+        document.getElementById('q-step-min').value = q.step_dwell_min ?? 60;
+        document.getElementById('q-step-max').value = q.step_dwell_max ?? 120;
+        document.getElementById('e-dwell-min').value = ex.dwell_min ?? 16;
+        document.getElementById('e-retry-dwell').value = ex.retry_dwell_seconds ?? 30;
+        document.getElementById('e-budget').value = ex.budget_seconds ?? 1200;
+        document.getElementById('e-dwell-max').value = ex.dwell_max ?? 20;
+        document.getElementById('v-rounds').value = vi.submit_rounds ?? 3;
+        document.getElementById('v-land-wait').value = vi.landing_wait_seconds ?? 18;
 
         // 5. browser
         document.getElementById('b-headless').value = String(s.browser?.headless !== false);
@@ -2194,20 +2302,34 @@ HTML_CONTENT = """<!DOCTYPE html>
           quiz_step_delay_max: parseInt(document.getElementById('c-quiz-max').value) || 6
         },
         mobile: {
-          read_article_count: parseInt(document.getElementById('m-read-count').value) || 10,
           read_interval_min: parseInt(document.getElementById('m-read-min').value) || 60,
           read_interval_max: parseInt(document.getElementById('m-read-max').value) || 120,
-          edge30m_reports: parseInt(document.getElementById('m-edge-reports').value) || 6,
           edge30m_interval: parseInt(document.getElementById('m-edge-interval').value) || 305
         },
         schedule: {
           daily_enabled: document.getElementById('sch-daily-enabled').value === 'true',
           max_concurrency: parseInt(document.getElementById('sch-max-concurrency').value) || 2,
-          fast_mode: document.getElementById('cfg-fast-mode').value === 'true',
-          inter_stage_wait_min: parseInt(document.getElementById('sch-stage-min').value) || 3,
-          inter_stage_wait_max: parseInt(document.getElementById('sch-stage-max').value) || 5,
           random_start_delay_max: parseInt(document.getElementById('sch-start-delay').value) || 25,
           retry_wait_minutes: parseInt(document.getElementById('sch-retry-wait').value) || 4
+        },
+        quests: {
+          activate_wait_seconds: parseInt(document.getElementById('q-act-wait').value) || 15,
+          step_dwell_min: parseInt(document.getElementById('q-step-min').value) || 60,
+          step_dwell_max: parseInt(document.getElementById('q-step-max').value) || 120,
+        },
+        explore: {
+          dwell_min: parseInt(document.getElementById('e-dwell-min').value) || 16,
+          retry_dwell_seconds: parseInt(document.getElementById('e-retry-dwell').value) || 30,
+          budget_seconds: parseInt(document.getElementById('e-budget').value) || 1200,
+          dwell_max: parseInt(document.getElementById('e-dwell-max').value) || 20
+        },
+        streak: {
+        },
+        visual: {
+          submit_rounds: parseInt(document.getElementById('v-rounds').value) || 3,
+          landing_wait_seconds: parseInt(document.getElementById('v-land-wait').value) || 18
+        },
+        engine: {
         },
         browser: {
           headless: document.getElementById('b-headless').value === 'true',
@@ -2392,7 +2514,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         isRunning = true;
         let hint = (runnerState.last_line || '').trim();
         if (hint) {
-          hint = hint.replace(/^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*/, '').replace(/^.*?>>>\s*/, '').replace(/^.*?⏰\s*/, '');
+          hint = hint.replace(/^\\[\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}\\]\\s*/, '').replace(/^.*?>>>\\s*/, '').replace(/^.*?⏰\\s*/, '');
           activeState = hint;
         } else {
           activeState = '任务流水线执行中...';
@@ -2429,7 +2551,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                line.includes('>>> 开始浏览器阶段') ||
                (line.includes('搜索') && (line.includes('停留') || line.includes('计数'))))) {
             isRunning = true;
-            let clean = line.replace(/^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*/, '').replace(/^.*?>>>\s*/, '').replace(/^.*?⏰\s*/, '');
+            let clean = line.replace(/^\\[\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}\\]\\s*/, '').replace(/^.*?>>>\\s*/, '').replace(/^.*?⏰\\s*/, '');
             activeState = clean;
             foundFinalStatus = true;
             break;
@@ -2532,10 +2654,10 @@ HTML_CONTENT = """<!DOCTYPE html>
         let escaped = escapeHtml(line);
 
         // 高亮行首时间戳 [HH:MM:SS]
-        escaped = escaped.replace(/^\[(\d{2}:\d{2}:\d{2})\]/g, '<span class="l-ts">[$1]</span>');
+        escaped = escaped.replace(/^\\[(\\d{2}:\\d{2}:\\d{2})\\]/g, '<span class="l-ts">[$1]</span>');
 
         // 高亮行首紧随的账号徽标 [TAG]
-        escaped = escaped.replace(/(<span class="l-ts">\[\d{2}:\d{2}:\d{2}\]<\/span>\s*)\[([a-zA-Z0-9_\-\u4e00-\u9fa5]+)\]/g, (match, tsPart, p1) => {
+        escaped = escaped.replace(/(<span class="l-ts">\\[\\d{2}:\\d{2}:\\d{2}\\]<\\/span>\\s*)\\[([a-zA-Z0-9_\\-\u4e00-\u9fa5]+)\\]/g, (match, tsPart, p1) => {
           if (p1 === '系统' || p1 === '定时调度') {
             return `${tsPart}<span class="l-acc-badge" style="background:rgba(148,163,184,0.18); color:#94a3b8;">${p1}</span>`;
           }
@@ -3427,9 +3549,23 @@ class WebHandler(BaseHTTPRequestHandler):
             from msr import settings
             cur = settings.load_settings()
             merged = settings._deep_merge(cur, payload)
+            err = settings.validate_settings(merged)
+            if err:
+                self._json_resp({'status': 'error', 'message': '参数校验失败: %s' % err}, code=400)
+                return
             settings.save_settings(merged)
             append_live_log('Web 控制台更新了全局风控与执行配置')
             self._json_resp({'status': 'ok'})
+            return
+
+        if path == '/api/stop':
+            name = (payload.get('name') or urllib.parse.parse_qs(u.query).get('name', [None])[0] or '').strip()
+            if not name or name == '--all':
+                self._json_resp({'status': 'error', 'message': '缺少账号参数 name'}, code=400)
+                return
+            res = stop_account_run(name)
+            append_live_log('Web 控制台停止账号 [%s]: %s' % (name, ' / '.join(res.get('steps') or [])))
+            self._json_resp(res)
             return
 
         if path == '/api/settings/reset':
@@ -3933,8 +4069,6 @@ class WebHandler(BaseHTTPRequestHandler):
             tag = target_name if target_name != '--all' else '系统'
             append_live_log(f'>>> 开始执行任务: {target_name}', name=tag)
             cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', target_name]
-            if st_cfg.get('schedule', {}).get('fast_mode'):
-                cmd.append('--fast')
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             with RUNNER_STATE_LOCK:
                 if target_name in ACTIVE_RUNNERS:
@@ -4014,6 +4148,28 @@ class WebHandler(BaseHTTPRequestHandler):
             self.close_connection = True
 
 
+def _should_catchup(sch_time, now_hour, now_min, grace_min, latest_hour, state,
+                    today_str, already_triggered, is_running, lock_exists):
+    """漏跑自愈判定 (纯函数, 便于单测)。
+
+    True = 该账号今天该跑但没跑成, 应立即补发一次。
+    """
+    if already_triggered or is_running or lock_exists:
+        return False
+    if now_hour >= latest_hour:
+        return False
+    try:
+        hh, mm = [int(x) for x in str(sch_time).split(':')]
+    except (ValueError, AttributeError, TypeError):
+        return False
+    if now_min < hh * 60 + mm + max(0, int(grace_min)):
+        return False
+    day = (state or {}).get('daily') or {}
+    if day.get('last_date') == today_str and str(day.get('status', '')) == 'ok':
+        return False
+    return True
+
+
 def _start_scheduler_daemon():
     """轻量级内置每日定时调度引擎。
 
@@ -4043,7 +4199,47 @@ def _start_scheduler_daemon():
                 accs = [a for a in config.accounts() if a.get('enabled', True)]
                 max_conc = int(sch.get('max_concurrency', 2))
                 jitter_max = int(sch.get('random_start_delay_max', 25))
-                is_fast = bool(sch.get('fast_mode', False))
+
+                def _spawn_task(acc_name, target_time, use_jitter=True, reason='定时'):
+                    if use_jitter and jitter_max > 0:
+                        jitter_sec = random.uniform(0, jitter_max * 60)
+                        append_live_log(f'[{acc_name}] 到达预定时间 {target_time}，开启随机抖动等待 {jitter_sec / 60:.1f} 分钟后开始执行...', name='定时调度')
+                        time.sleep(jitter_sec)
+
+                    # 槽位等待与防爆保护
+                    while True:
+                        with RUNNER_STATE_LOCK:
+                            if len(ACTIVE_RUNNERS) < max_conc and acc_name not in ACTIVE_RUNNERS:
+                                ACTIVE_RUNNERS[acc_name] = {
+                                    'started_at': time.time(),
+                                    'last_line': '定时任务唤醒启动中...',
+                                    'proc': None
+                                }
+                                _sync_runner_state()
+                                break
+                        time.sleep(5)
+
+                    append_live_log(f'[{acc_name}] 开始执行每日{reason}自动化任务流程...', name='定时调度')
+                    home_args = ['--home', config.HOME] if getattr(config, 'HOME', None) else []
+                    cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', acc_name]
+                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                    with RUNNER_STATE_LOCK:
+                        if acc_name in ACTIVE_RUNNERS:
+                            ACTIVE_RUNNERS[acc_name]['proc'] = proc
+                    for line in iter(proc.stdout.readline, ''):
+                        line = line.strip()
+                        if line:
+                            with RUNNER_STATE_LOCK:
+                                if acc_name in ACTIVE_RUNNERS:
+                                    ACTIVE_RUNNERS[acc_name]['last_line'] = line
+                                _sync_runner_state()
+                            append_live_log(line)
+                    proc.stdout.close()
+                    proc.wait()
+                    with RUNNER_STATE_LOCK:
+                        ACTIVE_RUNNERS.pop(acc_name, None)
+                        _sync_runner_state()
+                    append_live_log(f'[{acc_name}] 每日{reason}任务执行完毕 (exit={proc.returncode})', name='定时调度')
 
                 for a in accs:
                     name = a.get('name')
@@ -4052,52 +4248,38 @@ def _start_scheduler_daemon():
                         continue
                     if sch_time == now_hm and triggered_today.get(name) != today_str:
                         triggered_today[name] = today_str
-
-                        def _spawn_task(acc_name, target_time):
-                            if jitter_max > 0 and not is_fast:
-                                jitter_sec = random.uniform(0, jitter_max * 60)
-                                append_live_log(f'[{acc_name}] 到达预定时间 {target_time}，开启随机抖动等待 {jitter_sec / 60:.1f} 分钟后开始执行...', name='定时调度')
-                                time.sleep(jitter_sec)
-
-                            # 槽位等待与防爆保护
-                            while True:
-                                with RUNNER_STATE_LOCK:
-                                    if len(ACTIVE_RUNNERS) < max_conc and acc_name not in ACTIVE_RUNNERS:
-                                        ACTIVE_RUNNERS[acc_name] = {
-                                            'started_at': time.time(),
-                                            'last_line': '定时任务唤醒启动中...',
-                                            'proc': None
-                                        }
-                                        _sync_runner_state()
-                                        break
-                                time.sleep(5)
-
-                            append_live_log(f'[{acc_name}] 开始执行每日定时自动化任务流程...', name='定时调度')
-                            home_args = ['--home', config.HOME] if getattr(config, 'HOME', None) else []
-                            cmd = [sys.executable, '-m', 'msr'] + home_args + ['run', acc_name]
-                            if is_fast:
-                                cmd.append('--fast')
-                            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-                            with RUNNER_STATE_LOCK:
-                                if acc_name in ACTIVE_RUNNERS:
-                                    ACTIVE_RUNNERS[acc_name]['proc'] = proc
-                            for line in iter(proc.stdout.readline, ''):
-                                line = line.strip()
-                                if line:
-                                    with RUNNER_STATE_LOCK:
-                                        if acc_name in ACTIVE_RUNNERS:
-                                            ACTIVE_RUNNERS[acc_name]['last_line'] = line
-                                        _sync_runner_state()
-                                    append_live_log(line)
-                            proc.stdout.close()
-                            proc.wait()
-                            with RUNNER_STATE_LOCK:
-                                ACTIVE_RUNNERS.pop(acc_name, None)
-                                _sync_runner_state()
-                            append_live_log(f'[{acc_name}] 每日定时任务执行完毕 (exit={proc.returncode})', name='定时调度')
-
                         t = threading.Thread(target=_spawn_task, args=(name, sch_time), daemon=True, name=f'Scheduler-{name}')
                         t.start()
+
+                # ---- 漏跑自愈 (到点后 grace 分钟仍无今日成功记录 -> 补发一次, 每天每号最多一次) ----
+                # 覆盖: 容器重启跨过定时点 / 调度线程异常 / 到点时槽位与并发上限冲突
+                try:
+                    grace_min = int(sch.get('catchup_grace_minutes', 45))
+                    latest_hour = int(sch.get('catchup_latest_hour', 23))
+                    now_min = int(time.strftime('%H')) * 60 + int(time.strftime('%M'))
+                    if int(time.strftime('%H')) < latest_hour and len(ACTIVE_RUNNERS) < max_conc:
+                        for a in accs:
+                            name = a.get('name')
+                            sch_time = a.get('schedule_time')
+                            if not name or not sch_time:
+                                continue
+                            st_a = config.load_json(config.pfile(name, 'state.json')) or {}
+                            if not _should_catchup(
+                                    sch_time, int(time.strftime('%H')), now_min, grace_min,
+                                    latest_hour, st_a, today_str,
+                                    triggered_today.get(name) == today_str,
+                                    name in ACTIVE_RUNNERS,
+                                    os.path.exists(config.pfile(name, 'runner.lock'))):
+                                continue
+                            triggered_today[name] = today_str
+                            append_live_log(f'[{name}] 漏跑自愈: 计划 {sch_time} 后今日仍无成功记录, 补发执行', name='定时调度')
+                            t = threading.Thread(target=_spawn_task, args=(name, sch_time, False, '补发'),
+                                                 daemon=True, name=f'Catchup-{name}')
+                            t.start()
+                            if len(ACTIVE_RUNNERS) >= max_conc:
+                                break
+                except Exception as ex_cu:
+                    append_live_log(f'漏跑自愈检查异常(忽略): {ex_cu}', name='定时调度')
 
             except Exception as ex:
                 append_live_log(f'定时调度异常: {ex}', name='定时调度')

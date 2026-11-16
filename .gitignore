@@ -10,3 +10,9 @@ docker-test/
 .env
 tests/
 
+docs/
+accounts.json
+profiles/
+cookie*.json*
+token*.json
+credential*

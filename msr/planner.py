@@ -22,11 +22,16 @@ TASK_TABLE = {
     'visualSearch':                  {'phase': 'visual',         'needs': 'browser', 'optional': True},
     'pointClaim':                    {'phase': 'claim',          'needs': 'browser', 'optional': True},
     'perks':                         {'phase': 'perks',          'needs': 'browser', 'optional': True},
+    'urlrewards':                    {'phase': 'urlrewards',     'needs': 'browser'},
     'edge_browsing_streak_flight':   {'phase': 'edge30m',        'needs': 'api'},
     'edge_browsing_streak_eligible': {'phase': 'edge30m',        'needs': 'api'},
     'app_checkin':                   {'phase': 'appcheckin',     'needs': 'api'},
     'ENUS_readarticle3_30points':    {'phase': 'appread',        'needs': 'api'},
 }
+
+# 浏览器侧阶段顺序(模块级常量: runner 的"纯 Cookie 模式"降级路径会直接引用)
+# urlrewards = P4 新增 urlreward 族 (API 下发 type=urlreward 的 promo, DOM 无锚点), 无任务时秒级跳过
+BROWSER_ALWAYS = ['dailyset', 'quests', 'explore', 'moreactivities', 'visual', 'search', 'urlrewards', 'claim']
 
 # 别名映射(兼容输入拼写与历史名称)
 ALIAS_MAP = {
@@ -55,6 +60,8 @@ ALIAS_MAP = {
     'pointclaim': 'claim',
     'claimpoints': 'claim',
     'perk': 'perks',
+    'urlrewards': 'urlrewards',
+    'urlreward': 'urlrewards',
     'perks': 'perks',
     'activate': 'perks',
     'promotion': 'perks',
@@ -114,13 +121,28 @@ def plan(probe_result, force_phases=None):
     # 浏览器侧阶段: 默认按顺序尝试, 由 executor 在浏览器里按当天实际卡片执行
     # 注意：visual 属于轻量级打卡任务(30秒)，必须优先于耗时1-2小时的 search 执行，
     # 避免在连续执行几十次搜索后因会话疲劳、内存堆积或必应瞬态频控导致识图提交被阻断。
-    BROWSER_ALWAYS = ['dailyset', 'quests', 'explore', 'moreactivities', 'visual', 'search', 'claim']
 
     want_phases = [
         {'phase': 'appcheckin', 'needs': 'api'},          # type103 签到总是有效
         {'phase': 'appread', 'needs': 'api'},             # 移动端10篇阅读(+30分)默认纳入
         {'phase': 'edge30m', 'needs': 'api'},             # Edge 30分钟打卡心跳 (内置自动资格激活与飞跃检测，无资格/已完成则秒级跳过)
     ]
+    # urlrewards (P4 新增族: /dapi/me 下发 type=urlreward 且带 destination 的 promo)
+    # 2026-11-11 近 3 天 15 次全为"无任务(跳过)"、一次真任务都没遇到 -> 按快照预筛,
+    # 快照里没有待做的 urlreward 就不再排这个阶段(通知里也不会多那一行, 每轮省一次 /dapi/me)。
+    urlreward_todo = False
+    for _p in (probe_result.get('promotions') or []):
+        _a = _p.get('attributes') or {}
+        if str(_a.get('type') or '').lower() != 'urlreward':
+            continue
+        if str(_a.get('complete', '')).lower() == 'true':
+            continue
+        if _p.get('destination') or _a.get('destination_url') or _a.get('destination'):
+            urlreward_todo = True
+            break
+
     for ph in BROWSER_ALWAYS:
+        if ph == 'urlrewards' and not urlreward_todo:
+            continue
         want_phases.append({'phase': ph, 'needs': 'browser'})
     return want_phases

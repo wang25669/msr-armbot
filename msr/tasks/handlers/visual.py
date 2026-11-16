@@ -9,15 +9,15 @@
 """
 import json
 import random
+
+from msr.tasks import streaks
 import time
 import urllib.request
 
 from msr.browser import ev, navigate, StepError, human_click
 
 EARN = 'https://rewards.bing.com/earn'
-DASH = 'https://rewards.bing.com/'
 HOME = 'https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES'
-ICON = 'img[src*="/search_visual.svg"]'
 
 # 现代 Rewards 页面视觉搜索卡片状态提取
 STATUS_CARD_JS = '''(() => {
@@ -61,28 +61,6 @@ STATUS_CARD_JS = '''(() => {
   }
 
   return {progress: 0, max: 1, complete: false, found: true, unactivated: false, source: 'card_default', text: text};
-})()'''
-
-PANEL_JS = '''(() => {
-  const els = [...document.querySelectorAll('*')];
-  for (const el of els) {
-    let own = "";
-    for (const n of el.childNodes) { if (n.nodeType === 3) own += n.textContent; }
-    own = own.replace(/\\s+/g, " ").trim();
-    const m = own.match(/^(?:活动|Activities|Activity|Tasks|Task):\\s*(\\d+)\\/(\\d+)$/i);
-    if (!m) continue;
-    let box = el.parentElement, hops = 0;
-    while (box && hops < 8) {
-      const ctx = (box.textContent || "").replace(/\\s+/g, " ");
-      if (/视觉搜索|visual\\s*search/i.test(ctx)) {
-        return {progress: Number(m[1]), max: Number(m[2]),
-                complete: Number(m[1]) >= Number(m[2]) && Number(m[2]) > 0,
-                found: true, unactivated: false, source: 'panel'};
-      }
-      box = box.parentElement; hops++;
-    }
-  }
-  return null;
 })()'''
 
 LENS_PICK = '''(() => {
@@ -172,17 +150,33 @@ LAND = '''(() => {
 })()'''
 
 
-def wait_js(cdp, expr, seconds=30):
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        try:
-            v = ev(cdp, expr)
-            if v:
-                return v
-        except StepError:
-            pass
-        time.sleep(0.5)
-    raise StepError('等待超时(%ss): %s' % (seconds, expr[:50]))
+def read_status_http(name, proxy=None, log=None):
+    """HTTP 版状态: 命中返回与 read_status 同构的 dict, 读不到/缺对象返回 None(交给 DOM 判)。
+
+    2026-11-13 修正: payload 里没有 visualsearch **不再**等于"账号未下发"。
+    该 RSC 片段不稳定 —— 某新号2 20:47 读到 dailyset+visualsearch 双双缺失, 事后连读 10 次全有;
+    某US号 同一轮 12 分钟内 dailyset 由有变无。缺对象现在只作诊断, 一律回退 DOM 由页面说话,
+    页面没有 vsstreak 入口时自然报"未下发"(旧版本的判定路径, 从没出过这类漏做)。
+    """
+    diag = {}
+    st = streaks.fetch_streaks(name, proxy=proxy, stats=diag)
+    if st is None:
+        if log:
+            log('[视觉诊断] /earn 读取失败(status=%s) -> 改走 DOM' % diag.get('status'))
+        return None
+    v = st.get('visualsearch')
+    if not v:
+        if log:
+            log('[视觉诊断] payload 无 visualsearch(partner=[%s], %d 字节) '
+                '-> 不据此判未下发, 改走 DOM' % (','.join(diag.get('partners') or []) or '无',
+                                              diag.get('bytes') or 0))
+        return None
+    return {'progress': v.get('completed') or 0, 'max': v.get('total') or 0,
+            'complete': bool(v.get('complete')), 'found': True,
+            'unactivated': v.get('enabled') is False,
+            'source': 'rsc', 'detail': v}
+
+
 
 
 def read_status(cdp, refresh=True):
@@ -191,7 +185,10 @@ def read_status(cdp, refresh=True):
         navigate(cdp, EARN)
         time.sleep(random.uniform(3.0, 5.0))
 
-    # 先查 earn 页面卡片
+    # 只读一次 /earn 的卡片(单层)。
+    # 2026-11-11: 删掉原 PANEL_JS 全页 querySelectorAll('*') 扫描与 dashboard 换页重试 ——
+    # 权威状态已改由 streaks.fetch_streaks() 从 RSC payload 一次读回, 这里只是它读不到时的兜底,
+    # 10 天日志里 PANEL_JS / dashboard 兜底一次都没救回过来(67 次全是 card_ratio)。
     for _ in range(2):
         try:
             st = ev(cdp, STATUS_CARD_JS)
@@ -200,25 +197,6 @@ def read_status(cdp, refresh=True):
         except Exception:
             pass
         time.sleep(1.0)
-
-    # 尝试 panel 结构
-    try:
-        st_p = ev(cdp, PANEL_JS)
-        if st_p and st_p.get('found'):
-            return st_p
-    except Exception:
-        pass
-
-    # 兜底访问 DASH
-    if refresh:
-        try:
-            navigate(cdp, DASH)
-            time.sleep(random.uniform(3.0, 4.5))
-            st = ev(cdp, STATUS_CARD_JS) or ev(cdp, PANEL_JS)
-            if st and st.get('found'):
-                return st
-        except Exception:
-            pass
 
     return {'progress': 0, 'max': 1, 'complete': False, 'found': False, 'source': 'unavailable'}
 
@@ -477,88 +455,118 @@ def submit_image(cdp, image, entry, log=print, ch=None):
     if not landed:
         raise StepError('视觉提交完成但落页未确认(LAND超时)')
 
-    dwell = random.uniform(18.0, 25.0)
+    base = 18.0
+    try:
+        from msr import settings as _S
+        base = float(_S.get('visual.landing_wait_seconds', 18) or 18)
+    except Exception:
+        pass
+    dwell = base + random.uniform(0.0, 7.0)
+    # 2026-11-13: 落页 URL 与登录态必须留证 —— 某SG号 当天 9 轮全部 progress=0,
+    # 事后无法判定"落页是不是真视觉搜索页"、"会话是否已登录", 只能靠再跑一次观察。
+    try:
+        _u = ev(cdp, '(() => location.href)()')
+        _li = ev(cdp, r"(() => !!document.querySelector('#id_l, #id_n, a#id_s, [aria-label*=\"Account\" i]'))()")
+        log('视觉落页 URL: %s | 页面登录态元素=%s' % (str(_u)[:160], _li))
+    except Exception as _ex:
+        log('视觉落页留证失败(忽略): %s' % str(_ex)[:50])
     log('视觉搜索已成功落页，在结果页停留 %.1f 秒归因...' % dwell)
     time.sleep(dwell)
     return 'success'
 
 
-def image_pool(n=8):
-    """Bing 每日壁纸直链池。优先聚合多地区最新高清壁纸。"""
-    mkts = ['en-US', 'zh-CN']
-    out = []
-    for mkt in mkts:
+def today_wallpaper():
+    """当日 Bing 壁纸直链(单张)。
+
+    2026-10-xx 口径: 视觉搜索用**当天壁纸**即可稳定落页归因, 不需要 8 张的"图片池"轮换 ——
+    多地区抓取 + used 记录只是增加请求和状态文件, 没有换来成功率。这里退化成取 idx=0 一张。
+    """
+    for mkt in ('en-US', 'zh-CN'):
         try:
-            url = 'https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=%d&mkt=%s' % (n, mkt)
+            url = ('https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=%s' % mkt)
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=15) as r:
                 d = json.loads(r.read().decode() or '{}')
-            for img in d.get('images', []):
-                u = img.get('url') or img.get('urlbase') or ''
-                if u.startswith('/'):
-                    u = 'https://www.bing.com' + u
-                if u and u not in out:
-                    out.append(u)
+            imgs = d.get('images') or []
+            if not imgs:
+                continue
+            u = imgs[0].get('url') or imgs[0].get('urlbase') or ''
+            if u.startswith('/'):
+                u = 'https://www.bing.com' + u
+            if u:
+                return u
         except Exception:
-            pass
-    return out
+            continue
+    return None
 
 
-def _load_used(path):
-    try:
-        with open(path, encoding='utf-8') as f:
-            return json.load(f).get('used', [])
-    except Exception:
-        return []
-
-
-def _mark_used(path, url):
-    if not path:
-        return
-    used = _load_used(path)
-    if url not in used:
-        used.append(url)
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump({'used': used[-40:]}, f, ensure_ascii=False, indent=1)
-    except Exception:
-        pass
-
-
-def run(name, cdp, pr, log=print, used_path=None, max_attempts=3, ch=None):
+def run(name, cdp, pr, log=print, used_path=None, max_attempts=None, ch=None):
     """视觉搜索任务执行。优先激活连续打卡，识图落页归因。"""
-    st = read_status(cdp)
-    log('视觉状态: %s' % st)
+    # P1: 尝试轮数来自 visual.submit_rounds
+    if max_attempts is None:
+        try:
+            from msr import settings as _S
+            max_attempts = int(_S.get('visual.submit_rounds', 3) or 3)
+        except Exception:
+            max_attempts = 3
+    max_attempts = max(1, int(max_attempts))
+
+    # 优先走 HTTP(RSC payload) 判定 —— 与 Edge 30 分钟同样的思路: 状态从服务端数据拿,
+    # 不靠 DOM 扫描。命中时这一步只要 1~2 秒, 且账号已做完/未下发的连浏览器都不用操作。
+    try:
+        from msr import config as _cfg
+        _acc = _cfg.get_account(name) or {}
+        _proxy = _acc.get('proxy')
+        if _proxy and '://' not in _proxy:
+            _proxy = 'http://' + _proxy
+    except Exception:
+        _proxy = None
+    st = read_status_http(name, proxy=_proxy, log=log)
+    src = 'HTTP'
+    if st is None:
+        st = read_status(cdp)          # payload 读不到/缺对象 -> 回退 DOM(页面说话)
+        src = 'DOM'
+    log('视觉状态(%s): %s' % (src, st))
     if not st.get('found'):
-        return '本账号未参与视觉打卡(跳过)'
-    if st.get('complete'):
+        # 2026-11-11: 区分"账号没下发视觉打卡"与"卡片定位失败"——两者都跳过, 但根因不同,
+        # 旧写法一律报"未参与", 会把选择器失效伪装成账号没任务。
+        # 2026-11-13: 这里只可能是 DOM 判定(src=HTTP 时 payload 缺对象已回退 DOM), 单一真值源。
+        try:
+            has_text = ev(cdp, r"(() => /视觉搜索|visual\s*search|vsstreak/i.test(document.body.innerText || ''))()")
+        except Exception:
+            has_text = None
+        if has_text:
+            log('视觉: 页面存在视觉搜索文案但卡片未定位 (选择器待复查, 不用"未参与"掩盖)')
+            return '视觉卡定位失败(跳过)'
+        return '本账号未下发视觉打卡(跳过)'
+    # complete 与 today_done 两个字段一致才认"今日已完成"; 单看 complete 可能与窗口口径混淆
+    if st.get('complete') and st.get('today_done') is not False:
         return '今日视觉已完成, 跳过'
 
     # 仅当处于未激活状态时，在 earn 页面展开抽屉并激活打卡；已激活账号直达打卡入口，避免多余开关标签页
     if st.get('unactivated'):
         entry = get_entry_and_activate(cdp, ch=ch, log=log)
     else:
-        entry = 'https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES'
+        entry = ((st.get('detail') or {}).get('entry')
+                 or 'https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES')
     log('视觉任务入口就绪: %s' % entry[:70])
 
-    pool = image_pool(8)
-    if not pool:
+    img = today_wallpaper()
+    if not img:
         return '取图失败, 跳过'
-    used = _load_used(used_path) if used_path else []
-    fresh = [u for u in pool if u not in used]
-    cand = fresh or pool
+    log('视觉提交图: %s' % img[-60:])
 
     for i in range(max_attempts):
-        img = cand[i % len(cand)]
         try:
             submit_image(cdp, img, entry, log=log, ch=ch)
-            _mark_used(used_path, img)
 
             # 回读状态确认 (多次回读以吸收网络端延迟与服务端统计延迟)
             st2 = None
             for r_read in range(3):
                 time.sleep(random.uniform(3.0, 5.0))
-                st2 = read_status(cdp)
+                st2 = read_status_http(name, proxy=_proxy, log=log)     # 先 HTTP, 秒级
+                if st2 is None:
+                    st2 = read_status(cdp)                      # 兜底才动 DOM
                 if st2 and st2.get('complete'):
                     break
             log('视觉第%d轮提交后回读: %s' % (i + 1, st2))
@@ -572,7 +580,6 @@ def run(name, cdp, pr, log=print, used_path=None, max_attempts=3, ch=None):
                 continue
         except Exception as ex:
             log('视觉第%d轮失败: %s' % (i + 1, str(ex)[:90]))
-            _mark_used(used_path, img)
             if i < max_attempts - 1:
                 time.sleep(random.uniform(15.0, 25.0))
 

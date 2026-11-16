@@ -458,6 +458,7 @@ def password_login(name, username, password, proxy=None, log_cb=None, save_crede
     由调用方通知用户去控制台「手动登录」完成；不会卡死等待。
     """
     from msr import fingerprint as fp_mod
+    from msr import config  # P0 修复: 本函数直接用了模块级 config, 而 auth.py 顶层没有 import (密码重登分支曾必 NameError)
     log = log_cb or (lambda m: config.log(name, m))
     own = ch is None or cdp is None
     if own:

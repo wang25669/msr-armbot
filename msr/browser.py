@@ -297,7 +297,32 @@ def ev(cdp, expr, timeout=WS_TIMEOUT):
     return (r.get('result') or {}).get('value')
 
 
+# ---------- 埋点: 整轮 navigate 次数 (P6 验收指标① 整轮 <= 3 次) ----------
+_NAV = {'count': 0, 'urls': []}
+
+
+def nav_reset():
+    _NAV['count'] = 0
+    _NAV['urls'] = []
+
+
+def nav_count():
+    return _NAV['count']
+
+
+def nav_stats():
+    return {'count': _NAV['count'], 'urls': list(_NAV['urls'])}
+
+
 def navigate(cdp, url):
+    # 埋点: 每次整页跳转记一笔(runner 每轮开头 nav_reset, 每阶段结束打增量)
+    try:
+        _NAV['count'] += 1
+        _NAV['urls'].append(str(url)[:120])
+        if len(_NAV['urls']) > 40:
+            del _NAV['urls'][:10]
+    except Exception:
+        pass
     cdp.call('Page.navigate', {'url': url})
     time.sleep(2)
     # 放宽页面加载完成等待时间 (从 20s 延长至 30s，适应高延迟代理)
@@ -429,16 +454,6 @@ def disguise_edge(cdp, version='141', log=print):
         log(f'默认语言头容忍: {ex}')
 
 
-def verify_disguise(cdp):
-    """自检: 高熵 fullVersionList 必须是 Edge 且 platform 为 Win32。"""
-    v = ev(cdp, '(async()=>{try{'
-                'if(!navigator.userAgentData) return "NO-UAD";'
-                'const h = await navigator.userAgentData'
-                '.getHighEntropyValues(["fullVersionList"]);'
-                'return JSON.stringify({ver: h.fullVersionList, plat: navigator.platform, wd: navigator.webdriver})'
-                '}catch(e){return "ERR:"+e}})()')
-    return 'Microsoft Edge' in (v or '') and 'Win32' in (v or '')
-
 
 # ---------- chromium 生命周期 ----------
 
@@ -500,14 +515,6 @@ def mouse_click(cdp, x, y):
     except Exception:
         pass
 
-
-def capture_screenshot(cdp, quality=60):
-    """截取当前页面快照, 返回 base64 字符串。"""
-    try:
-        res = cdp.call('Page.captureScreenshot', {'format': 'jpeg', 'quality': quality})
-        return res.get('data', '')
-    except Exception:
-        return ''
 
 
 def human_click(cdp, find_js, label='', close_new=False, timeout=8.0):
@@ -633,7 +640,24 @@ class Chromium:
         args = [
             self.binary,
             f'--remote-debugging-port={self.port}',
-            f'--user-data-dir={self.user_data_dir}',
+        ]
+        # P2: 没有 user-data-dir 时绝不拼空值 (否则 Chromium 会在 cwd 下建一个名为 None 的 profile)
+        if self.user_data_dir:
+            args.append(f'--user-data-dir={self.user_data_dir}')
+        else:
+            self.log('!! 未指定 user-data-dir: 使用 Chromium 默认 profile (隔离性丢失, 请检查调用方)')
+        # P2: HTTP/媒体缓存写 tmpfs (不落盘、不碰 Cookies/Local Storage), 只影响资源缓存
+        cache_tag = os.path.basename(str(self.user_data_dir).rstrip('/')) if self.user_data_dir else 'default'
+        if self.user_data_dir:
+            # 同一账号族共用 basename (都叫 chrome), 加 profile 路径短哈希, 避免两个账号共用同一缓存目录
+            import hashlib
+            cache_tag = '%s-%s' % (cache_tag, hashlib.md5(str(self.user_data_dir).encode()).hexdigest()[:8])
+        cache_dir = f'/dev/shm/msr-cache-{cache_tag}'
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except Exception:
+            cache_dir = None
+        args.extend([
             '--no-sandbox',
             '--disable-gpu',
             '--disable-dev-shm-usage',             # 避免 Docker/ARM /dev/shm 64MB 崩溃
@@ -644,12 +668,17 @@ class Chromium:
             '--disable-blink-features=AutomationControlled',
             '--disable-extensions',
             '--disable-component-update',
-            '--disable-features=WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationPermitEnterpriseAttestation',
+            '--disable-features=WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationPermitEnterpriseAttestation,'
+            'OptimizationHints,OptimizationGuideModelDownloading,OptimizationGuideOnDeviceModel',
             '--disk-cache-size=33554432',          # 限制磁盘缓存为 32MB，保护 ARM 存储介质
             '--media-cache-size=16777216',         # 限制媒体缓存为 16MB
             '--js-flags=--max-old-space-size=256', # 限制 V8 堆内存为 256MB，防止 ARM OOM 崩溃
             f'--window-size={w},{h}'
-        ]
+        ])
+        if cache_dir:
+            args.append(f'--disk-cache-dir={cache_dir}')
+            args.append(f'--media-cache-dir={cache_dir}')
+            self.log(f'HTTP/媒体缓存已改用 tmpfs: {cache_dir}')
         if self.headless:
             args.append('--headless=new')
         if self.disable_webrtc_leak:
@@ -794,6 +823,16 @@ class Chromium:
                         os.unlink(f)
                     except Exception:
                         pass
+            # 4. P2 磁盘治理: 只删 optimization_guide_model_store (已用启动参数禁用重建);
+            #    Cache / Code Cache 一律不动 (删了影响加载速度, 低配机有假死风险)
+            og_dir = os.path.join(self.user_data_dir, 'optimization_guide_model_store')
+            if os.path.isdir(og_dir):
+                import shutil
+                try:
+                    shutil.rmtree(og_dir, ignore_errors=True)
+                    self.log('已清理 optimization_guide_model_store (磁盘治理)')
+                except Exception:
+                    pass
 
     kill = stop
     close = stop

@@ -25,6 +25,11 @@ class AuthError(Exception):
     pass
 
 
+class NetworkAuthError(AuthError):
+    """网络层失败 (代理不通/超时/DNS), 不是凭据失效 —— 不许据此判 token 死掉 (2026-10-29 教训)。"""
+    pass
+
+
 def _log(name, msg):
     from msr import config
     config.log(name, msg)
@@ -135,6 +140,7 @@ def refresh_access(name, profile_path, rg=None, retries=3, proxy=None):
     body = {'grant_type': 'refresh_token', 'client_id': CLIENT_ID,
             'refresh_token': t['refresh_token'], 'scope': SCOPE, 'redirect_uri': REDIRECT}
     last = None
+    denied = False
     for i in range(retries):
         try:
             d = _token_post(name, body, proxy=proxy)
@@ -144,6 +150,8 @@ def refresh_access(name, profile_path, rg=None, retries=3, proxy=None):
         except urllib.error.HTTPError as ex:
             detail = ex.read().decode()[:120]
             last = ex
+            if ex.code in (400, 401):
+                denied = True
             _log(name, 'refresh 第%d次失败: %s %s' % (i + 1, ex.code, detail))
         except Exception as ex:
             last = ex
@@ -157,5 +165,8 @@ def refresh_access(name, profile_path, rg=None, retries=3, proxy=None):
             return t['access_token']
         except Exception:
             pass
-    raise AuthError('refresh 失败(已重试%d次): %s' % (retries, str(last)[:120]))
+    # 区分"网络失败"与"凭据失效": 只要出现过 HTTP 400/401 就按凭据失效上报, 否则按网络问题上报
+    if denied or (isinstance(last, urllib.error.HTTPError) and last.code in (400, 401)):
+        raise AuthError('refresh 被拒(凭据失效): %s' % str(last)[:120])
+    raise NetworkAuthError('refresh 网络失败(非凭据问题): %s' % str(last)[:120])
 

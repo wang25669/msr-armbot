@@ -1,5 +1,6 @@
 """阶段执行器。API 侧(签到/阅读/Edge打卡)与浏览器侧(搜索/每日活动/打卡任务/日常活动/视觉打卡)。"""
 import json
+import os
 import random
 import secrets
 import time
@@ -7,6 +8,15 @@ import uuid
 
 from msr import browser, fingerprint
 from msr.browser import navigate
+
+
+
+# ---------------- 固定常量 (2026-11-11 从控制台参数固化, 用户要求不再可调) ----------------
+READ_ARTICLES_TARGET = 10        # App 资讯阅读每日目标篇数 (mobile.read_article_count 原默认 10)
+EDGE30M_REPORTS = 6              # Edge 30 分钟打卡上报次数 (每次约 5 分钟)
+ACTIVATE_TIMEOUT_SECONDS = 30    # 激活后回读 *_flight 的上限秒数 (实测 6 秒生效; 30 秒 = 5 倍余量)
+ACTIVATE_MAX_POLLS = 3           # 激活后最多轮询次数 (每次间隔 act_timeout//3 = 10s)
+URL_OPEN_ROUTE = 'new'           # explore/moreactivities 默认走 url_open handler; legacy 仅由阶段10回补显式传入
 
 
 def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None):
@@ -28,10 +38,9 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
     if phase in ('appread', 'read'):
         from msr import settings
         st = settings.load_settings()
-        fast_mode = bool(st.get('schedule', {}).get('fast_mode'))
-        target_count = int(st.get('mobile', {}).get('read_article_count', 10))
-        w_min = 2 if fast_mode else int(st.get('mobile', {}).get('read_interval_min', 60))
-        w_max = 5 if fast_mode else int(st.get('mobile', {}).get('read_interval_max', 120))
+        target_count = READ_ARTICLES_TARGET
+        w_min = int(st.get('mobile', {}).get('read_interval_min', 60))
+        w_max = int(st.get('mobile', {}).get('read_interval_max', 120))
 
         total, done = 0, 0
         for i in range(target_count):
@@ -59,11 +68,17 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
 
 
     if phase in ('edge30m', 'edge_api', 'edge'):
+        # 2026-11-11 口径: Edge 打卡**照常发心跳** —— 激活后每天都有, 项目每天只跑一次,
+        # 所以正常情况下每天必定要跑一轮。payload 只在两处用:
+        #   ① 判"有没有下发"(厂商不下发就别白跑);
+        #   ② 心跳发完判"分数拿到没有"。
+        # 不拿 payload 的 30/30 去跳过心跳: 那是服务端计数, 心跳才是把当天计分打进去的动作。
         promos = api.get_me(name, token, rg, proxy=proxy)
         flight = api.find_promo(promos, 'edge_browsing_streak_flight')
         elig = api.find_promo(promos, 'edge_browsing_streak_eligible')
 
         # 1. 若尚未获取打卡任务 flight，通过 HTTP API 信令向服务端发送资格激活请求 (零进程开销、无 Chromium 锁冲突)
+        act_timeout = ACTIVATE_TIMEOUT_SECONDS
         if flight is None:
             offer_id = (elig.get('offerid') if elig else None) or 'edge_flight_1_ww_treatment'
             report_type = int(elig.get('report_offer_type', 714)) if elig else 714
@@ -72,26 +87,62 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
                 api.api(name, 'POST', '/me/activities', token, eh,
                         {'amount': 1, 'attributes': {'offerid': offer_id},
                          'request_user_info': True, 'type': report_type}, proxy=proxy)
-                time.sleep(4)
-                promos = api.get_me(name, token, rg, proxy=proxy)
-                flight = api.find_promo(promos, 'edge_browsing_streak_flight')
-                if flight:
-                    config.log(name, 'Edge 30分钟打卡激活信令已生效，成功获取打卡任务 (DailyCheckIn_Edge)！')
+                # 激活后按 ACTIVATE_TIMEOUT_SECONDS 轮询回读 *_flight (硬判据, 出现即停)
+                # 2026-11-11: 轮询加次数上限 —— 若 time.sleep 被外部替换为 no-op(单测/故障注入),
+                # 纯 time.time() 的 deadline 会退化成紧忙等, 60 秒能跑上百万轮。
+                deadline = time.time() + max(4, act_timeout)
+                max_polls = ACTIVATE_MAX_POLLS
+                polls = 0
+                while time.time() < deadline and polls < max_polls:
+                    polls += 1
+                    time.sleep(max(1, act_timeout // ACTIVATE_MAX_POLLS))
+                    promos = api.get_me(name, token, rg, proxy=proxy)
+                    flight = api.find_promo(promos, 'edge_browsing_streak_flight')
+                    if flight:
+                        config.log(name, 'Edge 30分钟打卡激活信令已生效，成功获取打卡任务 (DailyCheckIn_Edge)！')
+                        break
+                if not flight:
+                    config.log(name, '激活信令 %ds 内未见 edge_browsing_streak_flight (activation 判定失败)' % act_timeout)
             except Exception as ex_act:
                 config.log(name, f'Edge 30分钟打卡激活信令发送异常: {ex_act}')
 
         # 2. 若激活后仍未下发 flight，记录状态交由后续浏览器阶段交互或联动补跑
         if flight is None:
-            config.log(name, '本账号在 API 侧未下发 Edge 浏览打卡任务 (flight 为空，如页面有卡片交由主浏览器页面激活后联动补跑)')
+            _note = ''
+            try:
+                from msr.tasks import streaks as _stk
+                _all = _stk.fetch_streaks(name, proxy=proxy)
+                _e = (_all or {}).get('edge')
+                _note = ('；payload 显示 edge=%s/%s 分钟' % (_e.get('completed'), _e.get('total'))
+                         if _e else '；payload 也无 edge 对象')
+            except Exception:
+                pass
+            config.log(name, '本账号在 API 侧未下发 Edge 浏览打卡任务 (flight 为空，如页面有卡片交由主浏览器页面激活后联动补跑)%s' % _note)
             return '未下发Edge任务(跳过)'
+
+        # 防重复: 按**奖励日(美西日期)**去重 —— 同一奖励日内已上报过 Edge 心跳就跳过。
+        # 正常每天一轮(相隔约 24h, 跨越美西 0 点)不会命中; 手动重跑/误触发会命中,
+        # 避免同一天对服务端重复报"30 分钟"(2026-11-11 曾因误跑过一轮)。
+        try:
+            from msr.tasks import streaks as _skr
+            _today = _skr.reward_day()
+            _rec = config.load_json(config.pfile(name, 'state.json'), {}) or {}
+            _last_day = _rec.get('edge_last_report_day')
+            if _last_day and _today and _last_day == _today:
+                config.log(name, 'Edge 心跳本奖励日(%s)已上报过, 跳过(防重复上报)' % _today)
+                return 'Edge跳过(%s 已上报)' % _today
+        except Exception as _ex:
+            config.log(name, 'Edge 重复上报检查异常(忽略): %s' % str(_ex)[:60])
 
         if str(flight.get('complete', '')).lower() == 'true':
             return '已完成'
         from msr import settings
         st_edge = settings.load_settings()
-        fast_mode = bool(st_edge.get('schedule', {}).get('fast_mode', False))
-        edge_reports = int(st_edge.get('mobile', {}).get('edge30m_reports', 6))
-        interval = 10 if fast_mode else int(st_edge.get('mobile', {}).get('edge30m_interval', 305))
+        # 2026-11-11 修复: 19591b4 删 fast_mode 时误删了这两行初始化(use-before-assign, NameError 只在真发心跳时炸)。
+        edge_reports = EDGE30M_REPORTS
+        interval = int(st_edge.get('mobile', {}).get('edge30m_interval', 305))
+        # 2026-11-11: fast_mode 已从整个项目删除 —— 上报间隔只认 settings.edge30m_interval,
+        # 任何压缩路径都不再存在(历史事故: 6 次心跳压进 65 秒 = 1 分钟上报"30 分钟")。
         for i in range(edge_reports):
             aid = None
             for attempt_no in range(3):
@@ -106,10 +157,10 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
                     break
                 config.log(name, 'report%d 第%d次响应缺activity, 30s后重发'
                            % (i + 1, attempt_no + 1))
-                time.sleep(5 if fast_mode else 30)
+                time.sleep(30)
             config.log(name, 'report%d act=%s 已上报' % (i + 1, (aid or '?')[:8]))
             if i < edge_reports - 1:
-                read_wait = min(5 if fast_mode else 180, interval // 2)
+                read_wait = min(180, interval // 2)
                 time.sleep(read_wait)
                 st = api.find_promo(api.get_me(name, token, rg, proxy=proxy),
                                     'edge_browsing_streak_flight') or {}
@@ -118,15 +169,42 @@ def run_api_phase(name, phase, token, pr, profile_path, config, api, proxy=None)
                 if str(st.get('complete')).lower() == 'true':
                     return '完成(%d次)' % (i + 1)
                 time.sleep(max(0, interval - read_wait))
-        time.sleep(5 if fast_mode else 600)
+        time.sleep(600)
         resp = api.get_me(name, token, rg, proxy=proxy)
         st = api.find_promo(resp, 'edge_browsing_streak_flight') or {}
         bal = resp.get('balance')
         config.log(name, '最终回读: progress=%s/%s complete=%s 余额=%s'
                    % (st.get('progress'), st.get('max'), st.get('complete'), bal))
-        if str(st.get('complete')).lower() == 'true':
-            return 'Edge完成(%d次), 余额=%s' % (edge_reports, bal)
-        return ('Edge上报%d次, progress=%s/%s complete=%s 余额=%s(计分可能延迟)'
+        # 复核只用 API 的 attributes（progress/max/complete）—— 这是服务端自己的记账，唯一真值源。
+        # 2026-11-12: 原实现在心跳后还读 /earn payload 的 partner=edge 做二次复核，问题有两处：
+        #   ① 同一事实两套真值源（payload 的 30/30 与 API 的 complete 等价），多一次 GET 就多一条失败路径；
+        #   ② fetch_streaks 失败返回 None，调用处把 None 说成"payload无edge对象"——
+        #      某新号2 当晚正是 payload 读取瞬断，实际该账号 30/30 今日已完成，结果串却报"无对象"。
+        # 故 payload 复核已删，改为仅在 API 仍未 complete 时才读一次做归因诊断，读不到只记"未取到"。
+        _api_ok = str(st.get('complete')).lower() == 'true'
+        if not _api_ok:
+            try:
+                from msr.tasks import streaks as _stk
+                _e = (_stk.fetch_streaks(name, proxy=proxy) or {}).get('edge')
+                if _e:
+                    config.log(name, '[归因诊断] payload 分钟进度 %s/%s, 今日完成=%s'
+                               % (_e.get('completed'), _e.get('total'), _e.get('today_done')))
+                else:
+                    config.log(name, '[归因诊断] payload 未取到 edge 对象'
+                                     '(可能是读取失败, 不代表账号没下发该任务)')
+            except Exception as ex:
+                config.log(name, '[归因诊断] payload 读取失败(忽略): %s' % str(ex)[:60])
+        try:
+            from msr.tasks import streaks as _skr2
+            _rec2 = config.load_json(config.pfile(name, 'state.json'), {}) or {}
+            _rec2['edge_last_report_day'] = _skr2.reward_day()
+            config.save_json(config.pfile(name, 'state.json'), _rec2)
+        except Exception:
+            pass
+        if _api_ok:
+            return 'Edge完成(%d次, API progress=%s/%s complete=True), 余额=%s' % (
+                edge_reports, st.get('progress'), st.get('max'), bal)
+        return ('Edge上报%d次, API progress=%s/%s complete=%s, 余额=%s(计分可能延迟)'
                 % (edge_reports, st.get('progress'), st.get('max'), st.get('complete'), bal))
 
     return '未知API阶段'
@@ -156,37 +234,65 @@ def browser_cfg(config):
     }
 
 
-def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger, token=None, proxy=None):
+def execute_single_browser_phase(phase, name, cdp, pr, ch, bc, config, logger, token=None, proxy=None,
+                                 route_override=None):
     """在现有 CDP 会话中分发具体浏览器任务。"""
     from msr import tasks_browser as tb
+    # route_override: 阶段10回补时强制走老路径(新 handler 失败后的安全网), 不改全局配置
+    url_open_route = route_override or URL_OPEN_ROUTE
     p = phase.lower()
     if p in ('dailyset', 'quick'):
+        # 2026-11-13: 删掉原来的"payload 一步判定"预判。它曾用一次 /earn 读取的
+        # partner=dailyset 决定跳过, 但该 payload 片段不稳定(某US号 一轮内 23:36 有、23:48 无;
+        # 某新号2 20:47 dailyset+visualsearch 同时缺), 结果 某US号/某新号2 当天 0/3 漏做。
+        # dailyset 只有 3 张卡、几分钟成本, 一律进浏览器由页面卡片状态判定; 页面确认已完成会直接跳过。
         return tb.phase_dailyset(name, cdp, pr, ch=ch,
                                  budget_seconds=bc['cards_budget_min'] * 60,
-                                 log=logger)
+                                 log=logger, proxy=proxy)
     if p in ('quests', 'quest', 'punchcard'):
         return tb.phase_quests(name, cdp, pr, ch=ch,
                                budget_seconds=bc['cards_budget_min'] * 60,
-                               log=logger)
+                               log=logger, proxy=proxy)
     if p in ('explore', 'exploreonbing'):
+        if url_open_route == 'new':
+            from msr.tasks.handlers import url_open
+            logger('[P4] url_open 路由=new -> url_open.run_explore')
+            return url_open.run_explore(name, cdp, pr, ch=ch, log=logger)
         return tb.phase_explore(name, cdp, pr, ch=ch, log=logger)
     if p in ('moreactivities', 'earn', 'more'):
+        if url_open_route == 'new':
+            from msr.tasks.handlers import url_open
+            logger('[P4] url_open 路由=new -> url_open.run_moreactivities')
+            return url_open.run_moreactivities(name, cdp, pr, ch=ch,
+                                              budget_seconds=bc['cards_budget_min'] * 60,
+                                              log=logger)
         return tb.phase_moreactivities(name, cdp, pr, ch=ch,
                                       budget_seconds=bc['cards_budget_min'] * 60,
                                       log=logger)
+    if p in ('urlrewards', 'urlreward'):
+        from msr.tasks.handlers import url_open
+        from msr import api as _api
+        return url_open.run_urlrewards(name, cdp, pr, ch=ch, log=logger, token=token,
+                                       api=_api, config=config, proxy=proxy)
     if p in ('search', 'pcsearch'):
         return tb.phase_search(name, cdp, pr, ch=ch,
                                budget_seconds=bc['search_budget_min'] * 60,
                                log=logger, token=token, proxy=proxy)
     if p in ('visual', 'visualsearch'):
-        from msr import tasks_visual
+        # P6: 视觉搜索并入 handlers (原 msr/tasks_visual.py)
+        from msr.tasks.handlers import visual as tasks_visual
         return tasks_visual.run(name, cdp, pr, log=logger, ch=ch,
-                                used_path=config.pfile(name, 'visual_used.json'))
+                                used_path=None)
     if p in ('claim', 'pointclaim', 'claimpoints'):
         return tb.phase_claim(name, cdp, pr, ch=ch, log=logger)
     if p in ('perks', 'perk', 'activate', 'promotions', 'promotion'):
         return tb.phase_perks(name, cdp, pr, ch=ch, log=logger)
     return '未知浏览器阶段 %s' % phase
+
+
+def stage_wait_seconds():
+    """阶段之间的过渡等待: 固定随机 30~60 秒(2026-11-11 起不再走控制台参数)。"""
+    return random.uniform(30.0, 60.0)
 
 
 class BrowserSession:
@@ -377,8 +483,13 @@ class BrowserSession:
             self.logger(f'Cookie 回写异常(容忍): {ex}')
             return False
 
-    def run_phases(self, phases, is_retry=False):
+    def run_phases(self, phases, is_retry=False, route_override=None):
         results = {}
+        try:
+            from msr import browser as _br0
+            self._nav_seen = _br0.nav_count()
+        except Exception:
+            self._nav_seen = 0
         if not is_retry and self.newly_activated:
             results['_newly_activated'] = self.newly_activated
 
@@ -387,7 +498,8 @@ class BrowserSession:
             self.logger('>>> 开始浏览器阶段%s: %s' % (prefix, phase))
             try:
                 r = execute_single_browser_phase(phase, self.name, self.cdp, self.pr, self.ch, self.bc, self.config, self.logger,
-                                                 token=self.token, proxy=self.proxy)
+                                                 token=self.token, proxy=self.proxy,
+                                                 route_override=route_override)
                 results[phase] = r
                 self.logger('<<< 浏览器阶段%s %s 完成: %s' % (prefix, phase, r))
             except Exception as ex:
@@ -398,13 +510,20 @@ class BrowserSession:
                 if cur_tid:
                     self.ch.cleanup_extra_tabs(keep_tab_id=cur_tid)
 
+                # 埋点: 本阶段 navigate 增量(整轮总数在 runner 收尾打印)
+                try:
+                    from msr import browser as _br
+                    _st_nav = _br.nav_stats()
+                    _delta = _st_nav['count'] - getattr(self, '_nav_seen', 0)
+                    self._nav_seen = _st_nav['count']
+                    self.logger('[埋点] 本阶段 navigate +%d 次(累计 %d 次)' % (_delta, _st_nav['count']))
+                except Exception:
+                    pass
+
                 if phase != phases[-1]:
-                    from msr import settings as S
-                    st_cfg = S.load_settings()
-                    fast_mode = bool(st_cfg.get('schedule', {}).get('fast_mode', False))
-                    s_min = 2 if fast_mode else int(st_cfg.get('schedule', {}).get('inter_stage_wait_min', 3)) * 60
-                    s_max = 5 if fast_mode else int(st_cfg.get('schedule', {}).get('inter_stage_wait_max', 5)) * 60
-                    wait_stage = random.uniform(s_min, s_max)
+                    # 2026-11-11: 控制台"阶段间过渡等待"参数取消, 代码内固定为随机 30~60 秒
+                    # (原 3~5 分钟可调)
+                    wait_stage = stage_wait_seconds()
                     self.logger('阶段过渡: 等待 %.1f 秒后进入下一阶段...' % wait_stage)
                     time.sleep(wait_stage)
 
@@ -430,7 +549,8 @@ class BrowserSession:
             self.logger('已完全关闭浏览器并释放当前账号 Profile 与系统内存')
 
 
-def run_browser_session(name, phases, token, pr, profile_path, config, proxy=None, cdp_port=None):
+def run_browser_session(name, phases, token, pr, profile_path, config, proxy=None, cdp_port=None,
+                        route_override=None):
     """单浏览器会话: 起独立 profile headless chromium -> 注入账号专属指纹与 cookie -> 连续执行所有浏览器阶段 -> 彻底终结。
 
     返回 dict: {phase: result}。
@@ -438,12 +558,8 @@ def run_browser_session(name, phases, token, pr, profile_path, config, proxy=Non
     sess = BrowserSession(name, token, pr, profile_path, config, proxy=proxy, cdp_port=cdp_port)
     try:
         sess.start()
-        return sess.run_phases(phases)
+        return sess.run_phases(phases, route_override=route_override)
     finally:
         sess.close()
 
 
-def run_browser_phase(name, phase, token, pr, profile_path, config, proxy=None, cdp_port=None):
-    """单阶段调用封装(兼容历史与独立调试)。"""
-    res = run_browser_session(name, [phase], token, pr, profile_path, config, proxy=proxy, cdp_port=cdp_port)
-    return res.get(phase, '未执行')
