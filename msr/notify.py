@@ -3,6 +3,7 @@
 配置位于 $MSR_HOME/settings.json 中的 notify 节点。
 """
 import json
+import time
 import urllib.parse
 import urllib.request
 
@@ -85,14 +86,28 @@ def _tg(tg, title, text):
     if token.startswith('bot') and ':' in token:
         token = token[3:]
     url = f'https://api.telegram.org/bot{token}/sendMessage'
-    req = urllib.request.Request(url, data=json.dumps({
+    body = json.dumps({
         'chat_id': chat_id,
         'text': f'*{title}*\n{text}',
         'parse_mode': 'Markdown'
-    }).encode(), headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        if resp.status == 200:
-            print('[notify] Telegram 推送成功', flush=True)
+    }).encode()
+    # 2026-11-16 事故：某 US 号的 +705 报告推送撞上 Telegram 502，一次失败即丢，用户完全不知道。
+    # 通知是唯一出口，必须重试；三次都失败才抛错并明确标出"报告未送达"。
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status == 200:
+                    print('[notify] Telegram 推送成功%s' % ('' if attempt == 1 else '(第%d次尝试)' % attempt),
+                          flush=True)
+                    return
+            last_err = 'HTTP %s' % resp.status
+        except Exception as ex:
+            last_err = str(ex)[:80]
+        if attempt < 3:
+            time.sleep(2 * attempt)
+    print('[notify] !!! Telegram 推送失败(已重试3次, 报告未送达): %s' % last_err, flush=True)
 
 
 def _wh(wh, payload):

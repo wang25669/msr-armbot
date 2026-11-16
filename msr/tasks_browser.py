@@ -1243,6 +1243,45 @@ def phase_quests(name, cdp, pr, ch=None, budget_seconds=1500, log=print, proxy=N
                             c2 = ch.attach({'id': target_tid, 'webSocketDebuggerUrl': f'ws://127.0.0.1:{ch.port}/devtools/page/{target_tid}'})
                             time.sleep(2)
                             scroll_human(c2)
+                            # 领取类步骤的完整流程（2026-11-16 实测某 US 号的 Duolingo 卡）：
+                            #   步骤链接 -> /redeem/sku/<id> 领取页 -> 页内主按钮"立即兑换"
+                            #   -> 弹窗「兑换奖励 … 积分 0 … [关闭][取消][下一步]」
+                            # 判定只用元素属性/位置，不做文案匹配：
+                            #   · 弹窗存在时，主操作 = 弹窗内**最后一个** button（约定位置，关闭/取消在前）
+                            #     若它是禁用态(disabled/aria-disabled/data-disabled) -> 记明原因并放弃，
+                            #     绝不去点"取消"把弹窗关掉（上一版按"最后一个启用按钮"误点取消，来回空转）
+                            #   · 无弹窗时，主操作 = main 内第一个启用 button
+                            if '/redeem/' in str(step_href):
+                                for _round in range(4):
+                                    _hit = ev(c2, """(() => {
+                                      const ok = (el) => !(el.disabled === true)
+                                        && el.getAttribute("aria-disabled") !== "true"
+                                        && !el.hasAttribute("data-disabled")
+                                        && getComputedStyle(el).pointerEvents !== "none"
+                                        && (el.offsetWidth || el.offsetHeight);
+                                      const dlg = document.querySelector("[role=dialog], [aria-modal=true], dialog[open]");
+                                      if (dlg) {
+                                        const btns = Array.from(dlg.querySelectorAll("button, [role=button]"));
+                                        if (!btns.length) return null;
+                                        const prim = btns[btns.length - 1];
+                                        const label = (prim.innerText || prim.value || "").replace(/\\s+/g, " ").trim().slice(0, 24);
+                                        if (!ok(prim)) return "blocked:" + label;
+                                        prim.click();
+                                        return "dialog:" + label;
+                                      }
+                                      const el = Array.from(document.querySelectorAll("main button, main [role=button]")).filter(ok)[0];
+                                      if (!el) return null;
+                                      el.click();
+                                      return "page:" + (el.innerText || el.value || "").replace(/\\s+/g, " ").trim().slice(0, 24);
+                                    })()""")
+                                    if not _hit:
+                                        break
+                                    if str(_hit).startswith('blocked:'):
+                                        log('%s 领取弹窗主按钮为禁用态(服务端不允许领取): %s —— 保持领取中, 不点取消'
+                                            % (q_name, str(_hit)[8:]))
+                                        break
+                                    log('%s 领取流程点击第%d步: %s (领取类步骤, 不消耗积分)' % (q_name, _round + 1, _hit))
+                                    time.sleep(random.uniform(3.5, 5.5))
                             c2.close()
                         except Exception:
                             pass
