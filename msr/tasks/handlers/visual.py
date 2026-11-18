@@ -12,6 +12,7 @@ import random
 
 from msr.tasks import streaks
 import time
+import urllib.parse
 import urllib.request
 
 from msr.browser import ev, navigate, StepError, human_click
@@ -500,6 +501,32 @@ def today_wallpaper():
     return None
 
 
+IMGSRCH_TPL = ('https://www.bing.com/images/search?iss=sbi&FORM=SBIIDP&sbisrc=UrlPaste'
+               '&q=imgurl:%s')
+
+
+def submit_image_direct(cdp, image, log=print, dwell=20.0):
+    """直接打开「粘贴图片链接」得到的图片搜索 URL，让服务端识别并计入视觉打卡。
+
+    2026-11-18 实测：走首页镜头弹层→粘贴 URL 的旧流程，SG 三个号连续两天 6 轮全 0；
+    而直接访问本函数的 URL，一次即 `progress=1 complete=True`（同一张图、同一个号）。
+    旧流程落页到的是文本搜索结果页（q=<图片描述>&FORM=SBIHMP），服务端不再据此计入；
+    本 URL 是真正的图片搜索（/images/search?iss=sbi&...q=imgurl:<直链>）。
+    """
+    target = IMGSRCH_TPL % urllib.parse.quote(image, safe='')
+    log('视觉直接图片搜索: %s' % target[:90])
+    navigate(cdp, target)
+    # 等图片搜索结果页水合（标题/大图区就绪即可，归因靠 dwell）
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        ready = ev(cdp, """(() => document.readyState === 'complete'
+            && !!(document.querySelector('#detailPage img, .mimg, #mmComponent_images_2 img, [class*=sbi]')))()""")
+        if ready:
+            break
+        time.sleep(1.0)
+    time.sleep(dwell)
+
+
 def run(name, cdp, pr, log=print, used_path=None, max_attempts=None, ch=None):
     """视觉搜索任务执行。优先激活连续打卡，识图落页归因。"""
     # P1: 尝试轮数来自 visual.submit_rounds
@@ -558,7 +585,13 @@ def run(name, cdp, pr, log=print, used_path=None, max_attempts=None, ch=None):
 
     for i in range(max_attempts):
         try:
-            submit_image(cdp, img, entry, log=log, ch=ch)
+            # 主路径: 直接图片搜索 URL（2026-11-18 起旧"镜头+粘贴"流程在 SG 号上不再计分，
+            # 直接 URL 一次计分；旧流程保留为直连失败的兜底）
+            try:
+                submit_image_direct(cdp, img, log=log)
+            except Exception as ex_direct:
+                log('视觉直接搜索异常: %s, 回退镜头粘贴流程' % str(ex_direct)[:70])
+                submit_image(cdp, img, entry, log=log, ch=ch)
 
             # 回读状态确认 (多次回读以吸收网络端延迟与服务端统计延迟)
             st2 = None
